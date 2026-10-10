@@ -32,16 +32,40 @@ between macros only through generated code. The pipeline:
    tt-munching).
 
 The courier `macro_rules!` never interprets anything; it is a dumb token
-courier with exactly one grammar rule.
+courier with exactly one grammar rule (`($($t:tt)*)` forwarding), and it
+stays that way: all grammar lives in `__implement_gen!`'s parser, where
+errors get real proc-macro spans. M2's fusion-class tokens travel inside
+the schema token channel; the courier never gains rules.
 
 **Courier path resolution is a cross-crate requirement, not a detail.**
 The stdlib's patterns are defined in the runtime crate but `implement!` is
-invoked in *user* crates, so the courier must be addressable by path:
-`pattern!` emits the courier as `#[doc(hidden)]` and re-exportable from
-the pattern's module (macro_rules + `pub use`), and `implement!` takes the
-pattern as a path (`metagraph_exper::stdlib::Digraph`) and pastes the
-courier name alongside it. This must work in M1 — the stdlib is itself the
-first cross-module consumer.
+invoked in *user* crates, so the courier must be addressable by path. The
+mechanics below were verified end to end on edition 2024 (2026-10 review):
+
+- Plain `macro_rules!` + `pub use` is not re-exportable cross-crate
+  (E0364). The courier needs `#[macro_export]`, which anchors it at the
+  *defining crate's root* macro namespace — so pattern names must be
+  unique crate-wide. `pattern!` also emits `#[doc(hidden)]
+  #[allow(unused_imports)] pub use __metagraph_pattern_Digraph;`
+  (textually after the macro) in the pattern's module, making the courier
+  addressable as `metagraph_exper::stdlib::__metagraph_pattern_Digraph`.
+- The runtime crate root carries `extern crate self as metagraph_exper;`
+  so generated absolute paths resolve inside the runtime crate itself
+  (the stdlib is the first consumer; E0433 otherwise). Proc-macro output
+  cannot use `$crate`, so users who rename the dependency need a
+  documented escape hatch: resolve via `proc-macro-crate`, plus a
+  `crate = ...` override in `implement!`.
+- The runtime crate re-exports `#[doc(hidden)] pub use
+  metagraph_exper_macros::__implement_gen;` — proc macros are not
+  reachable through transitive dependencies.
+- `implement!` takes the pattern as a path whose last segment must be a
+  plain ident (reject generics with a targeted error) and pastes the
+  courier name alongside it. A single-segment path requires the courier
+  to be in scope; detect that case and emit "import the pattern's
+  module" rather than leaking the mangled courier name.
+
+This must work in M1 — the stdlib is itself the first cross-module
+consumer.
 
 ## Trait identity (decided 2026-10)
 
@@ -57,6 +81,13 @@ single-arrow patterns) a non-event.
 A single-arrow `pattern!` with no instantiation source is the root that
 declares a fresh trait; users may define their own root arrows the same
 way the stdlib does.
+
+Markers are scoped per pattern instance and re-minted by
+`compose_pattern!` per composition instance (decided 2026-10): fusing two
+instances of one pattern yields distinct markers, so diamond instantiation
+produces two impls under two markers, never a conflicting impl. This rule
+is fixed now, in M1, because M1's codegen defines the marker namespace
+that `compose_pattern!` inherits.
 
 ## `pattern!` syntax (M1 subset)
 
@@ -86,7 +117,13 @@ pattern! {
   inherit them). Keyed partial arrives in M2.
 - Derivation: `:= union(a, b)` over two sibling `many` arrows with the
   same self and associated types. Derived arrows instantiate a root trait
-  like any arrow but are never bound to a backing.
+  like any arrow but are never bound to a backing. The blanket
+  `impl<T> Edges for T` in the reference `src/traits.rs` does not survive
+  marker-genericity (unconstrained marker parameters, E0207), so derived
+  arrows get generated per-instantiation impls with their own markers
+  (decided 2026-10): uniform with every other arrow instantiation,
+  single-marker qualification spellings, and a store may hand-optimize
+  its derived arrow. The blanket is deleted when `traits.rs` is retired.
 - Entity unification by name within a block is composition-lite: the same
   mechanism M2's `compose_pattern!` generalizes across instances.
 
@@ -133,9 +170,13 @@ e.target();                      // -> Node handle
 n.edges();                       // derived: out ++ in, self-loops twice
 ```
 
-Handles implement `Eq`/`Hash` by store pointer + index (as today).
-Markers are per-arrow unit structs in a `digraph::markers` module; with a
-single instance of each arrow, method calls never need qualification.
+Handles implement `Eq`/`Hash` by store pointer + index path (a single
+index at M1 depth). Markers are per-arrow-instantiation unit structs
+named after the arrow, one module per pattern instance:
+`digraph::markers::OutEdges` here, `hierarchy::markers::outer::OutEdges`
+for composed patterns in M2 — module paths, never name concatenation.
+With a single instance of each arrow, method calls never need
+qualification.
 
 `algo::bfs`/`dfs` gain marker parameters, inferred at call sites:
 
@@ -180,7 +221,10 @@ where
 - Expanded code is boring: no type the user can't name, no trait bound not
   traceable to an arrow.
 - `bfs`/`dfs` compile against the generated traits without marker
-  annotations at call sites.
+  annotations at call sites. This holds while each handle carries at most
+  one impl of each trait; it expires by design in M2, where fused handles
+  carry several and call sites use partial turbofish
+  (`bfs::<_, _, markers::outer::OutEdges, _>(h)`).
 
 ## Risks specific to M1
 

@@ -50,6 +50,11 @@ they pay for themselves in error quality alone.
   the trait-identity invariant, decided in M1), so this step is small:
   re-express it via `compose_pattern!` instead of inline instantiation,
   with zero user-visible change (the M1 tests are the regression suite).
+  If degenerate composition turns out to produce byte-identical output to
+  inline instantiation, say so and drop the ceremony.
+- `union` is multiset-sum, not set union (self-loops appear twice — that
+  is contract, not accident). Consider renaming (`chain`, `sum`) before
+  the stdlib freezes the vocabulary.
 - `Subgraph`, `EdgeChain`, `Bipartite`, `Hierarchy` ship as library
   patterns users compose, per the original vision: the toolkit's language
   defines its own standard library. Candidate root arrows discovered in M2
@@ -59,11 +64,15 @@ they pay for themselves in error quality alone.
 
 - How much of a backing's insert hook is code vs. protocol description
   (can the DSL avoid arbitrary Rust in hooks? probably not — hygiene and
-  spans need care).
+  spans need care). Hygiene of user idents in hook bodies forwarded
+  through macro layers is unverified; prototype it before committing to
+  the DSL shape.
 - Whether cost hints are numbers, symbols (`cache_friendly`, `compact`),
   or deferred entirely.
-- Does CSR's two-phase construction require stores to have a `freeze`
-  notion, and is that per-store or per-backing?
+- CSR's two-phase construction maps onto the builder boundary (epic
+  invariant 5): accumulate adjacency during the build, compact to ranges
+  at flush. Freeze is per-store — the whole store flushes at once — and
+  backings declare their phase requirements via constraint annotations.
 
 ## Depends on
 

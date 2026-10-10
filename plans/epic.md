@@ -30,18 +30,33 @@ all the same machinery applied to bigger piles of arrows.
    across implementations because trait identity comes from the arrow
    pattern, not the store.
 3. **Markers disambiguate.** Generated traits are generic over a marker per
-   arrow instance. Unqualified method calls resolve when unique; genuine
-   ambiguity (two instances of the same arrow on one fused entity) requires
-   qualification.
-4. **Fusion is colocation.** Is-also means one record, one arena, summed
-   fields. The handle is a hand-rolled wide pointer: store reference plus
-   index, gaining fields only via dereference into nested stores.
-5. **Structural rejection, not semantic laws.** The toolkit rejects
+   arrow instance, scoped per composition instance and named by module path
+   (`hierarchy::markers::outer::OutEdges`), never by name concatenation.
+   Unqualified method calls resolve when unique; on fused entities (two
+   instances of the same arrow on one record) qualification is the norm.
+4. **Fusion has two flavors.** Colocation fusion (`<=>`) is is-also: one
+   record, one arena, summed fields. Reference fusion (`<->`) closes open
+   entities across instances: it unifies id types without merging records,
+   so an arrow targeting the fused entity stores an ordinary id into the
+   other store and runtime multiplicity is unconstrained (many subnodes may
+   reference one inner node). Handles are wide pointers: root store
+   reference plus an index path into nested arenas, gaining fields only via
+   dereference.
+5. **Stores are immutable; construction goes through a builder.** A store
+   is append-only under exclusive ownership while it is being built (M1's
+   `&mut` constructors are the degenerate builder); once handles exist the
+   borrow checker has frozen it, so handle identity by store pointer +
+   index path is sound — a borrowed store cannot move or reallocate.
+   Mutation never touches a live store (see M4): a write-side interface
+   accumulates a change set and flushes it into a new immutable store. No
+   generational arenas; removal is rebuild-without.
+6. **Structural rejection, not semantic laws.** The toolkit rejects
    impossible patterns (fusion cycles without indirection, unclosed open
-   entities, true ambiguity) but does not check semantic constraints
+   entities, colocation classes with conflicting arena placement, true
+   ambiguity) but does not check semantic constraints
    (bipartiteness, acyclicity). Constraints you can't state don't need
    checking — most are expressible by which arrows exist.
-6. **Trait identity lives with the arrow pattern.** Arrows in user patterns
+7. **Trait identity lives with the arrow pattern.** Arrows in user patterns
    *instantiate* single-arrow patterns from the standard library (or another
    library) rather than declaring fresh traits; a single-arrow `pattern!`
    with no instantiation source is the root that owns its trait. Generic
@@ -49,8 +64,10 @@ all the same machinery applied to bigger piles of arrows.
    every pattern that instantiates it. This is decided (2026-10): without
    it, algorithms would not be portable across patterns, and redefining
    `Digraph` as a composition of single-arrow patterns (M3) would silently
-   change trait identity and break them. Ad-hoc arrows are not allowed;
-   the stdlib's arrow set is the shared vocabulary.
+   change trait identity and break them. The stdlib is the shared
+   vocabulary, not a closed set: any crate may declare a root single-arrow
+   pattern the way the stdlib does, and generic algorithms are portable
+   exactly to the extent that patterns agree on roots.
 
 ## Milestones
 
@@ -59,17 +76,31 @@ all the same machinery applied to bigger piles of arrows.
 | 1 | `pattern!` + `implement!`, base digraph | [full](milestone-1-pattern-and-implement.md) |
 | 2 | Composition, fusion, keyed arrows, subgraph pattern | [partial](milestone-2-composition.md) |
 | 3 | User-facing backings, stdlib refactor | [vague](milestone-3-backings-and-stdlib.md) |
-| 4+ | Selection, mutation, interop — see below | this file |
+| 4 | Write-side builders, mutation by rebuild | this file |
+| 5+ | Selection, interop — see below | this file |
 
-## Milestone 4+ (purposely vague)
+## Milestone 4 (direction): write-side builders, mutation by rebuild
+
+Stores are immutable once built (invariant 5). M4 adds the write side:
+
+- Generated mutation interfaces are defined the same way as the read-side
+  accessors — one method per arrow, mirroring the trait shape — but they
+  accumulate a change set. Nothing mutates a live store.
+- Flushing the change set builds a new immutable store: insert hooks run,
+  indexes are rebuilt, referential integrity is validated (every endpoint
+  and key id exists), and induction rules fire (adding a subedge induces
+  its endpoints' subnodes).
+- Removal is rebuild-without; no generational arenas, no index patching.
+  Old stores stay alive as long as their handles borrow them.
+- Cost model: a flush is a full rebuild. Right for these graphs; revisit
+  (persistent structures, chunked arenas) only if stores get large.
+
+## Milestone 5+ (purposely vague)
 
 Threads we can see from here but haven't scoped:
 
 - **Automatic backing selection**: backings declare applicability
   constraints and cost hints; `implement!` picks, user overrides by name.
-- **Mutation**: stores are append-only through M3. Removal requires
-  generation-counter ids, backing removal hooks, and a story for index
-  maintenance. Generational arenas are the likely shape.
 - **Interop backend**: implement the six base arrows over petgraph (or a
   remote graph) to prove the traits are backend-portable, not arena-specific.
 - **Derived arrows beyond union**: inverse of a total arrow, transitive
@@ -86,6 +117,12 @@ Threads we can see from here but haven't scoped:
   real spans; keep courier-macro grammars rigid and dumb. Compile-fail
   behavior (impossible bindings, impossible patterns) is tested with
   `trybuild` from M1 onward — validation that isn't tested doesn't exist.
+- **Schema-token spans degrade through the courier.** User tokens keep
+  their spans end to end; schema tokens embedded in the courier are
+  re-spanned to the `implement!` call site. Schema-side errors must quote
+  the offending tokens in the message text rather than relying on spans,
+  and trybuild `.stderr` files will carry expansion-chain notes (pin them
+  per toolchain).
 - **Debuggability**: users will need `cargo expand` to read generated code.
   Keep generated code boring: no cleverness, consistent names, doc comments
   carrying the arrow that produced each item.
