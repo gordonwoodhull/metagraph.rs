@@ -103,8 +103,8 @@ pattern! {
         entities: G, N, E;
         arrows {
             nodes:     stdlib::Nodes,    G -> N;
-            out_edges: stdlib::OutEdges, N -> E;
-            in_edges:  stdlib::InEdges,  N -> E;
+            out_edges: stdlib::OutEdges, N -> E, by source;
+            in_edges:  stdlib::InEdges,  N -> E, by target;
             source:    stdlib::Source,   E -> N;
             target:    stdlib::Target,   E -> N;
             edges:     stdlib::Edges,    N -> E := union(out_edges, in_edges);
@@ -115,6 +115,18 @@ pattern! {
 
 - Cardinalities: `one`, `many` (declared on the root arrow; instantiations
   inherit them). Keyed partial arrives in M2.
+- Membership of a `many` arrow is **primitive or derived**. Primitive
+  membership is asserted directly (`tags: Post -> Tag, many`) and gives
+  the builder an explicit `insert_<arrow>(a, b)` operation. Derived
+  membership names the total `one` arrow that determines it
+  (`out_edges: N -> E, by source`): the determining field lives on the
+  target record, the arrow's insert hooks fire from constructors (and, in
+  M4, from `set_`), and no insert operation is generated — membership can
+  never contradict the field. `by` is a property of the instantiation,
+  not the root trait: the stdlib root declares a bare capability. The
+  determining arrow must be total, so membership is always defined.
+  (`union` is a different axis: it derives a *read* from sibling reads,
+  not membership from a field.)
 - Derivation: `:= union(a, b)` over two sibling `many` arrows with the
   same self and associated types. Derived arrows instantiate a root trait
   like any arrow but are never bound to a backing; they get generated
@@ -154,7 +166,9 @@ Rules:
   the backing's contract, not an accident.
 - Generated `add_<entity>` constructors take one argument per total `one`
   arrow originating at that entity (`add_edge(source, target)` falls out of
-  the schema), then run each bound backing's insert hook.
+  the schema), then run each bound backing's insert hook — including the
+  hooks of `many` arrows derived `by` those `one` arrows, which is how
+  `add_edge` maintains `out_edges` and `in_edges`.
 
 ## Generated API (contract with the tests)
 

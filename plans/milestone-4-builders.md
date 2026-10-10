@@ -95,11 +95,19 @@ trait implemented by the store's transaction type.
 | entity | root accessor, handles | `add_<entity>(<total one-arrow args>) -> Ref<E>` |
 | total `one` | `e.target()` | constructor argument of `add_<entity>` |
 | optional `one` | `e.payload() -> Option<_>` | `set_<arrow>(Ref<A>, Ref<B>)` |
-| `many` | `n.out_edges()` | `insert_<arrow>(Ref<A>, Ref<B>)` |
+| `many`, primitive | `p.tags()` | `insert_<arrow>(Ref<A>, Ref<B>)` — membership asserted directly |
+| `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
 | keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` — function semantics; duplicate key is a flush error |
 
 Derived arrows (`:= union`) have no write side, exactly as they have no
-backing. Markers are the same per-instance markers as the read side, so a
+backing. During flush replay, a derived `many` arrow's hooks fire when
+the determining field is replayed (constructor or `set_` op), so replay
+order needs no special casing for membership. Primitive insertions into a
+derived relation are impossible by construction — the method does not
+exist — which is what the schema's `by` declaration buys (M1 syntax
+section).
+
+Markers are the same per-instance markers as the read side, so a
 generic algorithm can bound on `OutEdges<M>` and `InsertOutEdges<M>`
 together — e.g. a graph-transform pass that reads one store and stages
 another without knowing either pattern.
