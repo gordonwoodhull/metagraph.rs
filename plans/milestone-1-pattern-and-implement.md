@@ -40,7 +40,7 @@ the schema token channel; the courier never gains rules.
 **Courier path resolution is a cross-crate requirement, not a detail.**
 The stdlib's patterns are defined in the runtime crate but `implement!` is
 invoked in *user* crates, so the courier must be addressable by path. The
-mechanics below were verified end to end on edition 2024 (2026-10 review):
+mechanics:
 
 - Plain `macro_rules!` + `pub use` is not re-exportable cross-crate
   (E0364). The courier needs `#[macro_export]`, which anchors it at the
@@ -67,7 +67,7 @@ mechanics below were verified end to end on edition 2024 (2026-10 review):
 This must work in M1 — the stdlib is itself the first cross-module
 consumer.
 
-## Trait identity (decided 2026-10)
+## Trait identity
 
 Trait identity belongs to single-arrow patterns, not to the pattern that
 uses the arrow. The stdlib declares six single-arrow patterns, each the
@@ -83,11 +83,11 @@ declares a fresh trait; users may define their own root arrows the same
 way the stdlib does.
 
 Markers are scoped per pattern instance and re-minted by
-`compose_pattern!` per composition instance (decided 2026-10): fusing two
-instances of one pattern yields distinct markers, so diamond instantiation
-produces two impls under two markers, never a conflicting impl. This rule
-is fixed now, in M1, because M1's codegen defines the marker namespace
-that `compose_pattern!` inherits.
+`compose_pattern!` per composition instance: fusing two instances of one
+pattern yields distinct markers, so diamond instantiation produces two
+impls under two markers, never a conflicting impl. M1's codegen defines
+the marker namespace that `compose_pattern!` inherits, so the rule lives
+here.
 
 ## `pattern!` syntax (M1 subset)
 
@@ -117,13 +117,13 @@ pattern! {
   inherit them). Keyed partial arrives in M2.
 - Derivation: `:= union(a, b)` over two sibling `many` arrows with the
   same self and associated types. Derived arrows instantiate a root trait
-  like any arrow but are never bound to a backing. The blanket
-  `impl<T> Edges for T` in the reference `src/traits.rs` does not survive
-  marker-genericity (unconstrained marker parameters, E0207), so derived
-  arrows get generated per-instantiation impls with their own markers
-  (decided 2026-10): uniform with every other arrow instantiation,
-  single-marker qualification spellings, and a store may hand-optimize
-  its derived arrow. The blanket is deleted when `traits.rs` is retired.
+  like any arrow but are never bound to a backing; they get generated
+  per-instantiation impls with their own markers, uniform with every other
+  arrow instantiation (a blanket impl cannot name the marker parameters;
+  per-instantiation impls keep qualification spellings single-marker and
+  let a store hand-optimize a derived arrow). The reference blanket
+  `impl<T> Edges for T` in `src/traits.rs` is deleted when `traits.rs` is
+  retired.
 - Entity unification by name within a block is composition-lite: the same
   mechanism M2's `compose_pattern!` generalizes across instances.
 
@@ -222,8 +222,8 @@ where
   traceable to an arrow.
 - `bfs`/`dfs` compile against the generated traits without marker
   annotations at call sites. This holds while each handle carries at most
-  one impl of each trait; it expires by design in M2, where fused handles
-  carry several and call sites use partial turbofish
+  one impl of each trait; in M2 fused handles carry several, and call
+  sites there use partial turbofish
   (`bfs::<_, _, markers::outer::OutEdges, _>(h)`).
 
 ## Risks specific to M1

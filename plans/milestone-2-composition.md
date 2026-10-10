@@ -3,8 +3,8 @@
 **Goal**: `compose_pattern!` works, and the edge-induced subgraph pattern —
 the motivating higher-order graph — is expressible and testable.
 
-Specification level: partial. Syntax sketches below are directional, not
-final; M1 will teach us things about the courier grammar that reshape them.
+Specification level: partial. Syntax sketches are directional, not final;
+M1 will reshape details.
 
 ## In scope
 
@@ -22,6 +22,10 @@ compose_pattern! {
     }
 }
 ```
+
+`compose_pattern!` emits a new abstract *pattern* — composable further,
+implementable many times — and `implement!` stays the only place backings
+bind.
 
 Fusion has two flavors (epic invariant 4):
 
@@ -67,10 +71,10 @@ closed by reference fusion at composition time. `Subgraph` is defined
 *over* a main graph without naming it. Open entities may only be arrow
 *targets* within their declaring pattern (closing by `<->` merges no
 records, so a sourced arrow's field would have no home); open-as-source
-with colocation closure and constructor merging is deferred. Per the trait-identity invariant, every arrow
-instantiates a root arrow pattern; `Subgraph`'s novel arrows (`main_node`,
-`subnode`, …) are declared as their own single-arrow roots, either in the
-stdlib or alongside:
+with colocation closure and constructor merging is deferred. Per the
+trait-identity invariant, every arrow instantiates a root arrow pattern;
+`Subgraph`'s novel arrows (`main_node`, `subnode`, …) are declared as
+their own single-arrow roots, either in the stdlib or alongside:
 
 ```rust
 pattern! {
@@ -136,15 +140,15 @@ Composed patterns instantiate the same arrow more than once on fused
 entities. Markers are re-minted per composition instance (M1 trait-
 identity section) and named by module path
 (`hierarchy::markers::outer::OutEdges`), so two instances of one pattern
-never produce conflicting impls — the diamond case is two markers, not
-E0119. Unqualified calls on fused entities simply fail to infer (E0283);
-the usable spellings are partial turbofish
+never produce conflicting impls — the diamond case is two markers, not a
+conflicting impl. Unqualified calls on fused entities simply fail to
+infer; the usable spellings are partial turbofish
 (`bfs::<_, _, markers::outer::OutEdges, _>(h)`) and full path
 (`<Handle as Nodes<markers::outer::OutEdges>>::nodes(&g)`). Instance-
-scoped inherent aliases (`g.nodes_outer()`) remain under consideration as
-sugar, under a hard rule: an inherent alias never shares a name with an
-arrow method (inherent methods silently win resolution over trait
-methods).
+scoped inherent aliases (`g.nodes_outer()`) may be added as sugar if
+qualification proves too ugly, under a hard rule: an inherent alias never
+shares a name with an arrow method (inherent methods silently win
+resolution over trait methods).
 
 ### Structural validation (first checks)
 
@@ -163,10 +167,10 @@ methods).
 - Field contributions must have a home after placement: reject a backing
   whose fields target a record that lives in another instance's arena,
   unreachable from the store being generated.
-- Documented hazard, not a check: intrusive link fields are sound only
-  when each object belongs to at most one relation instance (e.g. chains
-  must partition their elements). Runtime data is invisible to the schema,
-  so this becomes a backing constraint annotation in M3.
+- Not a check, but documented: intrusive link fields are sound only when
+  each object belongs to at most one relation instance (e.g. chains must
+  partition their elements). Runtime data is invisible to the schema, so
+  this becomes a backing constraint annotation in M3.
 
 Marker collision is not a check: per-instance re-minting makes it
 impossible by construction.
@@ -175,10 +179,9 @@ impossible by construction.
 
 - Edge-induced subgraph: build a main graph, build subgraphs through the
   builder, check `subnode`/`main_node` round-trips, conditional lookups
-  return `None` for non-members. The builder induces subnodes from subedge
-  endpoints (upsert deduplicated via the hash index); whether induction is
-  declared in the schema or is a builder convention is an M4 write-side
-  question — M2 tests may drive the builder primitives directly.
+  return `None` for non-members. M2 tests drive the builder primitives
+  directly (insert subedge, ensure subnode); declarative induction arrives
+  with M4's write side.
 - Hierarchy: outer graph whose nodes contain subgraphs of the inner graph;
   traverse both levels.
 - Bipartite graph as a plain `pattern!` (two node sorts, arrows picked
@@ -189,24 +192,20 @@ impossible by construction.
 - Edge-chain refinement (`outer.E <=> chain.Chain`, `chain.Elem <=>
   inner.E`) if the milestone is going well; otherwise deferred to M3.
 
-## Open questions going in
+## Deferred details
+
+Pinned down during the milestone, not before:
 
 - How fusion classes are named in generated docs.
-- Whether `subnode`'s key parameter is restricted to total `one` arrows
-  originating nearby, or any entity in scope.
-- Qualification ergonomics: partial turbofish and full path work; whether
-  per-instance inherent aliases (`g.nodes_outer()`) earn their keep as
-  sugar.
-- Root handles for composed patterns: with two unfused graph entities
-  (`outer.G`, `inner.G`), what does the store's entry-point API look like —
-  one accessor per root entity, or handles constructed directly from ids?
-- Derivations (`:= union`) are scoped to the instance that declares them;
-  whether derived arrows spanning instances are ever needed is unknown.
-  (The per-instance scoping is currently load-bearing: it keeps union's
-  sibling rule away from fusion-collapsed arrow sets.)
-- `compose_pattern!` emits a new abstract *pattern* — composable further,
-  implementable many times — and `implement!` stays the only place
-  backings bind. (Promoted from assumption to decision, 2026-10.)
+- The key-entity restriction for keyed arrows: any entity in scope, or
+  only entities reachable via nearby total `one` arrows.
+- The store entry-point API for composed patterns with several unfused
+  root entities (`outer.G`, `inner.G`): one accessor per root entity, or
+  handles constructed directly from ids.
+- Derived arrows are scoped to the instance that declares them;
+  cross-instance derivations are out of scope. (The per-instance scoping
+  is load-bearing: it keeps union's sibling rule away from
+  fusion-collapsed arrow sets.)
 
 ## Depends on
 

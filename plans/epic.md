@@ -8,9 +8,10 @@ A Rust toolkit where graph *types* are assembled from atomic pieces:
   relations ("capabilities") with cardinalities (`one`, `many`, keyed
   partial). No storage. Traits are generated from arrows.
 - **`compose_pattern!`** glues pattern instances together by declaring
-  entity fusions (`<=>`, symmetric and transitive): the fused record carries
-  the summed capabilities of every member. This is a pushout over type
-  graphs. Optional containment uses ordinary pointers instead of fusion.
+  entity fusions: colocation (`<=>`, one record, summed capabilities — a
+  pushout over type graphs) and reference (`<->`, open-entity closure by id
+  unification). Optional containment uses ordinary pointers instead of
+  fusion.
 - **`implement!`** binds each arrow of a (possibly composed) pattern to a
   *backing* — a storage strategy contributing fields, mutation hooks, and an
   access protocol — and emits the concrete store, handles, and trait impls.
@@ -61,13 +62,13 @@ all the same machinery applied to bigger piles of arrows.
    library) rather than declaring fresh traits; a single-arrow `pattern!`
    with no instantiation source is the root that owns its trait. Generic
    algorithms are written against the stdlib arrow's trait and apply to
-   every pattern that instantiates it. This is decided (2026-10): without
-   it, algorithms would not be portable across patterns, and redefining
-   `Digraph` as a composition of single-arrow patterns (M3) would silently
-   change trait identity and break them. The stdlib is the shared
-   vocabulary, not a closed set: any crate may declare a root single-arrow
-   pattern the way the stdlib does, and generic algorithms are portable
-   exactly to the extent that patterns agree on roots.
+   every pattern that instantiates it. Without this, algorithms would not
+   be portable across patterns, and redefining `Digraph` as a composition
+   of single-arrow patterns (M3) would silently change trait identity and
+   break them. The stdlib is the shared vocabulary, not a closed set: any
+   crate may declare a root single-arrow pattern the way the stdlib does,
+   and generic algorithms are portable exactly to the extent that patterns
+   agree on roots.
 
 ## Milestones
 
@@ -114,9 +115,10 @@ Threads we can see from here but haven't scoped:
 
 - **Macro error messages** are the UX weak point of the whole design.
   Mitigation: parse and validate at the outermost proc-macro layer with
-  real spans; keep courier-macro grammars rigid and dumb. Compile-fail
-  behavior (impossible bindings, impossible patterns) is tested with
-  `trybuild` from M1 onward — validation that isn't tested doesn't exist.
+  real spans; courier macros carry a single token-forwarding rule so all
+  grammar errors come from the proc macro. Compile-fail behavior
+  (impossible bindings, impossible patterns) is tested with `trybuild`
+  from M1 onward — validation that isn't tested doesn't exist.
 - **Schema-token spans degrade through the courier.** User tokens keep
   their spans end to end; schema tokens embedded in the courier are
   re-spanned to the `implement!` call site. Schema-side errors must quote

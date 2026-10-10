@@ -28,51 +28,48 @@ Success criterion: the four built-ins are *re-implemented* in the DSL and
 the M1/M2 test suites pass unchanged. If the DSL can't express them, the
 DSL is wrong, not the tests.
 
+Hooks contain arbitrary Rust; the DSL will not avoid that. The hygiene of
+user idents in hook bodies forwarded through macro layers must be
+prototyped before the `backing!` grammar is fixed.
+
 ### A second `many` backing
 
 CSR-style range adjacency (build in two passes, iterate a slice) — chosen
 because it has genuinely different tradeoffs (mutation during construction
 vs. after) and forces the backing interface to say something about build
-phases. This is the first moment backing *choice* is real, and it motivates:
+phases. Its two-phase construction maps onto the builder boundary (epic
+invariant 5): accumulate adjacency during the build, compact to ranges at
+flush; freeze is per-store, since the whole store flushes at once. This is
+the first moment backing *choice* is real, and it motivates:
 
 ### Constraint and cost annotations
 
 Backings declare what they require (local arenas on both ends, append-only
 phase, `Eq + Hash` ids) and what they cost (bytes per record, iteration
 order guarantees). `implement!` gains the ability to reject an
-inapplicable backing with a good message. Full automatic selection is
-possible here but not required — the annotations are the prerequisite, and
-they pay for themselves in error quality alone.
+inapplicable backing with a good message. The intrusive-ownership hazard
+from M2 (link fields are sound only when each object belongs to one
+relation instance) is expressed here as a constraint annotation. Full
+automatic selection is possible here but not required — the annotations
+are the prerequisite, and they pay for themselves in error quality alone.
+Cost hints (numbers vs. symbols such as `cache_friendly`, `compact`) are
+decided when the annotations exist.
 
 ### Standard library refactor
 
 - `Digraph` already instantiates the six single-arrow root patterns (per
-  the trait-identity invariant, decided in M1), so this step is small:
-  re-express it via `compose_pattern!` instead of inline instantiation,
-  with zero user-visible change (the M1 tests are the regression suite).
-  If degenerate composition turns out to produce byte-identical output to
+  the trait-identity invariant), so this step is small: re-express it via
+  `compose_pattern!` instead of inline instantiation, with zero
+  user-visible change (the M1 tests are the regression suite). If
+  degenerate composition turns out to produce byte-identical output to
   inline instantiation, say so and drop the ceremony.
 - `union` is multiset-sum, not set union (self-loops appear twice — that
-  is contract, not accident). Consider renaming (`chain`, `sum`) before
-  the stdlib freezes the vocabulary.
+  is contract, not accident). If it is renamed (`chain`, `sum`), this
+  milestone is the last cheap moment.
 - `Subgraph`, `EdgeChain`, `Bipartite`, `Hierarchy` ship as library
   patterns users compose, per the original vision: the toolkit's language
   defines its own standard library. Candidate root arrows discovered in M2
   (`EdgesOf`, `MainNode`, …) get promoted into the stdlib here.
-
-## Open questions
-
-- How much of a backing's insert hook is code vs. protocol description
-  (can the DSL avoid arbitrary Rust in hooks? probably not — hygiene and
-  spans need care). Hygiene of user idents in hook bodies forwarded
-  through macro layers is unverified; prototype it before committing to
-  the DSL shape.
-- Whether cost hints are numbers, symbols (`cache_friendly`, `compact`),
-  or deferred entirely.
-- CSR's two-phase construction maps onto the builder boundary (epic
-  invariant 5): accumulate adjacency during the build, compact to ranges
-  at flush. Freeze is per-store — the whole store flushes at once — and
-  backings declare their phase requirements via constraint annotations.
 
 ## Depends on
 
