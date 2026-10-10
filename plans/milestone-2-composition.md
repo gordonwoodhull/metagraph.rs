@@ -30,27 +30,41 @@ compose_pattern! {
   fused entity plays every role, possibly vacuously (an atomic node is a
   node whose subgraph is empty). Optionality is *not* fusion — it is an
   ordinary pointer field and stays out of `compose_pattern!`.
+- **Fusion determines arena placement.** An entity fused with a
+  store-bearing entity has its arenas embedded in the host record; unfused
+  entities get root arenas. In the `Hierarchy` example: `inner.N`/`inner.E`
+  arenas live at the root (one shared inner graph), while the `sub` store
+  (SN/SE arenas plus their indexes) lives inside each outer node record.
+  Handles borrow through the nesting; lifetimes are unchanged (one shared
+  borrow of the root store).
 - Runtime multiplicity is not declared here: `sub` appears once at the type
   level; at runtime each outer node owns its own subgraph store, colocated
   in its record.
+- Backings bind per instance: `implement!` on a composed pattern keys the
+  backing block by `instance.arrow` (`outer.out_edges:`,
+  `sub.subnodes:`). Two instances of the same pattern may choose different
+  backings.
 
 ### Open entities
 
 `pattern!` gains the ability to declare entities it does not own, to be
 closed by fusion at composition time. `Subgraph` is defined *over* a main
-graph without naming it:
+graph without naming it. Per the trait-identity invariant, every arrow
+instantiates a root arrow pattern; `Subgraph`'s novel arrows (`main_node`,
+`subnode`, …) are declared as their own single-arrow roots, either in the
+stdlib or alongside:
 
 ```rust
 pattern! {
     Subgraph {
         entities: SG, SN, SE, MN(open), ME(open);
         arrows {
-            subnodes:  SG -> SN, many;
-            subedges:  SG -> SE, many;
-            main_node: SN -> MN, one;
-            main_edge: SE -> ME, one;
-            subnode:   SG -> SN, optional, key(MN);
-            subedge:   SG -> SE, optional, key(ME);
+            subnodes:  stdlib::Nodes,     SG -> SN;
+            subedges:  EdgesOf,           SG -> SE;   // new root; stdlib candidate
+            main_node: MainNode,          SN -> MN;   // local root arrow
+            main_edge: MainEdge,          SE -> ME;   // local root arrow
+            subnode:   SubNode,           SG -> SN, key(MN);
+            subedge:   SubEdge,           SG -> SE, key(ME);
         }
     }
 }
@@ -103,6 +117,14 @@ inherent aliases).
   originating nearby, or any entity in scope.
 - Qualification ergonomics: bare full-path syntax may be too ugly; consider
   generating per-instance inherent methods (`g.nodes_left()`) as sugar.
+- Root handles for composed patterns: with two unfused graph entities
+  (`outer.G`, `inner.G`), what does the store's entry-point API look like —
+  one accessor per root entity, or handles constructed directly from ids?
+- Mutation API for nested stores: handles hold `&store`, so insertion into a
+  node's subgraph needs an `&mut` path through the root store (e.g.
+  `store.subnode_mut(outer_node)`); the shape of this API is undesigned.
+- Derivations (`:= union`) are scoped to the instance that declares them;
+  whether derived arrows spanning instances are ever needed is unknown.
 - Removal: stores remain append-only. The hash index backing makes removal
   conspicuously absent — defer consciously, document loudly.
 - Does `compose_pattern!` emit a new *pattern* (composable further,

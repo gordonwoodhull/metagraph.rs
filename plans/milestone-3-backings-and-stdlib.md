@@ -46,11 +46,14 @@ they pay for themselves in error quality alone.
 
 ### Standard library refactor
 
-- `Digraph` is redefined as a composition of six single-arrow patterns,
+- `Digraph` already instantiates the six single-arrow root patterns (per
+  the trait-identity invariant, decided in M1), so this step is small:
+  re-express it via `compose_pattern!` instead of inline instantiation,
   with zero user-visible change (the M1 tests are the regression suite).
 - `Subgraph`, `EdgeChain`, `Bipartite`, `Hierarchy` ship as library
   patterns users compose, per the original vision: the toolkit's language
-  defines its own standard library.
+  defines its own standard library. Candidate root arrows discovered in M2
+  (`EdgesOf`, `MainNode`, …) get promoted into the stdlib here.
 
 ## Open questions
 

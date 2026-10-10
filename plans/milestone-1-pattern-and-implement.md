@@ -14,9 +14,11 @@ Proc macros cannot read other items' tokens, so schema information travels
 between macros only through generated code. The pipeline:
 
 1. **`pattern!`** (proc macro, parses + validates the schema DSL) emits:
-   - one marker-generic trait per arrow (`pub trait OutEdges<M> { ... }`),
-     with a GAT iterator for `many` arrows, plain associated type for `one`;
-   - one unit marker struct per arrow;
+   - for a root single-arrow pattern: the marker-generic trait it owns
+     (`pub trait OutEdges<M> { ... }`), with a GAT iterator for `many`
+     arrows, plain associated type for `one`;
+   - one unit marker struct per arrow instantiation (per use, not per
+     root — two instantiations of `stdlib::Nodes` get distinct markers);
    - a doc-hidden courier `macro_rules!` (`__metagraph_pattern_Digraph!`)
      embedding the schema as tokens in a rigid grammar. Invoked with a store
      name and backing assignments, it prepends the schema and forwards
@@ -32,28 +34,61 @@ between macros only through generated code. The pipeline:
 The courier `macro_rules!` never interprets anything; it is a dumb token
 courier with exactly one grammar rule.
 
+**Courier path resolution is a cross-crate requirement, not a detail.**
+The stdlib's patterns are defined in the runtime crate but `implement!` is
+invoked in *user* crates, so the courier must be addressable by path:
+`pattern!` emits the courier as `#[doc(hidden)]` and re-exportable from
+the pattern's module (macro_rules + `pub use`), and `implement!` takes the
+pattern as a path (`metagraph_exper::stdlib::Digraph`) and pastes the
+courier name alongside it. This must work in M1 — the stdlib is itself the
+first cross-module consumer.
+
+## Trait identity (decided 2026-10)
+
+Trait identity belongs to single-arrow patterns, not to the pattern that
+uses the arrow. The stdlib declares six single-arrow patterns, each the
+permanent owner of its trait (`Nodes`, `OutEdges`, `InEdges`, `Source`,
+`Target`, `Edges`). Multi-arrow `pattern!` blocks *instantiate* stdlib
+arrows with local entity bindings — they do not declare fresh traits. This
+keeps generic algorithms portable across every pattern that instantiates a
+stdlib arrow, and makes the M3 refactor (Digraph as composition of
+single-arrow patterns) a non-event.
+
+A single-arrow `pattern!` with no instantiation source is the root that
+declares a fresh trait; users may define their own root arrows the same
+way the stdlib does.
+
 ## `pattern!` syntax (M1 subset)
 
 ```rust
+// stdlib: the root arrow patterns (each owns its trait)
+pattern! { Nodes    { entities: G, N; arrows { nodes:     G -> N, many; } } }
+pattern! { OutEdges { entities: N, E; arrows { out_edges: N -> E, many; } } }
+// ... InEdges, Source, Target, Edges
+
+// user side: instantiate stdlib arrows, unifying entities by name
 pattern! {
     Digraph {
         entities: G, N, E;
         arrows {
-            nodes:     G -> N, many;
-            out_edges: N -> E, many;
-            in_edges:  N -> E, many;
-            source:    E -> N, one;
-            target:    E -> N, one;
-            edges:     N -> E, many := union(out_edges, in_edges);
+            nodes:     stdlib::Nodes,    G -> N;
+            out_edges: stdlib::OutEdges, N -> E;
+            in_edges:  stdlib::InEdges,  N -> E;
+            source:    stdlib::Source,   E -> N;
+            target:    stdlib::Target,   E -> N;
+            edges:     stdlib::Edges,    N -> E := union(out_edges, in_edges);
         }
     }
 }
 ```
 
-- Cardinalities: `one`, `many`. (Keyed partial arrives in M2.)
-- Derivation: `:= union(a, b)` over two `many` arrows with the same
-  self-type and associated type. Derived arrows get a trait like any arrow
-  but are never bound to a backing.
+- Cardinalities: `one`, `many` (declared on the root arrow; instantiations
+  inherit them). Keyed partial arrives in M2.
+- Derivation: `:= union(a, b)` over two sibling `many` arrows with the
+  same self and associated types. Derived arrows instantiate a root trait
+  like any arrow but are never bound to a backing.
+- Entity unification by name within a block is composition-lite: the same
+  mechanism M2's `compose_pattern!` generalizes across instances.
 
 ## Backings (built-in, fixed table in the macros crate)
 
@@ -71,8 +106,15 @@ Rules:
   question: no arrow does.)
 - Default bindings: `one` → `field`. `many` arrows must be bound explicitly
   in v1 (`arena` vs `intrusive_list` is a real choice with no safe default).
+- Field contributions may target the self record, the target record, or the
+  store struct itself. No v1 built-in needs store-level fields; the
+  contract allows them so M2's index backings don't require an interface
+  change.
 - Field names are namespaced per arrow (`first_out`, `next_out` for
   `out_edges`), so collisions are impossible by construction.
+- `intrusive_list` iterates in **reverse insertion order** (push-front).
+  The test suite's expected traversal orders depend on this; it is part of
+  the backing's contract, not an accident.
 - Generated `add_<entity>` constructors take one argument per total `one`
   arrow originating at that entity (`add_edge(source, target)` falls out of
   the schema), then run each bound backing's insert hook.
@@ -108,8 +150,9 @@ where
 
 - Convert to a workspace: root package `metagraph-exper` (runtime) +
   `macros/` member `metagraph-exper-macros` (proc-macro).
-- Runtime crate: `algo.rs` (updated signatures), `stdlib.rs` (the
-  `pattern!` invocation for `Digraph` plus re-exports), `arena.rs` kept as
+- Runtime crate: `algo.rs` (updated signatures), `stdlib.rs` (six root
+  single-arrow `pattern!` invocations owning their traits, plus the
+  `Digraph` instantiation block and re-exports), `arena.rs` kept as
   reference until tests are green, then deleted (git retains it).
 - `tests/koenigsberg.rs`: imports and construction updated; assertions
   untouched.
@@ -126,8 +169,10 @@ where
    push-front insert hook in `add_edge`.
 6. Derived `union` arrow (`edges`).
 7. Port `tests/koenigsberg.rs`; green.
-8. `cargo expand` comparison against `arena.rs`; delete `arena.rs`.
-9. Doc pass: crate-level docs explaining the pattern/backing split.
+8. `trybuild` compile-fail tests for `implement!` validation: wrong-
+   cardinality backing, unknown arrow, duplicate binding, missing binding.
+9. `cargo expand` comparison against `arena.rs`; delete `arena.rs`.
+10. Doc pass: crate-level docs explaining the pattern/backing split.
 
 ## Acceptance criteria
 

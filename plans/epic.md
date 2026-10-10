@@ -41,6 +41,16 @@ all the same machinery applied to bigger piles of arrows.
    entities, true ambiguity) but does not check semantic constraints
    (bipartiteness, acyclicity). Constraints you can't state don't need
    checking — most are expressible by which arrows exist.
+6. **Trait identity lives with the arrow pattern.** Arrows in user patterns
+   *instantiate* single-arrow patterns from the standard library (or another
+   library) rather than declaring fresh traits; a single-arrow `pattern!`
+   with no instantiation source is the root that owns its trait. Generic
+   algorithms are written against the stdlib arrow's trait and apply to
+   every pattern that instantiates it. This is decided (2026-10): without
+   it, algorithms would not be portable across patterns, and redefining
+   `Digraph` as a composition of single-arrow patterns (M3) would silently
+   change trait identity and break them. Ad-hoc arrows are not allowed;
+   the stdlib's arrow set is the shared vocabulary.
 
 ## Milestones
 
@@ -73,7 +83,9 @@ Threads we can see from here but haven't scoped:
 
 - **Macro error messages** are the UX weak point of the whole design.
   Mitigation: parse and validate at the outermost proc-macro layer with
-  real spans; keep courier-macro grammars rigid and dumb.
+  real spans; keep courier-macro grammars rigid and dumb. Compile-fail
+  behavior (impossible bindings, impossible patterns) is tested with
+  `trybuild` from M1 onward — validation that isn't tested doesn't exist.
 - **Debuggability**: users will need `cargo expand` to read generated code.
   Keep generated code boring: no cleverness, consistent names, doc comments
   carrying the arrow that produced each item.
