@@ -115,11 +115,12 @@ and exposes `&mut` methods (`add_*`); no separate builder type, no change
 sets, no removal, no write-side traits — those are M4. Three conventions
 keep M4 additive rather than a rewrite:
 
-- **Hooks are the single write path.** All mutation logic — field writes,
-  intrusive links, hash-index maintenance, induction — lives in
-  per-backing hook functions over `&mut` store state; the `add_*` methods
-  are thin orchestration over them. M4's flush replays change sets
-  through these same hooks.
+- **Hooks are the single write path.** All storage mutation — field
+  writes, intrusive links, hash-index maintenance — lives in per-backing
+  hook functions over `&mut` store state; the `add_*` constructors are
+  thin orchestration over them. (Pattern-level constructor logic such as
+  induction sits in the orchestration layer, not inside backing hooks.)
+  M4's flush replays change sets through these same hooks.
 - **Builder methods are named and shaped as if they were already
   write-trait methods** (`add_<entity>`, `insert_<arrow>`,
   `set_<one-arrow>`), so M4 can lift them into generated write traits —

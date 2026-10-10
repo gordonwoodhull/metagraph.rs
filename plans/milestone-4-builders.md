@@ -119,14 +119,31 @@ data (below), or during change-set replay — flush replays staged ops
 through the same constructors, so replay behavior is identical to direct
 construction.
 
-The induction rule is *pattern semantics*, and it lives with the pattern:
-the generated builder provides the primitives (`add_subnode`,
-`add_subedge`, the keyed lookup); the edge-induced `Subgraph` pattern
-ships the inducing constructor as a small hand-written extension over
-them. The schema does not declare induction. If generated serializers or
-fuzzers (M5+ introspection) ever need the rule stated, a declaration can
-be added then — deferring is cheap because constructor behavior is the
-contract either way.
+The induction rule is *pattern semantics*, and it lives with the pattern
+as ordinary Rust — no more a special extension than any capability
+implementation (`in_edges` knowing its link fields, `add_edge` knowing to
+push-front). The toolkit never invents logic; the macro splices schema
+facts into code written once, and the inducing constructor is code
+written once, composing generated primitives (`add_subnode`, the keyed
+lookup) and read traits (`me.source()`, `me.target()`).
+
+It is *undeclared* — the schema says nothing about it — but that is the
+normal case, not a gap: a declaration exists so the macro has something
+to splice, and there is nothing to splice here (no marker, no backing
+fields, no trait impl, no validation rule). Compare `union`: declared
+precisely because markers forced the macro to generate the impl. The
+inducing constructor is the write-side analogue of the derived read
+arrows, minus the declaration. If M5+ introspection (serializers,
+fuzzers) ever needs the rule stated, a declaration can be added then —
+constructor behavior is the contract either way.
+
+One API consequence: undeclared constructor code still needs to *read* —
+it follows `main_edge` to `source`/`target` — but during construction the
+builder owns the store mutably, and pattern code can't touch generated
+private fields. The builder therefore exposes a **read view of the store
+under construction** (id-based getters or a restricted root handle) so
+constructor code can follow arrows. The same view serves flush replay,
+which reads copied old data plus already-replayed ops.
 
 Note the edge-induced form is the special case: a general subgraph may
 also carry standalone nodes (`add_subnode` called directly, never induced
