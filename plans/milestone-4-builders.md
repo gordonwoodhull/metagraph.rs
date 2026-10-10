@@ -61,11 +61,18 @@ continue with the new metagraph. Two entry points support this:
   never arises.
 - **Provisional refs** (`Ref<Node>` ≈ `Existing(NodeId) | Pending(u32)`)
   name entities inside the change set: new ones by submission order, old
-  ones by id. They are opaque tokens, not handles — no read traits, no
-  `Eq`/`Hash` against handles — and they die at flush. Staging never
-  touches a store: the change set is a queue, not a private clone, so a
-  staged `remove` cannot invalidate refs already handed out — everything
-  is applied at once, at flush.
+  ones by id. They are opaque tokens, not handles — no read traits — and
+  they die at flush. The `Existing` half shares identity with old-store
+  handles through the stable id, and the transaction (which borrows the
+  old store) can resolve one to a handle on request; only `Pending` refs
+  lack identity, and only until flush. Refs are local to the transaction
+  that issued them — a deliberate property: the change set is a
+  first-class, self-contained value, which is the foundation for future
+  directions (inspection, serialization, possibly merge) even though
+  merging stays out of scope here. Staging never touches a store: the
+  change set is a queue, not a private clone, so a staged `remove` cannot
+  invalidate refs already handed out — everything is applied at once, at
+  flush.
 - **Flush** rebuilds from the old store's arenas (consumed and reused
   under `into_edit`, cloned under `edit`), replays the staged operations
   in submission order through the *same backing hooks* construction uses,
@@ -226,8 +233,10 @@ refs already handed out, because nothing is applied until flush.
 - **Provisional refs are a second handle-like concept.** Users will try
   to call read methods on them. Naming (`Ref` vs `Handle`) and docs carry
   the weight; the type system already refuses.
-- **Flush error quality.** Op indices are weaker than spans. If this
-  proves painful, change-set ops can record callsite `Location` (via
-  `#[track_caller]`) cheaply.
+- **Flush error quality.** Errors are runtime data and point at op
+  indices ("op 14: edge endpoint not in store"); the index alone is a
+  weak debugging handle. If this proves painful, ops can record the
+  staging call site's `Location` via `#[track_caller]`, so the error
+  names the line that queued the offending op.
 - **Full-rebuild cost hiding in benchmarks.** Fine at Königsberg scale;
   measure once hierarchy depth grows, not before.
