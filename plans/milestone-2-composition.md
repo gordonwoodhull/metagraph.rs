@@ -179,9 +179,9 @@ impossible by construction.
 
 - Edge-induced subgraph: build a main graph, build subgraphs through the
   builder, check `subnode`/`main_node` round-trips, conditional lookups
-  return `None` for non-members. M2 tests drive the builder primitives
-  directly (insert subedge, ensure subnode); declarative induction arrives
-  with M4's write side.
+  return `None` for non-members. The builder's `add_subedge` induces
+  subnodes for the edge's endpoints (deduplicated via the hash index);
+  induction is constructor logic, not schema vocabulary (see M4).
 - Hierarchy: outer graph whose nodes contain subgraphs of the inner graph;
   traverse both levels.
 - Bipartite graph as a plain `pattern!` (two node sorts, arrows picked

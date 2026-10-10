@@ -6,8 +6,7 @@ interface per arrow, marker-generic, so generic graph-transformation
 algorithms are as portable as generic traversals.
 
 Specification level: preliminary. The model and API shape below are
-coherent end to end, but nothing here has been compiled. One explicit
-decision point remains (induction); removal is settled (below).
+coherent end to end, but nothing here has been compiled.
 
 ## Premises (what M1–M3 established)
 
@@ -107,26 +106,43 @@ store embedded in that (possibly provisional) node's record. Flush
 replays root-level operations before nested ones, so provisional paths
 resolve top-down.
 
-## Decision point 1: induction
+## Induction
 
-The edge-induced subgraph requires that inserting a subedge induces
-subnodes for its main edge's endpoints. Where does that rule live?
+The edge-induced subgraph requires that adding a subedge induces subnodes
+for its main edge's endpoints. Induction is constructor logic, not schema
+vocabulary: the builder's `add_subedge(sg, me)` reads `me`'s endpoints and
+ensures a subnode for each, deduplicated through the `subnode` hash index.
+This holds by construction rather than by check, because constructors are
+the single write path (M2 builder shape): every subedge in existence came
+through `add_subedge`, whether during initial build, during loading from
+data (below), or during change-set replay — flush replays staged ops
+through the same constructors, so replay behavior is identical to direct
+construction.
 
-- **Option A — schema-declared, flush-time.** A second derivation form
-  beyond `union`, e.g.
-  `subnodes := induced_by(subedges, via main_edge, endpoints [source, target])`.
-  Declarative, order-independent, validated like any derivation. Cost: new
-  schema vocabulary, and the path language needs bounds (which chains of
-  arrows may appear in an induction rule?).
-- **Option B — insert-time upsert hook.** `insert_subedge` calls
-  `ensure_subnode` per endpoint, deduplicated via the hash index. Already
-  demonstrated by the M2 tests driving builder primitives; no new
-  vocabulary. Cost: order-dependent, crosses backing boundaries, and the
-  rule is invisible to the schema (no introspection, no validation).
+The induction rule is *pattern semantics*, and it lives with the pattern:
+the generated builder provides the primitives (`add_subnode`,
+`add_subedge`, the keyed lookup); the edge-induced `Subgraph` pattern
+ships the inducing constructor as a small hand-written extension over
+them. The schema does not declare induction. If generated serializers or
+fuzzers (M5+ introspection) ever need the rule stated, a declaration can
+be added then — deferring is cheap because constructor behavior is the
+contract either way.
 
-Recommendation: A as the semantic model, implemented narrowly — only the
-path shapes the subgraph pattern needs — with B remaining available as
-hand-written hooks for patterns the vocabulary can't express.
+Note the edge-induced form is the special case: a general subgraph may
+also carry standalone nodes (`add_subnode` called directly, never induced
+by an edge). Constructor-level induction supports both; a flush-time
+derivation pass would have had to invent a way to permit the standalone
+case.
+
+## Construction from data (loading)
+
+Loading a metagraph from external data is not a separate path: a loader
+drives the builder. Referential integrity is enforced by construction —
+constructor arguments are typed ids/handles, so a dangling endpoint is
+inexpressible rather than rejected — and by the flush validation boundary
+(key existence and uniqueness) for what types can't see. Data formats and
+their codegen are M5+ introspection territory; all M4 needs is that the
+loader and the hand builder share one funnel.
 
 ## Removal
 
@@ -183,7 +199,8 @@ refs already handed out, because nothing is applied until flush.
 3. Flush-error surface: dangling endpoint, duplicate key, unknown old id.
 4. Nested stores: path-addressed ops and sub-transactions; hierarchy
    edit tests (stage a new outer node *and* its subgraph in one flush).
-5. Induction for the subgraph pattern (narrow form of decision 1-A).
+5. Induction for the subgraph pattern: the inducing `add_subedge`
+   constructor as a builder extension over the generated primitives.
 6. Removal with compaction and the id-remap report; cascade-policy tests
    (dangling removals rejected, nested stores dropped with their record).
 
