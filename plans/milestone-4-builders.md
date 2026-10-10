@@ -6,8 +6,8 @@ interface per arrow, marker-generic, so generic graph-transformation
 algorithms are as portable as generic traversals.
 
 Specification level: preliminary. The model and API shape below are
-coherent end to end, but nothing here has been compiled. Two explicit
-decision points remain (induction, removal); both are marked.
+coherent end to end, but nothing here has been compiled. One explicit
+decision point remains (induction); removal is settled (below).
 
 ## Premises (what M1–M3 established)
 
@@ -36,10 +36,24 @@ let a = tx.add_node();               // provisional ref: opaque, tx-local
 let b = tx.add_node();
 tx.add_edge(a, b);                   // provisional refs
 tx.add_edge(old_node, a);            // old-store elements by handle or id
+tx.remove_edge(e);                   // removal: staged, applied at flush
 tx.set_payload(e, w);                // re-point an optional/payload arrow
 let new_store = tx.flush()?;         // validate + rebuild; old store
                                      // untouched, old handles still valid
 ```
+
+The pass discipline: work with a metagraph (handles live, reads happen),
+stage edits against it, then end the pass — drop every handle, flush, and
+continue with the new metagraph. Two entry points support this:
+
+- `store.edit()` borrows the old store sharedly; old handles stay valid
+  through and after the flush. For when old and new must coexist
+  (diffing, migration).
+- `store.into_edit()` *consumes* the old store. The borrow checker then
+  requires every handle to be dead before the pass can end — the "let go
+  of all references" discipline is enforced at compile time — and flush
+  can reuse the old store's allocations instead of cloning. This is the
+  normal form; `edit()` is the escape hatch.
 
 - **The transaction borrows the old store sharedly.** This is the
   ergonomic point of the design: you can traverse the graph (with real
@@ -49,13 +63,18 @@ let new_store = tx.flush()?;         // validate + rebuild; old store
 - **Provisional refs** (`Ref<Node>` ≈ `Existing(NodeId) | Pending(u32)`)
   name entities inside the change set: new ones by submission order, old
   ones by id. They are opaque tokens, not handles — no read traits, no
-  `Eq`/`Hash` against handles — and they die at flush.
-- **Flush** clones the old store's arenas (the whole nested structure,
-  recursively), replays the staged operations in submission order through
-  the *same backing hooks* construction uses, runs induction rules, calls
-  the validation boundary, and returns the new store. Kept elements keep
-  their ids and iteration order; new elements append in replay order;
-  `intrusive_list`'s reverse-insertion contract applies to new inserts.
+  `Eq`/`Hash` against handles — and they die at flush. Staging never
+  touches a store: the change set is a queue, not a private clone, so a
+  staged `remove` cannot invalidate refs already handed out — everything
+  is applied at once, at flush.
+- **Flush** rebuilds from the old store's arenas (consumed and reused
+  under `into_edit`, cloned under `edit`), replays the staged operations
+  in submission order through the *same backing hooks* construction uses,
+  drops removed elements and compacts, runs induction rules, calls the
+  validation boundary, and returns the new store plus a report carrying
+  per-arena old→new id maps. Kept elements keep their iteration order;
+  new elements append in replay order; `intrusive_list`'s
+  reverse-insertion contract applies to new inserts.
 - **Flush errors are runtime data**, not compile errors: a `FlushError`
   lists each violation (dangling endpoint, duplicate key) by change-set
   op index. No spans; the op index is the debugging handle.
@@ -109,29 +128,35 @@ Recommendation: A as the semantic model, implemented narrowly — only the
 path shapes the subgraph pattern needs — with B remaining available as
 hand-written hooks for patterns the vocabulary can't express.
 
-## Decision point 2: removal
+## Removal
 
-- **Option A — no removal in v1.** Change sets are add/set-only.
-  Consistent with the append-only lineage; flush and validation stay
-  simple.
-- **Option B — removal with compaction + id-remap report.** Flush rebuilds
-  without the removed elements and returns per-arena `old → new` id maps.
-  Handles never cross stores, so this is type-safe; the hazard is users
-  retaining raw ids (`NodeId(pub u32)`), who must translate via the report.
-- **Option C — tombstones.** Ids stay stable; arenas become
-  `Vec<Option<Record>>` and every read-side iterator skips holes.
-  Rejected: it complicates every backing contract (intrusive lists, size
-  hints, CSR ranges) for a benefit rebuild-without already provides.
+Removal is a first-class staged operation (`remove_<entity>(ref)`), and it
+is the reason the change set is a replay queue rather than a private clone
+mutated during staging: a queued removal cannot invalidate provisional
+refs already handed out, because nothing is applied until flush.
 
-Recommendation: ship A, with flush's return type a report struct designed
-to grow B's id maps without breaking callers.
+- Flush rebuilds without the removed elements and compacts; ids may
+  shift. The flush report carries per-arena old→new id maps for users who
+  retained raw ids (`NodeId(pub u32)`). Handles never cross stores, so
+  this is type-safe; the maps exist for raw ids only.
+- The pass discipline makes invalidation explicit: under `into_edit`,
+  the old store is consumed and the borrow checker guarantees no handle
+  survives the pass boundary.
+- **Cascade policy is minimal.** A removal that would leave dangling
+  references (removing a node with incident edges still present) is a
+  `FlushError` listing the danglers — the change set must remove
+  dependents explicitly. One exception: a nested store embedded in a
+  removed record goes with the record, contents and all.
+- Tombstones are rejected: they would complicate every backing contract
+  (intrusive lists, size hints, CSR ranges) for a benefit
+  rebuild-without already provides.
 
 ## Explicit non-goals
 
 - No in-place mutation, ever. No generational ids.
 - No handle migration across a flush. Handles name (store, path); a new
-  store is a new identity. The id-remap report (option B above) exists
-  for raw ids, not handles.
+  store is a new identity. The id-remap report exists for raw ids, not
+  handles.
 - No concurrency or merging: two transactions on one store are
   independent forks; merging change sets is out of scope.
 
@@ -159,7 +184,8 @@ to grow B's id maps without breaking callers.
 4. Nested stores: path-addressed ops and sub-transactions; hierarchy
    edit tests (stage a new outer node *and* its subgraph in one flush).
 5. Induction for the subgraph pattern (narrow form of decision 1-A).
-6. Removal, if option B is taken, with the id-remap report.
+6. Removal with compaction and the id-remap report; cascade-policy tests
+   (dangling removals rejected, nested stores dropped with their record).
 
 ## Risks
 
