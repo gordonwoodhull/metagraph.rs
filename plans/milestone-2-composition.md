@@ -104,6 +104,32 @@ object, and reports violations as build errors. (`NodeId`'s `pub u32`
 stays — the tests depend on it — so key integrity is enforced by the
 builder, not by the type.)
 
+### Builder shape
+
+M2 keeps the M1 construction model: the store owns itself during building
+and exposes `&mut` methods (`add_*`); no separate builder type, no change
+sets, no removal, no write-side traits — those are M4. Three conventions
+keep M4 additive rather than a rewrite:
+
+- **Hooks are the single write path.** All mutation logic — field writes,
+  intrusive links, hash-index maintenance, induction — lives in
+  per-backing hook functions over `&mut` store state; the `add_*` methods
+  are thin orchestration over them. M4's flush replays change sets
+  through these same hooks.
+- **Builder methods are named and shaped as if they were already
+  write-trait methods** (`add_<entity>`, `insert_<arrow>`,
+  `set_<one-arrow>`), so M4 can lift them into generated write traits —
+  defined from the arrows the same way the read traits are — without
+  renaming.
+- **Validation has a named boundary.** Flush-time checks (key existence,
+  key uniqueness per self object) attach to a single `validate()` point
+  even if M2 callers never invoke it separately; M4 hangs full
+  referential-integrity validation there.
+
+The index-path handle representation doubles as M4's change-set
+addressing scheme: a change-set entry is an `(index path, operation)`
+pair.
+
 ### Marker qualification becomes real
 
 Composed patterns instantiate the same arrow more than once on fused
@@ -174,9 +200,6 @@ impossible by construction.
 - Root handles for composed patterns: with two unfused graph entities
   (`outer.G`, `inner.G`), what does the store's entry-point API look like —
   one accessor per root entity, or handles constructed directly from ids?
-- Builder shape: the M2 builder owns the store under construction (`&mut`
-  methods, as in M1). How much of M4's change-set/flush interface against
-  frozen stores should M2 anticipate?
 - Derivations (`:= union`) are scoped to the instance that declares them;
   whether derived arrows spanning instances are ever needed is unknown.
   (The per-instance scoping is currently load-bearing: it keeps union's
