@@ -77,24 +77,18 @@ all the same machinery applied to bigger piles of arrows.
 | 1 | `pattern!` + `implement!`, base digraph | [full](milestone-1-pattern-and-implement.md) |
 | 2 | Composition, fusion, keyed arrows, subgraph pattern | [partial](milestone-2-composition.md) |
 | 3 | User-facing backings, stdlib refactor | [vague](milestone-3-backings-and-stdlib.md) |
-| 4 | Write-side builders, mutation by rebuild | this file |
+| 4 | Write-side builders, mutation by rebuild | [preliminary](milestone-4-builders.md) |
 | 5+ | Selection, interop — see below | this file |
 
-## Milestone 4 (direction): write-side builders, mutation by rebuild
+## Milestone 4 (summary): write-side builders, mutation by rebuild
 
-Stores are immutable once built (invariant 5). M4 adds the write side:
-
-- Generated mutation interfaces are defined the same way as the read-side
-  accessors — one method per arrow, mirroring the trait shape — but they
-  accumulate a change set. Nothing mutates a live store.
-- Flushing the change set builds a new immutable store: insert hooks run,
-  indexes are rebuilt, referential integrity is validated (every endpoint
-  and key id exists), and induction rules fire (adding a subedge induces
-  its endpoints' subnodes).
-- Removal is rebuild-without; no generational arenas, no index patching.
-  Old stores stay alive as long as their handles borrow them.
-- Cost model: a flush is a full rebuild. Right for these graphs; revisit
-  (persistent structures, chunked arenas) only if stores get large.
+Stores are immutable once built (invariant 5). M4 generates the write
+side from the schema the same way as the read side: a transaction stages
+changes against a borrowed store (old handles keep working), and flush
+replays them through the construction hooks into a new immutable store,
+running induction and referential-integrity validation on the way.
+Removal is rebuild-without; no generational arenas. Full sketch:
+[milestone-4-builders.md](milestone-4-builders.md).
 
 ## Milestone 5+ (purposely vague)
 
