@@ -46,13 +46,6 @@ extern crate self as metagraph_exper;
 pub mod algo;
 pub mod stdlib;
 
-// Hand-written reference implementations, kept until the macro-generated
-// replacement is green (plans/milestone-1 step 10 deletes them; git retains
-// them). `arena.rs` is the behavioral spec for the generated stores;
-// `traits.rs` is superseded by the stdlib's `pattern!`-generated traits.
-pub mod arena;
-pub mod traits;
-
 pub use metagraph_exper_macros::{implement, pattern};
 #[doc(hidden)]
 pub use metagraph_exper_macros::__implement_gen;
