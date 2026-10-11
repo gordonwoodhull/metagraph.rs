@@ -261,7 +261,7 @@ cannot name the instantiation's key sort, so its trait carries the key
 as an associated type (probe-verified, /tmp/m2-probe-edge-induced):
 
 ```rust
-pub trait SubNodeOf<M> {
+pub trait Subnode<M> {
     type SubNode;
     type Key;
     fn subnode(&self, key: Self::Key) -> Option<Self::SubNode>;
@@ -634,10 +634,14 @@ Pinned down during the milestone, not before:
 
 - The single-arrow roots the Subgraph pattern leans on —
   `MainNode`/`MainEdge` (`one`), `EdgesOf` (`many`; the arena binding
-  requires it), `SubNodeOf`/`SubEdgeOf` (keyed) — are not yet sketched,
-  and their names drift: the sketch says `MainNode` where spike 1's
-  stdlib and the others' `-Of` convention say `MainNodeOf`. Folded into
-  the held root-naming decision (root-pattern-vs-entity collision).
+  requires it), `SubNodeOf`/`SubEdgeOf` (keyed) — are not yet sketched.
+  Naming decided: a root pattern takes its arrow's name with no suffix
+  where the name is free (`MainNode`/`MainEdge` — their entity
+  namesakes are open and emit nothing; spike 1's `MainNodeOf` was a
+  deviation), and the `-Of` suffix stays where the bare name is taken
+  (`SubNodeOf`, `SubEdgeOf` beside the entities; `EdgesOf` beside the
+  stdlib root). The trait is arrow-named regardless (M1's trait
+  identity rule), so `SubNodeOf` owns `Subnode<M>`.
 - How fusion classes are named in generated docs.
 - The key-entity restriction for keyed arrows: any entity in scope, or
   only entities reachable via nearby total `one` arrows.

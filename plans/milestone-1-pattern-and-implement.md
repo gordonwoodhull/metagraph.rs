@@ -130,6 +130,12 @@ keyed cardinality). The root's trait types the parameter as an
 associated type (`type Key`; M2's keyed section sketches the
 declaration and the probe-verified trait shape).
 
+**The root's trait takes its arrow's name**, camel-cased — not the
+pattern's name. The six stdlib roots coincide only because each pattern
+is named for its arrow (`Nodes`/`nodes` → `Nodes<M>`); a suffixed
+pattern name diverges (`SubNodeOf`, arrow `subnode` → trait
+`Subnode<M>`, method `subnode`).
+
 **Instantiation arrow names are local aliases.** The trait's method name,
 GAT iterator name, and associated type names all come from the *root's*
 declaration, never from the instantiation: `subnodes: stdlib::Nodes,
