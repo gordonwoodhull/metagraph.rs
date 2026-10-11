@@ -191,15 +191,38 @@ which is what the schema's `by` declaration buys (M1 syntax section).
 Markers are the same per-instance markers as the read side, so a
 generic algorithm can bound on `OutEdges<M>` and `InsertOutEdges<M>`
 together — e.g. a graph-transform pass that reads one store and stages
-another without knowing either pattern. Two additions make that actually
-work:
+another without knowing either pattern. This has been spike-verified: a
+generic copy and a generic node-replacement transform were compiled and
+run against a hand-written transaction at two marker instantiations.
+What the verification pinned down:
 
 - Write traits carry **associated ref types** (`type NodeRef;`) — a
-  generic algorithm cannot name the concrete `Ref<Node>`.
-- A **handle→ref mapping**: the transaction converts old-store handles
-  and ids to `Existing` refs, exposed as a trait so generic code can
-  relate the read side's handle types to the write side's ref types
-  (associated-type equality bounds suffice).
+  generic algorithm cannot name the concrete `Ref<Node>`. For a pure
+  copy into an empty destination this is the *only* addition needed:
+  `AddNode<M> + InsertOutEdges<M>` with an equality bound
+  `NodeRef = AddNode::NodeRef`, and refs themselves need only `Copy`.
+- A **handle→ref mapping** trait (the transaction converts old-store
+  handles and ids to `Existing` refs) enters exactly when the transform
+  *names old-store elements* — splicing, rewiring, delta edits — bringing
+  the full equality web (`Handle = Src::Node`, `NodeRef = ...`). The
+  plain associated-type equality bounds suffice; no GAT is needed on the
+  write side. Flush is deliberately *not* marker-generic.
+- **Handle keyability is a load-bearing bound.** Generic transforms
+  correlate nodes across iteration views and edge-endpoint views through
+  a handle-keyed map, so `Copy + Eq + Hash` on handles is part of the
+  minimal bound set — handle identity (store pointer + index path) is
+  doing real work, not just pleasing the test suite.
+- **Signature-faithful copy is not order-agnostic.** Re-inserting edges
+  in iteration order under a reverse-insertion backing (intrusive_list)
+  reverses every list; the transform must collect-and-reverse, which is
+  correct only given the backing's iteration-order annotation (M3). A
+  forward-insertion backing (CSR) copies verbatim. Generic algorithms
+  must be written against the annotation, never an assumed order.
+- Two transform shapes exist and must not be mixed: *copy-into-empty*
+  (destination starts blank; insert everything read) and
+  *rewrite-deltas* (destination's old store already contains the graph;
+  kept-kept edges are staged as nothing). "Insert everything you read"
+  against a non-empty destination double-inserts.
 
 Node creation is *not* generic across patterns: the constructor argument
 list is the entity's total `one` arrows, which differ per schema. A

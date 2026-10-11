@@ -18,7 +18,7 @@ findings are folded back into the milestone plans as they land.
 | 5 | `intrusive_list` through a `backing!`-style courier | M3 | complete — folded in |
 | 6 | CSR-style two-phase backing by hand | M3 | complete — folded in |
 | 7 | Flat-`Digraph` transaction by hand | M4 | complete — folded in |
-| 8 | Generic read→write transform | M4 | **in progress** |
+| 8 | Generic read→write transform | M4 | complete — folded in |
 | 9 | Removal + compaction + id-remap report | M4 | descoped (below) |
 
 ## The spikes
@@ -91,9 +91,16 @@ write-ordering constraint. Folded into milestone-4.
 
 **8. The generic read→write transform.** Associated ref types and a
 handle→ref mapping trait, compiled against spike 7's transaction.
-Question: what is the minimal bound set? *In progress.* This is the only
-proof of M4's central portability claim — a generic algorithm reading one
-store and staging another without knowing either pattern.
+Question: what is the minimal bound set? *Result:* the claim holds — a
+generic copy and a generic node-replacement transform compile and run at
+two marker instantiations. A pure copy needs only associated ref types
+with equality bounds (no GAT on the write side); the handle→ref mapping
+enters exactly when the transform names old-store elements. New
+load-bearing findings: handle keyability (`Copy + Eq + Hash`) is part of
+the minimal bound set; signature-faithful copy must be written against
+the backing's iteration-order annotation (collect-and-reverse under
+intrusive_list); copy-into-empty and rewrite-deltas are distinct shapes
+that must not be mixed. Folded into milestone-4.
 
 **9. Removal + compaction + id-remap report.** Question: does the report
 name ids users can act on? *Descoped:* spike 7's finished crate already
