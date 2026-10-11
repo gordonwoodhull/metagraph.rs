@@ -4,7 +4,10 @@
 the motivating higher-order graph — is expressible and testable.
 
 Specification level: partial. Syntax sketches are directional, not final;
-M1 will reshape details.
+M1 will reshape details. The structural-validation phase assignments and
+the edge-chain refinement sketch are spike-verified (hand-built and
+tested); the courier chain itself is proven only as a minimal bounce and
+is the milestone's principal implementability risk.
 
 ## In scope
 
@@ -70,12 +73,23 @@ Fusion has two flavors (epic invariant 4):
   instance's arenas are embedded in the host record exactly when the
   instance's `root`-marked entity is colocation-fused with an element
   entity of the host instance; unfused roots keep root arenas. Reference
-  fusion never affects placement. In the `Hierarchy` example: `inner`'s
+  fusion never affects placement. The root-marked entity itself owns no
+  arena — its "record" is the (sub)store; instances contribute arenas
+  for their non-root entities only. In the `Hierarchy` example: `inner`'s
   arenas live at the root (its root is unfused — one shared inner graph),
   while `sub`'s arenas (SubNode/SubEdge plus their indexes) embed in each
   outer node record because `outer.Node <=> sub.Subgraph`. Handles borrow
   through the nesting: a nested handle is the root store reference plus an
   index path.
+- **Store-less instances still have write ops.** An instance whose root
+  is colocation-fused into a host element and whose remaining entities
+  are `<->`-closed owns no arenas at all (`chain` in the Refinement
+  sketch) — but its `many` arrows still need insert operations, and
+  constructor merging covers only total `one` arrows. The insert op is
+  emitted on the store hosting the fused *self* record, named
+  `insert_<arrow>` by the usual convention (the spike's
+  `insert_chain_elem(OuterEdgeId, InnerEdgeId)`); its backing hooks write
+  through to whichever arena in the store tree holds the target records.
 - Runtime multiplicity is not declared here: `sub` appears once at the type
   level; at runtime each outer node owns its own subgraph store, colocated
   in its record.
@@ -129,7 +143,9 @@ and it validates the hook interface designed in M1.
 
 Checks attach to the **`validate()` boundary** M1 establishes: key
 existence (every key id names a real record) and key uniqueness per self
-object (a keyed arrow is a function). In M2 there is no flush, so the
+object (a keyed arrow is a function), joined by the intrusive-ownership
+partition check and per-backing structural checks (Structural
+validation). In M2 there is no flush, so the
 caller invokes `validate()` explicitly — the tests do, and the docs
 recommend it as the last construction step; an unchecked store is possible
 and is the caller's responsibility. M4's flush invokes `validate()`
@@ -187,33 +203,68 @@ resolution over trait methods).
 
 ### Structural validation (first checks)
 
-Four of these run at `compose_pattern!` time — all member schemas and
-fusions are in hand at the final hop, which the courier chain guarantees:
+The phase assignments below have been spike-verified: each check was
+implemented as a plain function over a hand-written schema struct, with
+a pass and a fail fixture per check, plus the Hierarchy and Refinement
+compositions as realistic inputs.
+
+One check runs at `pattern!` time (needs only the declaring pattern):
+
+- Open entities are arrow *targets* only in their declaring pattern.
+
+Two run at `compose_pattern!` time — all member schemas and fusions are
+in hand at the final hop, which the courier chain guarantees:
 
 - Fusion classes must be closed: no open entity survives composition.
-- No record may contain itself without intervening indirection (cycle check
-  over fusion classes + containment edges; `Vec`/hash arenas count as
-  indirection).
 - Every colocation-fusion class has exactly one arena placement. This
   rejects both double-closed entities (`a.X <=> b.N` *and* `a.X <=> c.N`,
   where transitivity merges arenas from two instances) and cross-
   multiplicity colocations (fusing an entity whose arena embeds per-record
   with one whose arena lives at root): each asks one id type to index two
   arenas.
-- Open entities are arrow targets only in their declaring pattern (also
-  checkable at `pattern!` time), and are closed by `<->` only.
+- Open entities are closed by `<->` only.
 
-One runs at `implement!` time, because it needs backing bindings:
+Two run at `implement!` time, because they need backing bindings:
 
-- Field contributions must have a home after placement: reject a backing
-  whose fields target a record that lives in another instance's arena,
-  unreachable from the store being generated. Its errors quote the
-  offending tokens — spans point at the `implement!` call site.
+- No record may contain itself without intervening indirection. (Moved
+  from compose time, where the spike found it *vacuous*: containment
+  edges come from colocation placement — always indirect, since arenas
+  are `Vec`-backed — and from backing contributions that embed records
+  inline; id-typed fields count as indirection. With only the M1–M3
+  built-ins every edge is indirect, so the check can never fire without
+  per-backing contribution typing (inline vs id), which is
+  implement!-time information.)
+- Field contributions must have a home after placement. One `implement!`
+  call generates **one root store**; every instance's arenas live in
+  that store's tree (root-level, or embedded per host record by the
+  placement rule), so a contribution has a home iff its target record
+  sort is placed within the tree. Its errors quote the offending tokens —
+  spans point at the `implement!` call site. Multi-store layouts (e.g. a
+  separately-owned shared inner store) are out of scope: making this
+  check non-vacuous there requires vocabulary the schema does not have —
+  a store partition (which fusion class lives in which store), a
+  directional store-reachability relation, and the emitting store per
+  binding (derivable from the self-record's class). That vocabulary is
+  also the answer to the deferred multi-root store entry-point question
+  (Deferred details); the two are the same decision, to be made when
+  multi-store layouts arrive.
 
-Not a check, but documented: intrusive link fields are sound only when
-each object belongs to at most one relation instance (e.g. chains must
-partition their elements). Runtime data is invisible to the schema, so
-this becomes a backing constraint annotation in M3.
+Two run at `validate()` time (runtime; caller-invoked in M2, forced by
+M4's flush):
+
+- Key existence and key uniqueness per self object (keyed partial
+  arrows).
+- **Intrusive-ownership partition check.** For each intrusive backing
+  carrying M3's exclusive-membership annotation, walk every list once
+  with a per-walk seen set and a global seen set: an id appearing in
+  *two* lists is shared membership (which silently truncates the old
+  chain); an id repeating *within* one list is a cycle (which makes
+  traversal diverge). The check distinguishes the two failure shapes in
+  its report. Its inputs are all available by `implement!` time: the
+  annotation, the self entity (head field) and target entity (link
+  field), the field names from the backing's contribution list, and the
+  store holding the target arena. (Without this check both corruptions
+  are silent — the spike reproduced both.)
 
 Marker collision is not a check: per-instance re-minting makes it
 impossible by construction.
@@ -273,6 +324,12 @@ impossible by construction.
   rejected by the exactly-one-placement check — the element sort was a
   phantom, and reference fusion plus an intrusive arrow says what was
   meant.
+
+  This sketch has been hand-built and run (spike): all structural checks
+  pass under the one-root-store layout, a chain walk is literally the
+  `out_edges` walk (a generic `OutEdges<M>` traversal applied unchanged),
+  and the unchecked intrusive-ownership hazard was reproduced — which is
+  where the `validate()` partition check above comes from.
 
 ## Deferred details
 

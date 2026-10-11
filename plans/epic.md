@@ -85,6 +85,10 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
 | 4 | Write-side builders, mutation by rebuild | [preliminary](milestone-4-builders.md) |
 | 5+ | Selection, interop — see below | this file |
 
+Cross-cutting implementability validation (nine throwaway spikes against
+milestones 2–4): [spikes.md](spikes.md) — status, results, and what each
+spike folded back into the plans.
+
 ## Milestone 4 (summary): write-side builders, mutation by rebuild
 
 Stores are immutable once built (invariant 5). M4 generates the write

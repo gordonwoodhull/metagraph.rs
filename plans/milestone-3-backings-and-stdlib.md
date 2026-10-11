@@ -3,8 +3,10 @@
 **Goal**: the backing layer becomes part of the language, and the standard
 library becomes proof that the language suffices.
 
-Specification level: deliberately vague. Both the backing interface and the
-stdlib's shape will be informed by two milestones of scars.
+Specification level: deliberately vague, with two exceptions: the `backing!`
+hygiene question and the CSR-style second backing have both been
+spike-verified (hand-built prototypes, tests green); their findings are
+folded in below.
 
 ## In scope (directionally)
 
@@ -43,9 +45,31 @@ Two mechanical obligations come with user-writable backings:
   associated type must name a concrete type. A `many` backing must
   therefore declare its iterator as a named struct (the `iter Walk`
   clause above); a bare `iterate(a) { ... }` body is insufficient on its
-  own. Hook and iterator bodies contain arbitrary Rust — the DSL will not
-  avoid that — so the hygiene of user idents forwarded through the macro
-  layers must be prototyped before the `backing!` grammar is fixed.
+  own. (Spike-verified: the named clause generates the renamed iterator
+  struct plus its `Iterator` impl, feeding the GAT.)
+
+- **Hygiene is proven, with three contractual caveats.** The hygiene
+  prototype (intrusive_list re-implemented through a `backing!`-style
+  courier, hook bodies in arbitrary Rust, negative probes for capture)
+  answered its gating question: hook bodies *do* survive the token
+  channel hygienically — but three of the guarantees are discipline the
+  grammar must enforce, not properties the language gives:
+  1. `Span::mixed_site()` on scaffold idents is load-bearing. It gives
+     macro_rules-like local hygiene across both macro layers; the
+     negative probe (call-site spans instead) demonstrably flips a
+     scaffold local into capturing the hook body's call (E0618). Without
+     mixed_site the DSL is unsound.
+  2. Item paths are not hygienic in Rust: a helper named in a hook body
+     resolves at the backing's *use* site, not its declaration site.
+     The grammar must either require helpers to be in scope at the use
+     site or route them through explicit bindings.
+  3. Name coupling is contractual and must be written into the grammar:
+     what each hook parameter names (`on_insert(a, b)` — the self id,
+     and the newly inserted target *record*), which scaffold locals the
+     `iterate` body may rely on (the store, the renamed iterator
+     constructor), and a reserved set of placeholder idents (the
+     substitution is textual). The prototype's one real bug was exactly
+     a contract misreading of what `b` names.
 
 ### A second `many` backing
 
@@ -71,6 +95,28 @@ Full automatic selection is possible here but not required — the
 annotations are the prerequisite, and they pay for themselves in error
 quality alone. Cost hints (numbers vs. symbols such as `cache_friendly`,
 `compact`) are decided when the annotations exist.
+
+The CSR spike grounded this vocabulary in one concrete backing. The
+annotations it actually needed:
+
+- `append_only` during the build phase;
+- `requires_compaction_at_boundary` — the accumulate arrays must be
+  compacted into offsets+adjacency before reads are valid;
+- `freeze_scope: per_store` — the whole store crosses the boundary at
+  once (M4's flush step 6, backing finalization, is that boundary);
+- `read_precondition: post_compaction`;
+- `iteration_order` — **a per-backing contract annotation**: CSR iterates
+  forward-insertion, intrusive_list reverse-insertion, and generic
+  algorithms may not assume more than the annotation gives (M4's flush
+  order contracts are stated against this);
+- `field_contributions: store_level_only` — CSR contributes offsets and
+  adjacency arrays at store level, no per-record fields.
+
+One decision the spike left open: how the build/frozen phase is
+*represented* in generated code — a type-state parameter, a separate
+builder type, or a runtime flag. The spike used type-state; the choice is
+deferred to the milestone, and the constraint annotations are phrased to
+be satisfiable by any of the three.
 
 ### Standard library refactor
 

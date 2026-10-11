@@ -5,8 +5,12 @@ write side is generated from the schema the same way the read side is: one
 interface per arrow, marker-generic, so generic graph-transformation
 algorithms are as portable as generic traversals.
 
-Specification level: preliminary. The model and API shape below are
-coherent end to end, but nothing here has been compiled.
+Specification level: preliminary, with one exception: the flat-`Digraph`
+case (change-set queue, tx-stamped refs, the flush pipeline, removal with
+the id-remap report) has been hand-built and tested against the reference
+store (32 tests, including Königsberg signature equality between
+tx-built and directly-built stores). Everything specific to write traits,
+nested staging, and induction remains uncompiled.
 
 ## Premises (what M1–M3 established)
 
@@ -20,8 +24,12 @@ coherent end to end, but nothing here has been compiled.
   hook function over `&mut` store state, and the `add_*` constructors are
   thin orchestration (M1 commits to both names and shape).
 - Validation has a named boundary (`validate()`): key existence, key
-  uniqueness per self object. M2 callers invoke it explicitly; flush
-  invokes it unconditionally.
+  uniqueness per self object — and, per backing, **structural checks**
+  (endpoint ids in arena range, intrusive link well-formedness,
+  membership consistency between an arrow's links and its determining
+  fields). A store with no keyed arrows still validates; keyless
+  backings contribute the structural half. M2 callers invoke it
+  explicitly; flush invokes it unconditionally.
 - Nested stores are addressed by index paths (M2).
 - CSR-style backings (M3) assume a build/flush boundary; M3's constraint
   annotations make the requirement explicit.
@@ -56,7 +64,11 @@ continue with the new metagraph. Two entry points support this:
   requires every handle to be dead before the pass can end — the "let go
   of all references" discipline is enforced at compile time — and flush
   can reuse the old store's allocations instead of cloning. This is the
-  normal form; `edit()` is the escape hatch.
+  normal form; `edit()` is the escape hatch. Allocation reuse carries an
+  ordering constraint (spike-verified): all derived data — kept sets,
+  old→new maps, rebuilt link chains — must be computed before any
+  in-place write, and writes must go forward (write slot ≤ read slot),
+  so no slot is overwritten before its old value has been read.
 
 - **The transaction borrows the old store sharedly.** This is the
   ergonomic point of the design: you can traverse the graph (with real
@@ -86,11 +98,12 @@ continue with the new metagraph. Two entry points support this:
   handed out — everything is applied at once, at flush.
 - **Handles convert to refs with a store-identity check.** Anywhere an
   `Existing` ref is expected, an old-store handle or raw id is accepted;
-  the conversion debug-asserts the handle's store pointer against the
-  transaction's store. Lifetimes alone do not enforce this (a handle into
-  an unrelated longer-lived store coerces), and a foreign handle's id
-  would silently resolve against the wrong arena.
-- **Flush** is a fixed six-step pipeline, not a raw replay of the queue.
+  the conversion asserts (a hard `assert!`, not debug-only) the handle's
+  store pointer against the transaction's store. Lifetimes alone do not
+  enforce this (a handle into an unrelated longer-lived store coerces),
+  and a foreign handle's id would silently resolve against the wrong
+  arena — silent mis-resolution is a worse failure than the check's cost.
+- **Flush** is a fixed seven-step pipeline, not a raw replay of the queue.
   The change set mixes constructive ops (which replay through hooks) with
   removals (which are set-theoretic — rebuild-without — and never replay),
   so ordering must be stated:
@@ -99,29 +112,59 @@ continue with the new metagraph. Two entry points support this:
   2. **Dangler detection** over kept records *and* staged constructive
      ops, in old-id space — this precedes compaction so the report names
      ids the user actually staged with. Violations are listed by
-     change-set op index.
+     change-set op index; op indices count *every* queued op, including
+     `add_<entity>`. A violation on a kept record has no op of its own,
+     so it is attributed to the removal op that caused it, and violations
+     distinguish `Kept(old id)` from `Staged(op index)` elements.
   3. **Compact** kept arenas, assign new ids, build the per-arena old→new
-     maps.
+     maps. Each map is an old-id-indexed array of `Option<new id>`, one
+     entry per old arena slot, `None` for removed records; new records
+     have no old id and no entry.
   4. **Replay constructive ops in submission order** through the same
      backing hooks construction uses, translating `Existing` refs through
      the maps; root-level ops before nested ops at each step, so
-     provisional index paths resolve top-down.
+     provisional index paths resolve top-down. (Trivially satisfied in
+     the flat case — there is only the root level; the constraint becomes
+     real with nested stores.)
   5. **Induction** runs during replay, because replay goes through the
      same constructors as direct construction.
-  6. **`validate()`**: key existence, key uniqueness.
-  Order contracts: kept elements keep their iteration order; new arena
-  records append in replay order. Intrusive link fields of kept records
-  are *copied and remapped* through the id maps, never replayed; genuinely
-  new inserts push-front onto the remapped heads, so new members iterate
-  first and the reverse-insertion contract holds for them.
+  6. **Backing finalization.** Backings with a build phase (CSR-style
+     range adjacency, M3) compact here — accumulate structures are
+     frozen into their read form, per store, once, after all replay.
+     Read access to such backings is only valid post-finalization; the
+     M3 constraint annotations (`requires_compaction_at_boundary`,
+     `freeze_scope: per_store`, `read_precondition: post_compaction`)
+     state this per backing.
+  7. **`validate()`**: key existence, key uniqueness, and each backing's
+     structural checks (below).
+  Order contracts: kept elements keep their relative iteration order; new
+  arena records append in replay order. Iteration order itself is a
+  per-backing contract (M3 annotation: intrusive_list iterates
+  reverse-insertion, CSR forward-insertion); "kept order" means kept
+  relative order under the backing's own rule, so generic algorithms may
+  not assume an order beyond the annotation. Intrusive link fields of
+  kept records are never replayed — but they are also never *per-field
+  remapped*: remapping each link independently silently truncates a list
+  when a middle link's target was removed (the map yields `None`, read
+  as end-of-list). Instead each kept list is **rebuilt by walking the
+  old chain**, skipping removed records, remapping the kept ids, and
+  preserving kept relative order — which degenerates to copy-and-remap
+  when nothing was removed. Genuinely new inserts push-front onto the
+  rebuilt heads, so new members iterate first and the reverse-insertion
+  contract holds for them.
 - **Flush errors are runtime data**, not compile errors: a `FlushError`
   lists each violation (dangling endpoint, duplicate key) by change-set
   op index. No spans; the op index is the debugging handle. The full
   surface: dangling endpoint (named in old ids), duplicate key, unknown
-  old id, `set_` or `remove` of a removed element, double removal,
-  removal of a `Pending` ref, and ops staged under a nested path whose
-  record was removed (the change set must be coherent; a silent discard
-  would hide staging bugs).
+  old id, `set_` or `remove` of a removed element, double removal, and
+  ops staged under a nested path whose record was removed (the change
+  set must be coherent; a silent discard would hide staging bugs).
+  Distinct from these are **staging-time programming errors, which
+  panic at the staging call** rather than joining `FlushError`: a
+  foreign or stale ref stamp, and removal of a `Pending` ref. The
+  dividing line: `FlushError` is for change sets that are coherent as
+  staged but invalid against the store; panics are for change sets that
+  could never have meant anything.
 
 ## Write traits mirror read traits
 
@@ -246,8 +289,11 @@ refs already handed out, because nothing is applied until flush.
 
 - Flush rebuilds without the removed elements and compacts; ids may
   shift. The flush report carries per-arena old→new id maps for users who
-  retained raw ids (`NodeId(pub u32)`). Handles never cross stores, so
-  this is type-safe; the maps exist for raw ids only.
+  retained raw ids (`NodeId(pub u32)`): each map is an old-id-indexed
+  array of `Option<new id>` with one entry per old arena slot (`None`
+  for removed records; new records have no old id and no entry). Handles
+  never cross stores, so this is type-safe; the maps exist for raw ids
+  only.
 - The pass discipline makes invalidation explicit: under `into_edit`,
   the old store is consumed and the borrow checker guarantees no handle
   survives the pass boundary. (This rests on handles holding real `&`
@@ -279,8 +325,10 @@ refs already handed out, because nothing is applied until flush.
 - **Backings (M1–M3)**: unchanged. Hooks are the single write path, so
   every backing works under flush replay without an interface change.
   Backings that require a build phase (CSR) are *satisfied* by flush,
-  which is always a full rebuild; the M3 constraint annotation
-  ("append-only build phase") documents this.
+  which is always a full rebuild; pipeline step 6 (backing finalization)
+  is where their compaction runs, and the M3 constraint annotations
+  ("append-only build phase", per-store freeze, post-compaction read
+  precondition) document the requirement.
 - **Payloads (M5+)**: `set_<one-arrow>` is the payload update path.
 - **Cost model**: flush is a deep copy of the entire store tree plus
   replay. Right for the target graph sizes; the report struct is where
