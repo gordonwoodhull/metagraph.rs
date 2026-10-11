@@ -297,7 +297,11 @@ where
 ## Repo changes
 
 - Convert to a workspace: root package `metagraph-exper` (runtime) +
-  `macros/` member `metagraph-exper-macros` (proc-macro).
+  `macros/` member `metagraph-exper-macros` (proc-macro). The workspace
+  split and the proc-macro/trybuild dependency stack are the milestone
+  that reshapes `Cargo.lock`; start tracking it in git at that point
+  (reproducible checkouts, and it removes one noise source from the
+  trybuild `.stderr` pinning).
 - The macros crate has **one shared grammar module** used by `pattern!`'s
   emission and `__implement_gen!`'s parsing, with round-trip tests. This
   is a commitment, not a mitigation: any drift between what `pattern!`
