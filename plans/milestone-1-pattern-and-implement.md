@@ -305,7 +305,12 @@ n.edges();                          // derived: out ++ in, self-loops twice
 ```
 
 Handles implement `Eq`/`Hash` by store pointer + index path (a single
-index at M1 depth). Markers are per-arrow-instantiation unit structs named
+index at M1 depth) — hand-written, never derived, and forwarding to
+(store pointer, id), never the id alone: a `derive` would bound
+`Store: Eq`/`Hash`, and id-only equality would equate handles from
+different stores (spike-verified; the reference `arena.rs` —
+`std::ptr::eq` plus id — is the shape, and spike 8 makes this identity
+load-bearing for generic transforms). Markers are per-arrow-instantiation unit structs named
 after the arrow, one module per pattern instance:
 `digraph::markers::OutEdges` here, `hierarchy::markers::outer::OutEdges`
 for composed patterns in M2 — module paths, never name concatenation.

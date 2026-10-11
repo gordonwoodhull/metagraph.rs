@@ -2,8 +2,9 @@
 
 Eleven throwaway spikes validating the riskiest claims in milestones 1–4
 before those milestones are implemented (nine from the original brief,
-plus 10 and 11 added by consolidation-review decisions). Method: sonnet
-subagents build each answer as a compiling scratch crate under `/tmp`
+plus 10 and 11 added by consolidation-review decisions; model tier
+chosen per task — spike 11 ran flash-tier over hand-written emission).
+Method: subagents build each answer as a compiling scratch crate under `/tmp`
 (the repo stays read-only), each maintaining a `REPORT.md` handoff in its
 scratch root. The output of a spike is answers and target code shapes,
 not code to keep; findings are folded back into the milestone plans as
@@ -23,7 +24,7 @@ they land.
 | 8 | Generic read→write transform | M4 | complete — folded in |
 | 9 | Removal + compaction + id-remap report | M4 | descoped (below) |
 | 10 | Root-arena drop from flat codegen | M1/M2 | complete — folded in |
-| 11 | Keyed lookup over path ids | M2 | planned — gates Hierarchy keyed bindings |
+| 11 | Keyed lookup over path ids | M2 | complete — folded in |
 
 ## The spikes
 
@@ -153,9 +154,22 @@ configuration spike 1's codegen rejects for fields, since the target's id
 is a host-anchored path (`SubNodeId(OuterNodeId(h), i)`). Question: can
 the keyed backing's map, its insert hook, and the keyed read method
 address embedded targets through path ids, and does lookup hold up
-through the nesting? Status: **planned** — it gates any Hierarchy test
-that binds `sub.subnode`/`sub.subedge`. The edge-induced test is
-unaffected (unfused `sub` root → flat SubNode ids).
+through the nesting? *Result:* **yes** — hand-written emission of the
+Hierarchy store with the keyed arrow bound, 5 tests green: path ids
+derive `Copy`/`Eq`/`Hash` unchanged and work as map values; the map sits
+on the host record beside the embedded arena; the insert hook takes
+`&mut` store state (the arena append and map insert cannot share one
+`&mut` host borrow — M1's hook contract already implies this shape);
+`<->` collapses the key type to the partner's plain id; key uniqueness
+is free with `HashMap`, so validate() checks key existence and
+value-in-arena. One codegen rule pinned: handles hand-write `Eq`/`Hash`
+forwarding to (store pointer, id) — a derive would bound
+`Store: Eq`/`Hash`, and id-only forwarding would equate handles across
+stores (the spike's first cut said id-only; corrected against the
+reference `arena.rs`, whose `std::ptr::eq` + id shape is what spike 8
+made load-bearing). Macro-side keyed grammar and codegen remain
+unverified. Folded into milestone-2; the Hierarchy keyed bindings are
+un-gated.
 
 ## Sequencing rules (from the original brief)
 

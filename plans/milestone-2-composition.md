@@ -9,8 +9,10 @@ structural-validation phase assignments, the edge-chain refinement sketch,
 and the courier chain itself end to end (three-member composition, fusion
 classes, per-instance marker re-minting, placement codegen, nested
 handles, generic `bfs` over composed handles — 16 tests). **Uncompiled:**
-keyed partial arrows and the `hash_index` backing (the first backing whose
-hooks maintain derived lookup state); the Subgraph pattern exactly as
+the macro side of keyed partial arrows and the `hash_index` backing
+(the mechanism is hand-built and tested in spike 11 — path-id values,
+store-level hook, trait shape; the grammar and codegen path are not);
+the Subgraph pattern exactly as
 sketched (the compiled version was simplified to `subnodes` + `main_node`,
 and its local root lived in the stdlib — declaring a local root alongside
 the pattern is unverified); the inducing `add_subedge` constructor and the
@@ -199,14 +201,21 @@ New built-in backing: `hash_index` — per-self-object map from key id to
 target id, maintained by the builder's insert hooks. It is the first
 backing whose hooks maintain *derived lookup state* (intrusive_list's
 hooks already mutate records; hash_index's maintain a secondary index),
-and it validates the hook interface designed in M1. One configuration is
-beyond the spike frontier: a keyed arrow *targeting an embedded class*
-(Hierarchy with `sub.subnode` bound) stores target ids the way field
-backing does — exactly the configuration spike 1's codegen rejects for
-fields, because the target's id is a host-anchored path. Spike 11 (keyed
-lookup over path ids, see spikes.md) must land before any Hierarchy test
-binds the keyed arrows. The edge-induced test is unaffected: with an
-unfused `sub` root, SubNode lives at root level and its ids are flat.
+and it validates the hook interface designed in M1. The risky
+configuration — a keyed arrow *targeting an embedded class* (Hierarchy
+with `sub.subnode` bound), where the map's values are host-anchored
+path ids — is spike-verified (spike 11, hand-written emission, 5 tests):
+path ids derive `Copy`/`Eq`/`Hash` unchanged and round-trip as map
+values; the map lives on the host record next to the embedded arena;
+the insert hook takes `&mut` *store* state, which M1's hook contract
+already requires (the arena append and the map insert cannot share one
+`&mut` host-record borrow); `<->` collapses the key type to the
+partner's plain id (`InnerNodeId`, no wrapper newtype); and key
+uniqueness per self object is free with `HashMap`, so `validate()`
+checks key existence and value-in-arena only. What remains unverified
+is the macro side: the keyed grammar and its codegen. The Hierarchy
+keyed bindings are un-gated; the edge-induced test never needed the
+gate (unfused `sub` root → flat SubNode ids).
 
 Checks attach to the **`validate()` boundary** M1 establishes: key
 existence (every key id names a real record) and key uniqueness per self
