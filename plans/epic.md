@@ -16,10 +16,11 @@ A Rust toolkit where graph *types* are assembled from atomic pieces:
   *backing* — a storage strategy contributing fields, mutation hooks, and an
   access protocol — and emits the concrete store, handles, and trait impls.
 
-The base directed graph is not built in: it is six single-arrow patterns
-composed. Bipartite graphs, hierarchical graphs (node is-also subgraph),
-edge-refinement graphs (edge is-also chain), and edge-induced subgraphs are
-all the same machinery applied to bigger piles of arrows.
+The base directed graph is not built in: it is assembled from six
+single-arrow patterns (instantiated inline in M1, re-expressed as a
+composition in M3). Bipartite graphs, hierarchical graphs (node is-also
+subgraph), edge-refinement graphs (edge is-also chain), and edge-induced
+subgraphs are all the same machinery applied to bigger piles of arrows.
 
 ## Design invariants (hold across all milestones)
 
@@ -68,7 +69,11 @@ all the same machinery applied to bigger piles of arrows.
    break them. The stdlib is the shared vocabulary, not a closed set: any
    crate may declare a root single-arrow pattern the way the stdlib does,
    and generic algorithms are portable exactly to the extent that patterns
-   agree on roots.
+   agree on roots. **Roots register themselves**: every root pattern emits a
+   registration courier publishing its trait metadata (method name,
+   associated type names, cardinality), and `implement!` resolves any root
+   through that courier — there is no fixed table of stdlib arrows, and
+   user-declared roots work exactly like stdlib ones.
 
 ## Milestones
 
@@ -85,9 +90,10 @@ all the same machinery applied to bigger piles of arrows.
 Stores are immutable once built (invariant 5). M4 generates the write
 side from the schema the same way as the read side: a transaction stages
 changes against a borrowed store (old handles keep working), and flush
-replays them through the construction hooks into a new immutable store,
-running induction and referential-integrity validation on the way.
-Removal is rebuild-without; no generational arenas. Full sketch:
+applies them to a rebuilt store through the construction hooks — removals
+first, then constructive ops in submission order — running induction and
+referential-integrity validation on the way. Removal is rebuild-without;
+no generational arenas. Full sketch:
 [milestone-4-builders.md](milestone-4-builders.md).
 
 ## Milestone 5+ (purposely vague)
@@ -113,12 +119,14 @@ Threads we can see from here but haven't scoped:
   grammar errors come from the proc macro. Compile-fail behavior
   (impossible bindings, impossible patterns) is tested with `trybuild`
   from M1 onward — validation that isn't tested doesn't exist.
-- **Schema-token spans degrade through the courier.** User tokens keep
-  their spans end to end; schema tokens embedded in the courier are
-  re-spanned to the `implement!` call site. Schema-side errors must quote
-  the offending tokens in the message text rather than relying on spans,
-  and trybuild `.stderr` files will carry expansion-chain notes (pin them
-  per toolchain).
+- **Schema-token spans degrade through the courier — repeatedly.** User
+  tokens keep their spans end to end; schema tokens embedded in the courier
+  are re-spanned to the `implement!` call site, and the degradation
+  compounds across hops: composition adds a bounce per member pattern, and
+  root-metadata resolution adds one per arrow. Schema-side errors must
+  quote the offending tokens in the message text rather than relying on
+  spans — this is mandatory, not optional — and trybuild `.stderr` files
+  will carry expansion-chain notes (pin them per toolchain).
 - **Debuggability**: users will need `cargo expand` to read generated code.
   Keep generated code boring: no cleverness, consistent names, doc comments
   carrying the arrow that produced each item.

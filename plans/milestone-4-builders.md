@@ -12,15 +12,19 @@ coherent end to end, but nothing here has been compiled.
 
 - Stores are immutable once built; construction uses `&mut` methods on the
   store (epic invariant 5). Handles borrow the store and identify by store
-  pointer + index path.
+  pointer + index path. Terminology: the store in its `&mut` construction
+  phase is *the builder*; the staging type M4 adds is *the transaction*;
+  flush re-runs the builder machinery.
 - Hooks are the single write path: every mutation primitive (field writes,
-  intrusive links, hash-index maintenance) lives in a per-backing hook over
-  `&mut` store state, and the `add_*` constructors are thin orchestration.
+  intrusive links, hash-index maintenance) lives in a named per-backing
+  hook function over `&mut` store state, and the `add_*` constructors are
+  thin orchestration (M1 commits to both names and shape).
 - Validation has a named boundary (`validate()`): key existence, key
-  uniqueness per self object.
-- Backings declare phase constraints (M3 annotations); CSR-style backings
-  already assume a build/flush boundary.
+  uniqueness per self object. M2 callers invoke it explicitly; flush
+  invokes it unconditionally.
 - Nested stores are addressed by index paths (M2).
+- CSR-style backings (M3) assume a build/flush boundary; M3's constraint
+  annotations make the requirement explicit.
 
 M4 builds nothing new for storage. It adds a *staging* type in front of
 the existing construction machinery and a flush that replays staged
@@ -31,7 +35,7 @@ changes through it.
 ```rust
 let mut tx = store.edit();           // borrows &Store; reads and old
                                      // handles keep working while staging
-let a = tx.add_node();               // provisional ref: opaque, tx-local
+let a = tx.add_node();               // provisional ref: opaque, tx-stamped
 let b = tx.add_node();
 tx.add_edge(a, b);                   // provisional refs
 tx.add_edge(old_node, a);            // old-store elements by handle or id
@@ -56,34 +60,68 @@ continue with the new metagraph. Two entry points support this:
 
 - **The transaction borrows the old store sharedly.** This is the
   ergonomic point of the design: you can traverse the graph (with real
-  handles, real read traits) while staging its replacement. The M2
-  interleaving problem — `&mut` construction invalidating every handle —
-  never arises.
-- **Provisional refs** (`Ref<Node>` ≈ `Existing(NodeId) | Pending(u32)`)
+  handles, real read traits) while staging its replacement. The
+  interleaving problem of `&mut` construction — every mutation
+  invalidating every handle — never arises.
+- **Provisional refs** (`Ref<Node> ≈ Existing(NodeId) | Pending(u32)`)
   name entities inside the change set: new ones by submission order, old
-  ones by id. They are opaque tokens, not handles — no read traits — and
-  they die at flush. The `Existing` half shares identity with old-store
-  handles through the stable id, and the transaction (which borrows the
-  old store) can resolve one to a handle on request; only `Pending` refs
-  lack identity, and only until flush. Refs are local to the transaction
-  that issued them — a deliberate property: the change set is a
-  first-class, self-contained value, which is the foundation for future
-  directions (inspection, serialization, possibly merge) even though
-  merging stays out of scope here. Staging never touches a store: the
-  change set is a queue, not a private clone, so a staged `remove` cannot
-  invalidate refs already handed out — everything is applied at once, at
-  flush.
-- **Flush** rebuilds from the old store's arenas (consumed and reused
-  under `into_edit`, cloned under `edit`), replays the staged operations
-  in submission order through the *same backing hooks* construction uses,
-  drops removed elements and compacts, runs induction rules, calls the
-  validation boundary, and returns the new store plus a report carrying
-  per-arena old→new id maps. Kept elements keep their iteration order;
-  new elements append in replay order; `intrusive_list`'s
-  reverse-insertion contract applies to new inserts.
+  ones by id. They are opaque tokens, not handles — no read traits. The
+  `Existing` half shares identity with old-store handles through the
+  stable id, and the transaction (which borrows the old store) can
+  resolve one to a handle on request; only `Pending` refs lack identity,
+  and only until flush.
+- **Ref locality is a runtime guarantee, deliberately.** Every ref is
+  stamped with a token the transaction mints at `edit()`/`into_edit()`.
+  Staging ops check the stamp eagerly for `Pending` refs: a ref minted by
+  another transaction, or left over from before a flush, is a programming
+  error caught at the staging call. `Existing` halves carry old-store ids
+  and are validated at flush like any other id. Compile-time branding was
+  considered and rejected: the only sound version (generativity) requires
+  a callback API and makes refs un-storable outside the closure, which
+  would destroy the change set's status as a first-class, self-contained
+  value — the foundation for future directions (inspection,
+  serialization, possibly merge) even though merging stays out of scope
+  here. Staging never touches a store: the change set is a queue, not a
+  private clone, so a staged `remove` cannot invalidate refs already
+  handed out — everything is applied at once, at flush.
+- **Handles convert to refs with a store-identity check.** Anywhere an
+  `Existing` ref is expected, an old-store handle or raw id is accepted;
+  the conversion debug-asserts the handle's store pointer against the
+  transaction's store. Lifetimes alone do not enforce this (a handle into
+  an unrelated longer-lived store coerces), and a foreign handle's id
+  would silently resolve against the wrong arena.
+- **Flush** is a fixed six-step pipeline, not a raw replay of the queue.
+  The change set mixes constructive ops (which replay through hooks) with
+  removals (which are set-theoretic — rebuild-without — and never replay),
+  so ordering must be stated:
+  1. **Resolve removals**: compute the kept set per arena; validate every
+     `Existing` ref (unknown old id → `FlushError`).
+  2. **Dangler detection** over kept records *and* staged constructive
+     ops, in old-id space — this precedes compaction so the report names
+     ids the user actually staged with. Violations are listed by
+     change-set op index.
+  3. **Compact** kept arenas, assign new ids, build the per-arena old→new
+     maps.
+  4. **Replay constructive ops in submission order** through the same
+     backing hooks construction uses, translating `Existing` refs through
+     the maps; root-level ops before nested ops at each step, so
+     provisional index paths resolve top-down.
+  5. **Induction** runs during replay, because replay goes through the
+     same constructors as direct construction.
+  6. **`validate()`**: key existence, key uniqueness.
+  Order contracts: kept elements keep their iteration order; new arena
+  records append in replay order. Intrusive link fields of kept records
+  are *copied and remapped* through the id maps, never replayed; genuinely
+  new inserts push-front onto the remapped heads, so new members iterate
+  first and the reverse-insertion contract holds for them.
 - **Flush errors are runtime data**, not compile errors: a `FlushError`
   lists each violation (dangling endpoint, duplicate key) by change-set
-  op index. No spans; the op index is the debugging handle.
+  op index. No spans; the op index is the debugging handle. The full
+  surface: dangling endpoint (named in old ids), duplicate key, unknown
+  old id, `set_` or `remove` of a removed element, double removal,
+  removal of a `Pending` ref, and ops staged under a nested path whose
+  record was removed (the change set must be coherent; a silent discard
+  would hide staging bugs).
 
 ## Write traits mirror read traits
 
@@ -92,34 +130,52 @@ trait implemented by the store's transaction type.
 
 | arrow shape | read side | write side (on the transaction) |
 |---|---|---|
-| entity | root accessor, handles | `add_<entity>(<total one-arrow args>) -> Ref<E>` |
+| entity | root accessor, handles | `add_<entity>(<total one-arrow args>) -> Ref<E>`; `remove_<entity>(Ref<E>)` |
 | total `one` | `e.target()` | constructor argument of `add_<entity>` |
 | optional `one` | `e.payload() -> Option<_>` | `set_<arrow>(Ref<A>, Ref<B>)` |
 | `many`, primitive | `p.tags()` | `insert_<arrow>(Ref<A>, Ref<B>)` — membership asserted directly |
+| `many`, existence-derived | `g.nodes()` | none beyond `add_<entity>`/`remove_<entity>` — membership is record existence |
 | `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
 | keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` — function semantics; duplicate key is a flush error |
 
-Derived arrows (`:= union`) have no write side, exactly as they have no
-backing. During flush replay, a derived `many` arrow's hooks fire when
-the determining field is replayed (constructor or `set_` op), so replay
-order needs no special casing for membership. Primitive insertions into a
-derived relation are impossible by construction — the method does not
-exist — which is what the schema's `by` declaration buys (M1 syntax
-section).
+Derived read arrows (`:= union`) have no write side, exactly as they have
+no backing. A `by`-derived `many` arrow's hooks fire when the determining
+field is replayed (constructor or `set_` op), so replay order needs no
+special casing for membership. Primitive insertions into a derived
+relation are impossible by construction — the method does not exist —
+which is what the schema's `by` declaration buys (M1 syntax section).
 
 Markers are the same per-instance markers as the read side, so a
 generic algorithm can bound on `OutEdges<M>` and `InsertOutEdges<M>`
 together — e.g. a graph-transform pass that reads one store and stages
-another without knowing either pattern.
+another without knowing either pattern. Two additions make that actually
+work:
+
+- Write traits carry **associated ref types** (`type NodeRef;`) — a
+  generic algorithm cannot name the concrete `Ref<Node>`.
+- A **handle→ref mapping**: the transaction converts old-store handles
+  and ids to `Existing` refs, exposed as a trait so generic code can
+  relate the read side's handle types to the write side's ref types
+  (associated-type equality bounds suffice).
+
+Node creation is *not* generic across patterns: the constructor argument
+list is the entity's total `one` arrows, which differ per schema. A
+generic transform therefore bounds on a per-pattern node-constructor
+trait plus per-arrow ops, and covers primitive arrows only — copying a
+`by`-derived arrow's membership happens implicitly through the
+determining fields.
 
 ## Nested stores
 
 A change-set entry is an `(index path, operation)` pair — the same
 addressing scheme handles already use. The transaction API exposes scoped
 sub-transactions: `tx.within(node)` stages operations against the subgraph
-store embedded in that (possibly provisional) node's record. Flush
-replays root-level operations before nested ones, so provisional paths
-resolve top-down.
+store embedded in that (possibly provisional) node's record. Since the
+change set is already path-addressed, `within` records a path prefix and
+ops are queued as `(path, op)` pairs — no borrow is held, so root and
+nested staging interleave freely. Flush replays root-level operations
+before nested ones (pipeline step 4), so provisional paths resolve
+top-down.
 
 ## Induction
 
@@ -156,9 +212,14 @@ One API consequence: undeclared constructor code still needs to *read* —
 it follows `main_edge` to `source`/`target` — but during construction the
 builder owns the store mutably, and pattern code can't touch generated
 private fields. The builder therefore exposes a **read view of the store
-under construction** (id-based getters or a restricted root handle) so
-constructor code can follow arrows. The same view serves flush replay,
-which reads copied old data plus already-replayed ops.
+under construction as generated id-based getters** (field reads by id,
+returning ids and copies — never handles). Handles are rejected here on
+purpose: a whole-store handle's shared borrow cannot coexist with the
+`&mut` field access that mutates a nested store (the borrow checker
+forbids it exactly in the case induction needs). A restricted root handle
+is viable only in the flat case, where the store being read is not the
+store being mutated; id getters work in both. The same view serves flush
+replay, which reads copied old data plus already-replayed ops.
 
 Note the edge-induced form is the special case: a general subgraph may
 also carry standalone nodes (`add_subnode` called directly, never induced
@@ -189,12 +250,15 @@ refs already handed out, because nothing is applied until flush.
   this is type-safe; the maps exist for raw ids only.
 - The pass discipline makes invalidation explicit: under `into_edit`,
   the old store is consumed and the borrow checker guarantees no handle
-  survives the pass boundary.
+  survives the pass boundary. (This rests on handles holding real `&`
+  references; the guarantee is NLL liveness, not scope, and any future
+  raw-pointer handle redesign would lose it.)
 - **Cascade policy is minimal.** A removal that would leave dangling
-  references (removing a node with incident edges still present) is a
-  `FlushError` listing the danglers — the change set must remove
-  dependents explicitly. One exception: a nested store embedded in a
-  removed record goes with the record, contents and all.
+  references (removing a node with incident edges still present — whether
+  kept from the old store or staged in this change set) is a `FlushError`
+  listing the danglers — the change set must remove dependents
+  explicitly. One exception: a nested store embedded in a removed record
+  goes with the record, contents and all.
 - Tombstones are rejected: they would complicate every backing contract
   (intrusive lists, size hints, CSR ranges) for a benefit
   rebuild-without already provides.
@@ -206,7 +270,9 @@ refs already handed out, because nothing is applied until flush.
   store is a new identity. The id-remap report exists for raw ids, not
   handles.
 - No concurrency or merging: two transactions on one store are
-  independent forks; merging change sets is out of scope.
+  independent forks; merging change sets is out of scope. (The ref stamp
+  makes cross-fork contamination a staging error rather than a silent
+  mis-wiring.)
 
 ## Interactions with other milestones
 
@@ -224,15 +290,22 @@ refs already handed out, because nothing is applied until flush.
 ## Task sequence (sketch)
 
 1. Change-set data model + provisional refs for flat `Digraph`; flush =
-   clone + replay + validate. Königsberg built via transaction must equal
-   the M1 store in every observable way (same test assertions).
-2. Write traits generated per arrow; a generic read→write transform
-   (copy a graph through trait bounds only) as the portability proof.
-3. Flush-error surface: dangling endpoint, duplicate key, unknown old id.
+   the six-step pipeline over a cloned store. Königsberg built via
+   transaction must equal the M1 store in every observable way (same test
+   assertions).
+2. Write traits generated per arrow, with associated ref types; a generic
+   read→write transform (nodes via a per-pattern node-constructor bound,
+   edges via per-arrow ops, primitive arrows only) as the portability
+   proof.
+3. Flush-error surface: the full list from the core model (dangling
+   endpoint, duplicate key, unknown old id, `set_`/`remove` of a removed
+   element, double removal, removal of a `Pending` ref, ops under a
+   removed nested path).
 4. Nested stores: path-addressed ops and sub-transactions; hierarchy
    edit tests (stage a new outer node *and* its subgraph in one flush).
 5. Induction for the subgraph pattern: the inducing `add_subedge`
-   constructor as a builder extension over the generated primitives.
+   constructor as a builder extension over the generated primitives and
+   the id-based read view.
 6. Removal with compaction and the id-remap report; cascade-policy tests
    (dangling removals rejected, nested stores dropped with their record).
 
@@ -240,7 +313,9 @@ refs already handed out, because nothing is applied until flush.
 
 - **Provisional refs are a second handle-like concept.** Users will try
   to call read methods on them. Naming (`Ref` vs `Handle`) and docs carry
-  the weight; the type system already refuses.
+  the weight; the type system already refuses. Locality violations are
+  caught at staging, but the error must name which transaction the ref
+  came from (or when it died) to be useful.
 - **Flush error quality.** Errors are runtime data and point at op
   indices ("op 14: edge endpoint not in store"); the index alone is a
   weak debugging handle. If this proves painful, ops can record the
