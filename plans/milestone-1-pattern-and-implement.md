@@ -111,8 +111,11 @@ permanent owner of its trait (`Nodes`, `OutEdges`, `InEdges`, `Source`,
 `Target`, `Edges`). Multi-arrow `pattern!` blocks *instantiate* stdlib
 arrows with local entity bindings — they do not declare fresh traits. This
 keeps generic algorithms portable across every pattern that instantiates a
-stdlib arrow, and makes the M3 refactor (Digraph as composition of
-single-arrow patterns) a non-event.
+stdlib arrow, and makes the M3 refactor (re-expressing the built-ins in
+the `backing!` DSL) a non-event. (An earlier draft also anticipated
+re-expressing `Digraph` itself as a composition of single-arrow patterns
+in M3; spike 12 found that illegal, and the re-expression is dropped —
+M3's stdlib-refactor section.)
 
 A single-arrow `pattern!` with no instantiation source is the root that
 declares a fresh trait; users may define their own root arrows the same

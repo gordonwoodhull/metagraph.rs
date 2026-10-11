@@ -45,9 +45,9 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
    other store and runtime multiplicity is unconstrained (many subnodes may
    reference one inner node). Handles are wide pointers: root store
    reference plus an index path into nested arenas, gaining fields only via
-   dereference. Colocation classes are therefore *hostings*: at most one
-   member instance's root-marked entity plus element entities of one other
-   instance (M2's exactly-one-placement check; spike 12). Composition
+   dereference. Colocation classes are therefore *hostings*: exactly one
+   member instance's root-marked entity plus element entities of exactly
+   one other instance (M2's docking check; spike 12). Composition
    juxtaposes whole patterns, nests them inside host records, and closes
    open entities by reference — it never shares one sort across instances.
    Sort-sharing over one flat arena is what inline instantiation within a
@@ -74,7 +74,8 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
    algorithms are written against the stdlib arrow's trait and apply to
    every pattern that instantiates it. Without this, algorithms would not
    be portable across patterns, and redefining `Digraph` as a composition
-   of single-arrow patterns (M3) would silently change trait identity and
+   of single-arrow patterns (a possibility entertained before spike 12
+   found it illegal) would silently change trait identity and
    break them. The stdlib is the shared vocabulary, not a closed set: any
    crate may declare a root single-arrow pattern the way the stdlib does,
    and generic algorithms are portable exactly to the extent that patterns

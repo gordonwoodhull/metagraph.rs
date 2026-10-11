@@ -56,7 +56,13 @@ argument name collisions across instances of one fusion class silently
 deduped (keeps first); further composition of a composed pattern untested.
 One recorded limit was later retired by spike 10 (the flat/composed
 root-arena asymmetry); the insert-op naming deviation was resolved back
-to the `insert_<arrow>` convention (M1).
+to the `insert_<arrow>` convention (M1). The M3 review fold retired or
+reclassified three more: the constructor-dedup limit is unemittable for
+required fields (E0063 — the ctor-merge probe's negcheck) and colliding
+`ctor_arg` contributions are instance-prefixed instead; the unfused-root
+intrusive rejection is a codegen frontier item, DSL-legal per M3; and
+the field-into-embedded rejection is a codegen limit, not a rule (M3's
+placement rules).
 
 **2. Nested-store codegen by hand.** Hand-write the code
 `__implement_gen!` should emit for a Hierarchy-like store, as the codegen
@@ -105,7 +111,11 @@ vocabulary (`append_only`, `requires_compaction_at_boundary`,
 order is now a per-backing contract annotation; M4's flush gained a
 backing-finalization step. Left one open decision: how generated code
 represents the build/frozen phase (type-state vs separate builder type
-vs runtime flag). Folded into milestones 3 and 4.
+vs runtime flag). Folded into milestones 3 and 4. (Spelling notes from
+the M3 fold: `append_only` is written `append_only_build` in the
+declaration, and `field_contributions: store_level_only` is absorbed by
+the phase-attributed `on store build/frozen` clauses rather than carried
+as a separate annotation.)
 
 **7. The flat-`Digraph` transaction, by hand.** `edit()`/`into_edit()`,
 token-stamped refs with eager `Pending` checks, the change-set queue, the
@@ -207,9 +217,17 @@ an inline instantiation.
 
 ## Probes (review-session evidence outside the numbered spikes)
 
+The spike index is the evidence ledger; the probes below are cited by
+the plans at load-bearing points and are recorded here so a reader can
+find the artifacts. All are throwaway hand-written-emission crates under
+`/tmp`, no proc macros.
+
 | probe | workspace | result |
 |---|---|---|
-| Combined ctor-collision rule (M2 review 4) | queued | One fused record, one shared-arg constructor (targets agree via `<->`), one instance-prefixed constructor (targets differ), asserting each field routes from the right argument. Covers the sharing half of the combined rule, which is plan-pinned only; the prefixing half is already covered by /tmp/m3-probe-ctor-merge |
+| Edge-induced subgraph (store-level keyed maps, root-marked unfused self) | `/tmp/m2-probe-edge-induced` | 5/5 tests. Keyed maps live on the store; the 2-arg self-less insert op (`insert_subnode_hook(s, key, target)`) is the only emittable form — a root-marked self owns no id. Associated-type keyed trait (`KeyedOf<M> { type Key; }`) — the other side of the trait-shape question from spike 11's concrete parameter. Also documents: duplicate key silently overwrites and `validate()` still passes (why uniqueness enforcement lives at the write boundary, not in validate) |
+| Poly-placement validate (M3 review 2) | `/tmp/m3-probe-poly-validate` | 7/7 tests. One authored hash_index validate body emitted unchanged at store-level and host-embedded placements; only three bound roles differ (the map iterator, key-containment, value-containment). Honest limits: no per-map owner context in error messages; compound path-id containment yields coarse messages |
+| Instance-prefixed merged constructor (M3 review 2) | `/tmp/m3-probe-ctor-merge` | 2/2 tests + E0063 negcheck. The merged constructor of a two-instance colocation class takes the union of both members' `ctor_arg` arguments, instance-prefixed on collision (`outer_source`/`inner_source`), routing by name via field-init shorthand. Spike 1's "silently deduped (keeps first)" is unemittable for required fields |
+| Mixed-binding phased store (M3 review 2) | `/tmp/m3-probe-mixed-phase` | 5/5 tests + E0599 negcheck. CSR (`out_edges`) + intrusive (`in_edges`) coexist on one `GraphStore<P>`: per-record links cross the build/frozen boundary untouched, freeze finalizes only CSR's store-level state, two validate functions summoned in binding order catch their own backing's damage. Hazard pinned: an undifferentiated field list lets a forgetful freeze carry stale accumulators into the frozen store — the motivation for phase-attributed contributions |
 
 ## Sequencing rules (from the original brief)
 

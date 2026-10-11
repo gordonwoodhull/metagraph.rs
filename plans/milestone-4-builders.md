@@ -32,7 +32,9 @@ nested staging, and induction remains uncompiled.
   link well-formedness, membership consistency between an arrow's links
   and its determining fields for `by`-derived arrows, and the
   intrusive-ownership partition check for *primitive* intrusive arrows,
-  which have no determining field to be consistent with). A store with
+  which have no determining field to be consistent with). Key uniqueness
+  is structural under `HashMap` and is enforced *here*, not in
+  `validate()`: step 2 detects duplicate staged keys (below). A store with
   no keyed arrows still validates; keyless backings contribute the
   structural half. M2 callers invoke it explicitly; flush invokes it
   unconditionally.
@@ -122,6 +124,15 @@ continue with the new metagraph. Two entry points support this:
      `add_<entity>`. A violation on a kept record has no op of its own,
      so it is attributed to the removal op that caused it, and violations
      distinguish `Kept(old id)` from `Staged(op index)` elements.
+     **Duplicate-key detection runs here too**: keyed inserts are
+     function semantics, and replaying two inserts with the same
+     (self, key) would silently overwrite (HashMap insertion; the
+     edge-induced probe demonstrates `validate()` still passes
+     afterward — no emitted check can catch it). Flush scans staged
+     keyed inserts for repeated (self, key) pairs, and checks each
+     staged key against the old store's kept maps (a kept record
+     already indexed under that key is a collision); violations join
+     the `FlushError` list by op index.
   3. **Compact** kept arenas, assign new ids, build the per-arena old→new
      maps. Each map is an old-id-indexed array of `Option<new id>`, one
      entry per old arena slot, `None` for removed records; new records
@@ -395,7 +406,11 @@ refs already handed out, because nothing is applied until flush.
 ## Task sequence (sketch)
 
 1. Change-set data model + provisional refs for flat `Digraph`; flush =
-   the seven-step pipeline over a cloned store. Königsberg built via
+   the seven-step pipeline, rebuilding through the build phase from the
+   old store's data (a phased store cannot be cloned-then-replayed —
+   replay-into-frozen is a compile error under M3's type-state decision;
+   for non-phased stores the "build phase" is the M1 builder shape).
+   Königsberg built via
    transaction must equal the M1 store in every observable way (same test
    assertions).
 2. Write traits generated per arrow, with associated ref types; a generic
