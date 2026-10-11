@@ -13,7 +13,7 @@ the macro side of keyed partial arrows and the `hash_index` backing (the
 mechanism is hand-built and tested in both configurations — spike 11
 covers the embedded target: path-id values, store-level hook, concrete-key
 trait shape; a review probe, /tmp/m2-probe-edge-induced, covers the
-root-marked self: store-level map, two-arg insert, root-generic
+unfused-root self: store-level map, two-arg insert, root-generic
 associated-`Key` trait, `add_subedge(me)` induction; the grammar and
 codegen path are neither); the Subgraph pattern exactly as
 sketched (the compiled version was simplified to `subnodes` + `main_node`,
@@ -27,10 +27,14 @@ intrusive arrows sourced at embedded classes or unfused roots rejected;
 field backing into an embedded class rejected (its id needs a host path);
 arena arrows into an embedded class hosted by another class rejected;
 `<=>` transitivity exercised only on two-member classes; constructor
-argument name collisions across instances of one fusion class silently
-deduped (keeps first); and further composition of a composed pattern
-untested (the emitted courier has the right shape, but the member-schema
-grammar would need to nest).
+argument name collisions across instances of one fusion class dedup
+the argument list, keeping the first — but the dropped member's field
+is then un-fed (feeding it from the shared argument needs
+cross-instance id-sort unification; leaving it unset is inexpressible),
+and spike 1 never exercised a true collision (its field emission would
+hit a duplicate field first); and further composition of a composed
+pattern untested (the emitted courier has the right shape, but the
+member-schema grammar would need to nest).
 
 ## In scope
 
@@ -120,9 +124,12 @@ Fusion has two flavors (epic invariant 4):
   instance whose root is unfused keeps its arenas at the store's root
   level. Reference fusion never affects placement. The root-marked
   entity owns no arena, flat or composed (M1's naming rule): its
-  "record" is the store itself (unfused root) or the host class's fused
-  record (colocated root), and instances contribute arenas for their
-  non-root entities only. In the `Hierarchy` example: `inner`'s
+  "record" is the store itself (an unfused root — it takes part in no
+  `<=>` fusion, so there is exactly one self per store and no id names
+  it) or the host class's fused record (a colocated root — one self per
+  host record, discriminated by the host's id), and instances
+  contribute arenas for their non-root entities only. In the
+  `Hierarchy` example: `inner`'s
   arenas live at the root (its root is unfused — one shared inner graph),
   while `sub`'s arenas (SubNode/SubEdge plus their indexes) embed in each
   outer node record because `outer.Node <=> sub.Subgraph`. Handles borrow
@@ -142,7 +149,11 @@ Fusion has two flavors (epic invariant 4):
   sub.Subgraph` — is named by its first element member (non-root member)
   in the composition's instance order: the class's type, id, record, and
   constructor all take that member's name (spike 1's rule; `OuterNode`,
-  `add_outer_node`). Write-op names otherwise derive from the
+  `add_outer_node`) — its *post-collision* name, since
+  instance-prefixing applies before class naming (`OuterNode` is
+  outer.Node's prefixed form; spike 1's codegen prefixes from
+  cross-instance declaration count, then names the class from the
+  canonical member). Write-op names otherwise derive from the
   instantiation's local names (M1) and take the instance prefix on
   collision. Merged constructors take the union of every member's total
   `one`-arrow arguments in that same order — composition-instance order,
@@ -227,8 +238,10 @@ whose method takes an argument beyond `&self`; M1's root-trait grammar
 reserves the parameter slot for it. The keyed cardinality is declared on
 the root, which owns the method and its key parameter; the instantiation
 supplies only the key-entity binding (`key(MainNode)`), a local clause
-like `by` — it never restates the cardinality (see M1's trait-identity
-section).
+like the instantiation-side `by` — it never restates the cardinality
+(`by` never appears on a root, which declares a bare capability;
+`key(K)` must, since the root owns the keyed cardinality — see M1's
+trait-identity section).
 
 The root side, sketched (`SubNodeOf` is the stdlib candidate; `SubEdgeOf`
 has the same shape):
@@ -255,9 +268,10 @@ pub trait SubNodeOf<M> {
 }
 ```
 
-One emission rule pinned by the same probe: associated-type bindings in
-the generated impls must name the impl lifetime (`type SubNode =
-SubNode<'s>` inside `impl<'s>`; `'_` there is E0637). The
+One emission rule, pinned by a follow-up probe (/tmp/m2-probe-e0637;
+the edge-induced probe pins the positive form): associated-type
+bindings in the generated impls must name the impl lifetime
+(`type SubNode = SubNode<'s>` inside `impl<'s>`; `'_` there is E0637). The
 registration-courier metadata grows the keyed variant accordingly —
 beyond (method name, GAT name, associated type names, cardinality), a
 keyed root publishes the key's associated type name, so codegen types
@@ -284,13 +298,18 @@ Two configurations, both verified by hand-written emission:
   (the arena append and the map insert cannot share one `&mut`
   host-record borrow); `<->` collapses the key type to the partner's
   plain id (`InnerNodeId`, no wrapper newtype).
-- *Root-marked self* — the edge-induced composition (Tests, below), the
-  arrow sourced at `sub`'s unfused root (review probe, 5 tests): the
-  self owns no record or id, so the map is a store-level field — the
-  contribution site M1's backing contract has always allowed — and the
-  insert op omits the self argument: `insert_subnode(key, target)`.
-  Write ops for arrows sourced at a root-marked entity follow this rule
-  generally: there is exactly one self, and it has no id to pass.
+- *Unfused-root self* — the edge-induced composition (Tests, below),
+  the arrow sourced at `sub`'s unfused root (review probe, 5 tests):
+  the self owns no record or id, so the map is a store-level field —
+  the contribution site M1's backing contract has always allowed — and
+  the insert op omits the self argument: `insert_subnode(key, target)`.
+  Write ops for arrows sourced at an unfused root follow this rule
+  generally: there is exactly one self, and it has no id to pass. The
+  colocated-root self is the host shape's mirror: one self per host
+  record, discriminated by the host's id — the keyed insert takes the
+  host argument and the map sits on the host record (spike 11's
+  `insert_subnode_hook(&mut Store, host, main, sub)`), while a non-root
+  self passes its own id, as always.
 
 What remains unverified is the macro side: the keyed grammar and its
 codegen. The Hierarchy keyed bindings are un-gated; the edge-induced
@@ -306,7 +325,10 @@ panics on a live key, and M4's transaction does the same at the staging
 call — checked against the borrowed old store and the already-staged
 inserts, a staging panic like a foreign ref, deterministically
 detectable where the op is submitted and never a flush error. Uniqueness
-thereafter holds by construction.
+thereafter holds by construction. How entries fare across removal and
+flush — the key side as a reference, the target side as membership,
+maps carried and never rebuilt — is recorded with M4's cascade policy
+as completion points (M4, Removal).
 
 Runtime checks attach to the **`validate()` boundary** M1 establishes:
 key existence (every key id names a real record) and value-in-arena
@@ -348,13 +370,17 @@ read-side addition it will reuse:
   `add_subedge` (Tests, below) follows `main_edge` to `source`/`target`
   — but during construction the builder owns the store mutably, and
   pattern code can't touch generated private fields. The read view is
-  generated id-based getters on the store, named after the arrow they
-  read, taking and returning ids and copies — never handles: one
-  field-read getter per bound `one` arrow (the probe's spelling:
-  `main_edge_source(me)`, reading through the partner map where the
-  arrow crosses an open entity) and one keyed lookup per keyed arrow
-  (`subnode_by_key(key) -> Option<target id>`). This is user-callable
-  surface — the inducing constructor is user code — so the getter names
+  generated id-based getters on the store, taking and returning ids and
+  copies — never handles: one field-read getter per bound `one` arrow,
+  named after the arrow whose field it reads — qualified by the
+  read-through arrow when the read crosses an instance boundary (the
+  probe's spelling: `main_edge_source(me)`, reading through the partner
+  map where the arrow crosses an open entity) — and one keyed lookup
+  per keyed arrow (`subnode_by_key(key) -> Option<target id>`); getter
+  names take the instance prefix on collision, like every other
+  generated name (the collision rule under Naming above). This is
+  user-callable surface — the inducing constructor is user code — so
+  the getter names
   are contract, not convenience. Handles are rejected outright: during
   construction there is exactly one store, being read and mutated at
   once, so no handle — whole-store or restricted — can coexist with
@@ -407,7 +433,9 @@ Two run at `pattern!` time (each needs only the declaring pattern):
 
 Five run at `compose_pattern!` time — all member schemas and fusions are
 in hand at the final hop, which the courier chain guarantees. The set is
-spike 1's verified final-hop checklist:
+spike 1's verified final-hop checklist (its root-per-instance item moved
+to `pattern!` time, where M1's grammar enforces it) plus spike 4's
+classes-closed check:
 
 - Fusion endpoints exist: every `instance.Entity` names a real member.
   (Grammar validation, but it belongs here because only the final hop
@@ -419,12 +447,18 @@ spike 1's verified final-hop checklist:
   closure (`a.X <-> b.N` *and* `a.X <-> c.N`) would unify `b.N`'s and
   `c.N`'s ids through one open entity and is rejected.
 - Fusion classes must be closed: no open entity survives composition.
-- Every colocation-fusion class has exactly one arena placement. This
-  rejects double-closed entities (`a.X <=> b.N` *and* `a.X <=> c.N`,
-  where transitivity merges arenas from two instances), cross-
-  multiplicity colocations (fusing an entity whose arena embeds per-record
-  with one whose arena lives at root: each asks one id type to index two
-  arenas), and two root-marked entities in one class.
+- Every colocation-fusion class has exactly one arena placement, and
+  its element members come from at most one instance. This rejects
+  double-closed entities (`a.X <=> b.N` *and* `a.X <=> c.N`, where
+  transitivity merges arenas from two instances), cross-multiplicity
+  colocations (fusing an entity whose arena embeds per-record with one
+  whose arena lives at root: each asks one id type to index two
+  arenas), two root-marked entities in one class, and peer-shaped
+  cross-instance colocation (`a.X <=> c.Y`, elements of two instances
+  — spike 1's message: "colocation class fuses elements of multiple
+  instances"). The host shape — one instance's element hosting other
+  instances' roots, `outer.Node <=> sub.Subgraph` — is the legal
+  cross-instance form.
 
 Two run at `implement!` time, because they need backing bindings:
 
@@ -437,19 +471,30 @@ Two run at `implement!` time, because they need backing bindings:
   per-backing contribution typing (inline vs id), which is
   implement!-time information.)
 - Field contributions must have a home after placement, and the home
-  must be id-addressable. One `implement!` call generates **one root
-  store**; every instance's arenas live in that store's tree (root-level,
-  or embedded per host record by the placement rule) — so the placement
-  half of this check is vacuous in M2, exactly as spike 4 pinned ("every
-  arena is in the one store, so every contribution trivially has a
-  home"); like check 2's vacuity, the boundary is kept for the layouts
-  that make it bite. The live half is addressability: a field whose
-  value references an embedded class is rejected, because the embedded
-  class's ids are host-anchored paths the field's constructor arguments
-  cannot supply — this is where the frontier rejection "field backing
-  into an embedded class (its id needs a host path)" lives. Its errors
-  quote the offending tokens — spans point at the `implement!` call
-  site. Multi-store layouts (e.g. a separately-owned shared inner store)
+  must be id-addressable (a `field`-backing rule — below). One
+  `implement!` call generates **one root store**;
+  every instance's arenas live in that store's tree (root-level, or
+  embedded per host record by the placement rule), so for contributions
+  whose self record exists the home half is vacuous in M2, exactly as
+  spike 4 pinned ("every arena is in the one store, so every
+  contribution trivially has a home"); like the no-self-containment
+  check's vacuity above, the boundary is kept for the layouts that make
+  it bite. The home half fires exactly when the would-be home does not
+  exist — a contribution whose self owns no record — which houses the
+  frontier's "intrusive arrows sourced at … unfused roots" rejection
+  (the embedded-class half of that frontier item stays a codegen
+  frontier: the record exists, so it is not a home failure). The live
+  half is addressability, and it is a `field`-backing rule: a
+  `field`-backed arrow whose value would reference an embedded class is
+  rejected, because the embedded class's ids are host-anchored paths
+  the constructor argument cannot supply — this is where the frontier
+  rejection "field backing into an embedded class (its id needs a host
+  path)" lives. Hook-maintained contributions are exempt: hash_index's
+  map is written by its insert hook at a known host, not by constructor
+  arguments, and its path-id values are verified legal (spike 11) — the
+  Hierarchy keyed bindings stay un-gated. Its errors quote the
+  offending tokens — spans point at the `implement!` call site.
+  Multi-store layouts (e.g. a separately-owned shared inner store)
   are out of scope: making the placement half non-vacuous there requires
   vocabulary the schema does not have — a store partition (which fusion
   class lives in which store), a directional store-reachability
@@ -508,9 +553,11 @@ impossible by construction.
   ```
 
   One `implement!` call generates one root store holding the main graph
-  and exactly one subgraph over it: `sub`'s root is unfused, so by the
-  naming rule it owns no arena, record, or id, and every SubNode/SubEdge
-  belongs to that single subgraph (bindings: `main`'s arrows as in M1's
+  and exactly one subgraph over it: `sub`'s root is unfused, so `sub`'s
+  arenas sit at the store's root level and every SubNode/SubEdge
+  belongs to that single subgraph — the root itself owns no arena,
+  record, or id under the naming rule, whatever its fusion (bindings:
+  `main`'s arrows as in M1's
   test; `sub.subnodes`/`sub.subedges: arena`; `sub.subnode`/
   `sub.subedge: hash_index`). Runtime multiplicity — many subgraphs over
   one main graph — is the Hierarchy test's hosted shape, not this one.
@@ -527,7 +574,8 @@ impossible by construction.
 - Hierarchy: outer graph whose nodes contain subgraphs of the inner
   graph; traverse both levels. The test binds the keyed arrows —
   `sub.subnode: hash_index`, `sub.subedge: hash_index`, the spike-11
-  configuration — alongside `sub.subnodes`/`sub.subedges: arena`.
+  configuration — alongside `sub.subnodes`/`sub.subedges: arena`, with
+  `outer`/`inner` bound as in M1's test.
 - Bipartite graph as a plain `pattern!` (two node sorts, arrows picked
   à la carte) — demonstrates no-renunciation assembly without composition.
   It also marks the limit of invariant 6: bipartiteness itself is a
@@ -584,6 +632,12 @@ impossible by construction.
 
 Pinned down during the milestone, not before:
 
+- The single-arrow roots the Subgraph pattern leans on —
+  `MainNode`/`MainEdge` (`one`), `EdgesOf` (`many`; the arena binding
+  requires it), `SubNodeOf`/`SubEdgeOf` (keyed) — are not yet sketched,
+  and their names drift: the sketch says `MainNode` where spike 1's
+  stdlib and the others' `-Of` convention say `MainNodeOf`. Folded into
+  the held root-naming decision (root-pattern-vs-entity collision).
 - How fusion classes are named in generated docs.
 - The key-entity restriction for keyed arrows: any entity in scope, or
   only entities reachable via nearby total `one` arrows.

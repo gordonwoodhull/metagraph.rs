@@ -163,9 +163,11 @@ derive `Copy`/`Eq`/`Hash` unchanged and work as map values; the map sits
 on the host record beside the embedded arena; the insert hook takes
 `&mut` store state (the arena append and map insert cannot share one
 `&mut` host borrow — M1's hook contract already implies this shape);
-`<->` collapses the key type to the partner's plain id; key uniqueness
-is free with `HashMap`, so validate() checks key existence and
-value-in-arena. One codegen rule pinned: handles hand-write `Eq`/`Hash`
+`<->` collapses the key type to the partner's plain id. Key uniqueness
+looked free with `HashMap` (corrected below: a plain insert silently
+overwrites, which made duplicate-key rejection an insert-time rule in
+M2/M4); validate() checks key existence and value-in-arena. One
+codegen rule pinned: handles hand-write `Eq`/`Hash`
 forwarding to (store pointer, id) — a derive would bound
 `Store: Eq`/`Hash`, and id-only forwarding would equate handles across
 stores (the spike's first cut said id-only; corrected against the
@@ -173,7 +175,7 @@ reference `arena.rs`, whose `std::ptr::eq` + id shape is what spike 8
 made load-bearing). Macro-side keyed grammar and codegen remain
 unverified. Folded into milestone-2; the Hierarchy keyed bindings are
 un-gated. A consolidation-review probe (/tmp/m2-probe-edge-induced, 5
-tests) later verified the other configuration — a root-marked self: the
+tests) later verified the other configuration — an unfused-root self: the
 map sits at store level (M1's contribution contract), the insert op
 drops the self argument, the root-generic associated-`Key` trait
 dispatches at two key sorts, `add_subedge(me)` induces through id

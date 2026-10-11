@@ -70,9 +70,10 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
    crate may declare a root single-arrow pattern the way the stdlib does,
    and generic algorithms are portable exactly to the extent that patterns
    agree on roots. **Roots register themselves**: every root pattern emits a
-   registration courier publishing its trait metadata (method name,
-   associated type names, cardinality), and `implement!` resolves any root
-   through that courier — there is no fixed table of stdlib arrows, and
+   registration courier publishing its trait metadata (method name, GAT
+   iterator name, associated type names, cardinality — plus the key's
+   associated type name for a keyed root), and `implement!` resolves any
+   root through that courier — there is no fixed table of stdlib arrows, and
    user-declared roots work exactly like stdlib ones.
 
 ## Terminology: the four senses of "root"

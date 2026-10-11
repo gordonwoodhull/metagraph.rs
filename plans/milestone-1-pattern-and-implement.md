@@ -123,10 +123,12 @@ instantiation cannot contradict its root. The one exception is the
 key-entity binding of a keyed root (M2): the root declares the keyed
 cardinality and owns the method's key parameter, but it cannot name the
 instantiation's key sort, so the instantiation supplies `key(LocalEntity)`
-as a local clause — exactly like `by`, and never a restatement of
-cardinality. The root's trait types the parameter as an associated type
-(`type Key`; M2's keyed section sketches the declaration and the
-probe-verified trait shape).
+as a local clause — exactly like the instantiation-side `by`, and never
+a restatement of cardinality (`by` never appears on a root, which
+declares a bare capability; `key(K)` must, since the root owns the
+keyed cardinality). The root's trait types the parameter as an
+associated type (`type Key`; M2's keyed section sketches the
+declaration and the probe-verified trait shape).
 
 **Instantiation arrow names are local aliases.** The trait's method name,
 GAT iterator name, and associated type names all come from the *root's*
@@ -135,7 +137,8 @@ Subgraph -> SubNode` is still called `.nodes()` and yields
 `Nodes::Nodes<'a>` — emitting `fn subnodes` is a trait mismatch (E0407,
 spike-verified). The registration courier's metadata therefore carries
 the full (method name, GAT name, associated type names, cardinality)
-tuple — plus the key's associated type name for keyed roots (M2). Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
+tuple — plus the key's associated type name for keyed roots (M2).
+Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
 `set_<arrow>`) are the opposite: they derive from the instantiation's
 local names, since they are store API, not trait identity. A distinct
 read-side spelling, if wanted, is an inherent alias under the rule in
@@ -245,6 +248,7 @@ hand-renamed:
 |---|---|
 | non-root entity `Node` | id `NodeId(pub u32)`, record `NodeData`, arena field `node_arena`, handle `Node<'g>` |
 | arrow `out_edges` | marker `<pattern>::markers::OutEdges`, iterator `OutEdgesIter`, insert op `insert_out_edges` |
+| `field`-backed `one` arrow `source` | self-record field `source` — the arrow's local name (per-arrow namespacing, Backings below) |
 | root entity `Graph` | handle `Graph<'g>` and root accessor `graph()` on the store — nothing else |
 
 Every non-root entity gets a `Vec` arena, an id newtype, a record struct,

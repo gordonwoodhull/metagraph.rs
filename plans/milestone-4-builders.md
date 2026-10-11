@@ -27,8 +27,8 @@ nested staging, and induction remains uncompiled.
   inventory: key existence and value-in-arena (key uniqueness per self
   object is not a runtime check — it is enforced where the op is
   submitted: the builder and the staging call reject a live key, M2's
-  keyed section) — and, per
-  backing, **structural checks** (endpoint ids in arena range, intrusive
+  keyed section) — and, per backing, **structural checks** (endpoint
+  ids in arena range, intrusive
   link well-formedness, membership consistency between an arrow's links
   and its determining fields for `by`-derived arrows, and the
   intrusive-ownership partition check for *primitive* intrusive arrows,
@@ -172,10 +172,12 @@ continue with the new metagraph. Two entry points support this:
   insert onto a live key (checked against the borrowed old store and
   the already-staged inserts; M2's builder does the same at its insert,
   and a silent `HashMap` overwrite there is exactly the failure the
-  check exists to prevent). The
-  dividing line: `FlushError` is for change sets that are coherent as
-  staged but invalid against the store; panics are for change sets that
-  could never have meant anything.
+  check exists to prevent — a staged removal does not free a key, so
+  re-pointing one is two flushes; the check is probe-verified
+  implementable, /tmp/m2-probe-staged-key). The dividing line:
+  `FlushError` is for change sets that are coherent as staged but
+  invalid against the store; panics are for change sets that could
+  never have meant anything.
 
 ## Write traits mirror read traits
 
@@ -190,7 +192,7 @@ trait implemented by the store's transaction type.
 | `many`, primitive | `p.tags()` | `insert_<arrow>(Ref<A>, Ref<B>)` — membership asserted directly |
 | `many`, existence-derived | `g.nodes()` | none beyond `add_<entity>`/`remove_<entity>` — membership is record existence |
 | `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
-| keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is root-marked (one self, no id — the edge-induced composition, M2), `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — function semantics; a live key is rejected at the staging call, like a foreign ref |
+| keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is an unfused root (one self, no id — the edge-induced composition, M2); `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — for a colocated-root self `Ref<A>` is the host class's ref (spike 11's shape), for a non-root self the entity's own — function semantics; a live key is rejected at the staging call, like a foreign ref |
 
 Derived read arrows (`:= union`) have no write side, exactly as they have
 no backing. A `by`-derived `many` arrow's hooks fire when the determining
@@ -248,7 +250,8 @@ A "nested store" is the set of arenas the placement rule (M2) embeds in
 a host record — `Vec<Data>` fields on the host class's record struct,
 never a nested `Store` struct; handles keep one root-store reference
 throughout. A change-set entry is an `(index path, operation)` pair —
-the same addressing scheme handles already use. The transaction API exposes scoped
+the same addressing scheme handles already use. The transaction API
+exposes scoped
 sub-transactions: `tx.within(node)` stages operations against the subgraph
 store embedded in that (possibly provisional) node's record. Since the
 change set is already path-addressed, `within` records a path prefix and
@@ -262,8 +265,8 @@ top-down.
 The edge-induced subgraph requires that adding a subedge induces subnodes
 for its main edge's endpoints. Induction is constructor logic, not schema
 vocabulary: the builder's `add_subedge(me)` — the edge-induced
-composition's self is the single, root-marked subgraph (M2's Tests), so
-there is no `sg` to pass — reads `me`'s endpoints and
+composition's self is the single subgraph at an unfused root (M2's
+Tests), so there is no `sg` to pass — reads `me`'s endpoints and
 ensures a subnode for each, deduplicated through the `subnode` hash index.
 This holds by construction rather than by check, because constructors are
 the single write path (M2 builder shape): every subedge in existence came
@@ -277,10 +280,11 @@ as ordinary Rust — no more a special extension than any capability
 implementation (`in_edges` knowing its link fields, `add_edge` knowing to
 push-front). The toolkit never invents logic; the macro splices schema
 facts into code written once, and the inducing constructor is code
-written once, composing generated primitives (`add_subnode`, the keyed
-lookup) and the builder's id-based read view (`me.source()` and
-`me.target()` read as id getters — M2's Builder shape; handles cannot
-exist against the `&mut` builder, which is why the view exists).
+written once, composing generated primitives (`add_sub_node`, the keyed
+lookup) and the builder's id-based read view (`main_edge_source(me)` and
+`main_edge_target(me)`, the view's contract spellings — M2's Builder
+shape; handles cannot exist against the `&mut` builder, which is why
+the view exists).
 
 It is *undeclared* — the schema says nothing about it — but that is the
 normal case, not a gap: a declaration exists so the macro has something
@@ -303,22 +307,23 @@ rejected during construction — there is one store, read and mutated at
 once, and the borrow checker forbids exactly the coexistence induction
 needs; a read-only handle over the *old* store becomes viable under
 `edit()`/flush, where the old store is only ever read; id getters work
-everywhere. The same view serves flush
-replay, which reads copied old data plus already-replayed ops.
+everywhere. The same view serves flush replay, which reads copied old
+data plus already-replayed ops.
 
 Note the edge-induced form is the special case: a general subgraph may
-also carry standalone nodes (`add_subnode` called directly, never induced
-by an edge). Constructor-level induction supports both; a flush-time
-derivation pass would have had to invent a way to permit the standalone
+also carry standalone nodes (`add_sub_node` called directly, never
+induced by an edge). Constructor-level induction supports both; a
+flush-time derivation pass would have had to invent a way to permit the
+standalone
 case.
 
 ## Construction from data (loading)
 
 Loading a metagraph from external data is not a separate path: a loader
 drives the builder. Referential integrity is enforced by construction —
-constructor arguments are typed ids/handles, so a dangling endpoint is
+constructor arguments are typed ids, so a dangling endpoint is
 inexpressible rather than rejected — and by the flush validation boundary
-(key existence and uniqueness) for what types can't see. Data formats and
+(key existence and value-in-arena) for what types can't see. Data formats and
 their codegen are M5+ introspection territory; all M4 needs is that the
 loader and the hand builder share one funnel.
 
@@ -346,7 +351,17 @@ refs already handed out, because nothing is applied until flush.
   kept from the old store or staged in this change set) is a `FlushError`
   listing the danglers — the change set must remove dependents
   explicitly. One exception: a nested store embedded in a removed record
-  goes with the record, contents and all.
+  goes with the record, contents and all. Keyed maps follow the same
+  field-vs-membership split, as recorded intent to be pinned when M4 is
+  implemented (spike 7 was keyless): an entry's *key* behaves as a
+  reference — removing a key record with live entries is a `FlushError`
+  naming them; remove the dependent target explicitly — while its
+  *target* behaves as membership — removing a target record clears the
+  entries pointing at it, as list membership follows a removed record.
+  Flush accordingly carries keyed maps as state, never rebuilding them
+  (a keyed arrow need not have a companion field to recompute from):
+  entries copy with kept records, remap through the old→new id maps,
+  and drop with removed targets.
 - Tombstones are rejected: they would complicate every backing contract
   (intrusive lists, size hints, CSR ranges) for a benefit
   rebuild-without already provides.
