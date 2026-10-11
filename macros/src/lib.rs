@@ -41,6 +41,38 @@ impl Parse for PatternInput {
     }
 }
 
+/// Declare an abstract type graph: entities and single-arrow relations
+/// ("capabilities") with cardinalities. No storage — backings bind at
+/// `implement!` time.
+///
+/// One entity per pattern is marked `root`: its record is the store
+/// itself, so it owns no id, record, or arena — only its handle and the
+/// store's root accessor. No arrow may *target* it (there is no id to
+/// store); arrows *sourced* at it are fine.
+///
+/// A single-arrow pattern with no instantiation source is a **root**
+/// pattern: it declares a fresh trait and registers its metadata so any
+/// crate can instantiate it. Any other pattern instantiates roots by
+/// path and never restates cardinality or associated types — the local
+/// arrow name is an alias; read-side identity comes from the root.
+///
+/// ```ignore
+/// pattern! { Nodes { entities: root Graph, Node; arrows { nodes: Graph -> Node, many; } } }
+/// pattern! {
+///     Digraph {
+///         entities: root Graph, Node, Edge;
+///         arrows {
+///             nodes:     stdlib::Nodes,    Graph -> Node;
+///             out_edges: stdlib::OutEdges, Node -> Edge, by source;
+///             edges:     stdlib::Edges,    Node -> Edge := union(out_edges, in_edges);
+///         }
+///     }
+/// }
+/// ```
+///
+/// Note: declare patterns in a named module (as the stdlib does). A
+/// pattern declared at a crate root collides with its courier's
+/// `#[macro_export]` crate-root anchor (E0255).
 #[proc_macro]
 pub fn pattern(input: TokenStream) -> TokenStream {
     let pat = syn::parse_macro_input!(input as PatternInput);
@@ -168,8 +200,7 @@ fn validate_pattern(pat: &PatternInput) -> syn::Result<()> {
         }
 
         // Cardinality is declared on the root, inherited by instantiations.
-        if a.inst.is_some() && a.many.is_some() {
-            let inst = a.inst.as_ref().unwrap();
+        if let (Some(inst), Some(_)) = (&a.inst, a.many) {
             let it = path_tokens(inst);
             return Err(syn::Error::new(
                 a.name.span(),
@@ -320,7 +351,7 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
     let marker_items = pat.body.arrows.iter().map(|a| {
         let marker = grammar::marker_ty(&a.name);
         let arrow_name = &a.name;
-        let inst_ts = a.inst.as_ref().map(|p| path_tokens(p)).unwrap_or_default();
+        let inst_ts = a.inst.as_ref().map(path_tokens).unwrap_or_default();
         quote! {
             #[doc = concat!("Marker for the arrow instantiation `", stringify!(#arrow_name), ": ", stringify!(#inst_ts), "`.")]
             #[derive(Debug, Clone, Copy)]
@@ -389,6 +420,25 @@ impl Parse for ImplementInput {
     }
 }
 
+/// Bind each arrow of a pattern to a *backing* and emit the concrete
+/// store, ids, handles, iterators, and trait impls at the call site.
+///
+/// The pattern is addressed by the path of the module holding its
+/// `pattern!` invocation plus the pattern name (`stdlib::Digraph` for
+/// the stdlib's, `crate::shapes::Labeled` for one of yours). `many`
+/// arrows bind explicitly (`arena` vs `intrusive_list` is a real choice
+/// with no safe default); `one` arrows default to `field`; derived
+/// (`:= union`) arrows take no binding.
+///
+/// ```ignore
+/// implement! {
+///     metagraph_exper::stdlib::Digraph as GraphStore {
+///         nodes:     arena,
+///         out_edges: intrusive_list,
+///         in_edges:  intrusive_list,
+///     }
+/// }
+/// ```
 #[proc_macro]
 pub fn implement(input: TokenStream) -> TokenStream {
     let imp = syn::parse_macro_input!(input as ImplementInput);
@@ -548,7 +598,7 @@ fn chain_config_tokens(config: &ChainConfig) -> TokenStream2 {
     let mp = path_tokens(&config.pattern_path);
     let store = &config.store;
     let bindings_ts = grammar::bindings_tokens(&config.bindings);
-    let roots = config.roots.iter().map(|p| path_tokens(p));
+    let roots = config.roots.iter().map(path_tokens);
     // Each collected tuple rides as its own brace group inside @meta[..].
     let metas = config.metas.iter().map(|m| {
         let t = root_meta_tokens(m);

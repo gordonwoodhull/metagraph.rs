@@ -480,7 +480,7 @@ mod tests {
             match a.many {
                 Some(true) => s.push_str("many"),
                 Some(false) => s.push_str("one"),
-                None => s.push_str("-"),
+                None => s.push('-'),
             }
             if let Some(b) = &a.by {
                 s.push_str(&format!(",by {}", b));
