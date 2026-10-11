@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["macros"]
+members = [
+    "macros",
+    "tests/downstream/basic",
+    "tests/downstream/own-root",
+    "tests/downstream/renamed",
+]
 
 [package]
 name = "metagraph-exper"
@@ -9,3 +14,6 @@ edition = "2024"
 
 [dependencies]
 metagraph-exper-macros = { path = "macros" }
+
+[dev-dependencies]
+trybuild = "1.0.122"

@@ -1,0 +1,5 @@
+error: arrow `b` targets the root-marked entity `A` (its record is the store itself; there is no id to store) — arrows may only be sourced at it
+  --> tests/compilefail/arrow_targets_root.rs:11:13
+   |
+11 |             b: stdlib::OutEdges, B -> A;
+   |             ^

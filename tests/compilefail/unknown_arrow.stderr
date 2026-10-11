@@ -1,0 +1,5 @@
+error: unknown arrow `weights` in `implement!` bindings (not declared by pattern `Digraph`)
+ --> tests/compilefail/unknown_arrow.rs:9:9
+  |
+9 |         weights:   arena,
+  |         ^^^^^^^

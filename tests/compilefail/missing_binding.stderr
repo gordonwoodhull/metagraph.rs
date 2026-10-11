@@ -1,0 +1,12 @@
+error: missing backing binding for `many` arrow `out_edges` (`arena` vs `intrusive_list` is an explicit choice)
+  --> tests/compilefail/missing_binding.rs:5:1
+   |
+ 5 | / implement! {
+ 6 | |     metagraph_exper::stdlib::Digraph as GraphStore {
+ 7 | |         nodes:     arena,
+ 8 | |         in_edges:  intrusive_list,
+ 9 | |     }
+10 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `::metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

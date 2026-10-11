@@ -1,0 +1,5 @@
+error: duplicate binding for arrow `nodes`
+ --> tests/compilefail/duplicate_binding.rs:7:9
+  |
+7 |         nodes:     intrusive_list,
+  |         ^^^^^

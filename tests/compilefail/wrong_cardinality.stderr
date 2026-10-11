@@ -1,0 +1,11 @@
+error: backing `field` has wrong cardinality for arrow `nodes` (a `many` arrow)
+ --> tests/compilefail/wrong_cardinality.rs:4:1
+  |
+4 | / implement! {
+5 | |     metagraph_exper::stdlib::Digraph as GraphStore {
+6 | |         nodes: field,
+7 | |     }
+8 | | }
+  | |_^
+  |
+  = note: this error originates in the macro `::metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)
