@@ -182,7 +182,7 @@ pattern! {
             in_edges:  stdlib::InEdges,  Node -> Edge, by target;
             source:    stdlib::Source,   Edge -> Node;
             target:    stdlib::Target,   Edge -> Node;
-            edges:     stdlib::Edges,    Node -> Edge := union(out_edges, in_edges);
+            edges:     stdlib::Edges,    Node -> Edge := sum(out_edges, in_edges);
         }
     }
 }
@@ -211,9 +211,9 @@ pattern! {
   membership is always defined. Existence-derived membership is the entity
   arrows (`nodes: Graph -> Node`, arena-backed): a record is a member by
   existing, the write operation is `add_<entity>` itself, and no insert op
-  is generated. (`union` is a different axis: it derives a *read* from
+  is generated. (`sum` is a different axis: it derives a *read* from
   sibling reads, not membership from a field.)
-- Derivation: `:= union(a, b)` over two sibling `many` arrows with the
+- Derivation: `:= sum(a, b)` over two sibling `many` arrows with the
   same self and associated types. Derived arrows instantiate a root trait
   like any arrow but are never bound to a backing; they get generated
   per-instantiation impls with their own markers, uniform with every other
@@ -237,7 +237,7 @@ implement! { stdlib::Digraph as GraphStore {
 
 The pattern is a path (last segment a plain ident); the store name follows
 `as`; the block binds `many` arrows to backings. `one` arrows default to
-`field` and their bindings may be omitted; derived arrows (`:= union`)
+`field` and their bindings may be omitted; derived arrows (`:= sum`)
 take no binding and are rejected if given one. Validation errors: unknown
 arrow, duplicate binding, missing binding, wrong-cardinality backing —
 in both directions once keyed arrows land (M2): `hash_index` on a
@@ -380,7 +380,7 @@ where
 4. `arena` backing (`nodes`).
 5. `intrusive_list` backing (`out_edges`, `in_edges`) including the
    push-front insert hook in `add_edge`.
-6. Derived `union` arrow (`edges`).
+6. Derived `sum` arrow (`edges`).
 7. Port `tests/koenigsberg.rs`; green.
 8. `trybuild` compile-fail tests for `implement!` validation: wrong-
    cardinality backing, unknown arrow, duplicate binding, missing binding.

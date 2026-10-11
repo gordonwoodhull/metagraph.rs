@@ -194,7 +194,7 @@ trait implemented by the store's transaction type.
 | `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
 | keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is an unfused root (one self, no id — the edge-induced composition, M2); `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — for a colocated-root self `Ref<A>` is the host class's ref (spike 11's shape), for a non-root self the entity's own — function semantics; a live key is rejected at the staging call, like a foreign ref |
 
-Derived read arrows (`:= union`) have no write side, exactly as they have
+Derived read arrows (`:= sum`) have no write side, exactly as they have
 no backing. A `by`-derived `many` arrow's hooks fire when the determining
 field is replayed (constructor or `set_` op), so replay order needs no
 special casing for membership. Primitive insertions into a derived
@@ -289,7 +289,7 @@ the view exists).
 It is *undeclared* — the schema says nothing about it — but that is the
 normal case, not a gap: a declaration exists so the macro has something
 to splice, and there is nothing to splice here (no marker, no backing
-fields, no trait impl, no validation rule). Compare `union`: declared
+fields, no trait impl, no validation rule). Compare `sum`: declared
 precisely because markers forced the macro to generate the impl. The
 inducing constructor is the write-side analogue of the derived read
 arrows, minus the declaration. If M5+ introspection (serializers,

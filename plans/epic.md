@@ -17,8 +17,10 @@ A Rust toolkit where graph *types* are assembled from atomic pieces:
   access protocol — and emits the concrete store, handles, and trait impls.
 
 The base directed graph is not built in: it is assembled from six
-single-arrow patterns (instantiated inline in M1, re-expressed as a
-composition in M3). Bipartite graphs, hierarchical graphs (node is-also
+single-arrow patterns by inline instantiation in one `pattern!` block —
+which *is* the degenerate form of composition (entity unification by
+name; M3 verified that `compose_pattern!` cannot re-express it, and why
+— see invariant 4). Bipartite graphs, hierarchical graphs (node is-also
 subgraph), edge-refinement graphs (edge is-also chain), and edge-induced
 subgraphs are all the same machinery applied to bigger piles of arrows.
 
@@ -43,7 +45,14 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
    other store and runtime multiplicity is unconstrained (many subnodes may
    reference one inner node). Handles are wide pointers: root store
    reference plus an index path into nested arenas, gaining fields only via
-   dereference.
+   dereference. Colocation classes are therefore *hostings*: at most one
+   member instance's root-marked entity plus element entities of one other
+   instance (M2's exactly-one-placement check; spike 12). Composition
+   juxtaposes whole patterns, nests them inside host records, and closes
+   open entities by reference — it never shares one sort across instances.
+   Sort-sharing over one flat arena is what inline instantiation within a
+   `pattern!` block does; a flat schema cannot be reassembled from
+   fragments by composition.
 5. **Stores are immutable; construction goes through a builder.** A store
    is append-only under exclusive ownership while it is being built (M1's
    `&mut` constructors are the degenerate builder); once handles exist the
@@ -117,11 +126,11 @@ until further composition is on the frontier.
 |---|-------|------|
 | 1 | `pattern!` + `implement!`, base digraph | [full](milestone-1-pattern-and-implement.md) |
 | 2 | Composition, fusion, keyed arrows, subgraph pattern | [partial](milestone-2-composition.md) |
-| 3 | User-facing backings, stdlib refactor | [vague](milestone-3-backings-and-stdlib.md) |
+| 3 | User-facing backings, stdlib refactor | [partial](milestone-3-backings-and-stdlib.md) |
 | 4 | Write-side builders, mutation by rebuild | [preliminary](milestone-4-builders.md) |
 | 5+ | Selection, interop — see below | this file |
 
-Cross-cutting implementability validation (eleven throwaway spikes against
+Cross-cutting implementability validation (twelve throwaway spikes against
 milestones 1–4): [spikes.md](spikes.md) — status, results, and what each
 spike folded back into the plans.
 
@@ -144,7 +153,7 @@ Threads we can see from here but haven't scoped:
   constraints and cost hints; `implement!` picks, user overrides by name.
 - **Interop backend**: implement the six base arrows over petgraph (or a
   remote graph) to prove the traits are backend-portable, not arena-specific.
-- **Derived arrows beyond union**: inverse of a total arrow, transitive
+- **Derived arrows beyond `sum`**: inverse of a total arrow, transitive
   closure, composition of arrows (paths as first-class derived relations).
 - **Introspection**: schema reflection at compile time (entity/arrow lists
   as associated types) for codegen of serializers, visualizers, fuzzers.

@@ -1,9 +1,10 @@
 # Implementability spikes — index and results
 
-Eleven throwaway spikes validating the riskiest claims in milestones 1–4
+Twelve throwaway spikes validating the riskiest claims in milestones 1–4
 before those milestones are implemented (nine from the original brief,
-plus 10 and 11 added by consolidation-review decisions; model tier
-chosen per task — spike 11 ran flash-tier over hand-written emission).
+plus 10 and 11 added by consolidation-review decisions, and 12 added by
+the M3 review; model tier chosen per task — spike 11 ran flash-tier over
+hand-written emission).
 Method: subagents build each answer as a compiling scratch crate under `/tmp`
 (the repo stays read-only), each maintaining a `REPORT.md` handoff in its
 scratch root. The output of a spike is answers and target code shapes,
@@ -25,6 +26,7 @@ they land.
 | 9 | Removal + compaction + id-remap report | M4 | descoped (below) |
 | 10 | Root-arena drop from flat codegen | M1/M2 | complete — folded in |
 | 11 | Keyed lookup over path ids | M2 | complete — folded in |
+| 12 | Composed-`Digraph` legality (M3 review) | M3 | complete — folded in |
 
 ## The spikes
 
@@ -181,6 +183,27 @@ drops the self argument, the root-generic associated-`Key` trait
 dispatches at two key sorts, `add_subedge(me)` induces through id
 getters, and a plain HashMap duplicate insert silently overwrites —
 which made duplicate-key rejection an insert-time rule in M2/M4.
+
+**12. Composed-`Digraph` legality (M3 review probe).** Question: can the
+six single-arrow root patterns be re-assembled into a Digraph-shaped
+pattern via `compose_pattern!`? Run in a copy of spike 1's workspace
+(five member instances — Nodes, OutEdges, InEdges, Source, Target — with
+the stdlib's own entity shapes, fused to unify the Node and Edge sorts).
+*Result:* **no — rejected at compose time**: `colocation class fuses
+multiple roots se.E, te.E (double closure)` (the check short-circuits on
+the first offending class; the Node class violates likewise, and the
+Edge class fuses elements of two instances). No fusion set escapes:
+unifying one sort across member instances always puts two roots in one
+class or one sort's elements in two. Two independent blockers besides:
+the composed grammar (instances + fusions) has no slot for a derived
+`sum` arrow, and the placement rule would embed each root-fused
+member's arenas per host record even if the checks were relaxed. The
+generalization folded into M3 and the epic: composition expresses
+juxtaposition, hosting, and reference closure — never sort-sharing; a
+flat shared layout is reachable only inside one `pattern!` block
+(inline instantiation is the degenerate composition). Retired the
+epic's "re-expressed as a composition in M3" promise; `Digraph` stays
+an inline instantiation.
 
 ## Probes (review-session evidence outside the numbered spikes)
 
