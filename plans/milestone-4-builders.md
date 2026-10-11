@@ -24,7 +24,10 @@ nested staging, and induction remains uncompiled.
   hook function over `&mut` store state, and the `add_*` constructors are
   thin orchestration (M1 commits to both names and shape).
 - Validation has a named boundary (`validate()`), with M2's canonical
-  inventory: key existence, key uniqueness per self object — and, per
+  inventory: key existence and value-in-arena (key uniqueness per self
+  object is not a runtime check — it is enforced where the op is
+  submitted: the builder and the staging call reject a live key, M2's
+  keyed section) — and, per
   backing, **structural checks** (endpoint ids in arena range, intrusive
   link well-formedness, membership consistency between an arrow's links
   and its determining fields for `by`-derived arrows, and the
@@ -138,8 +141,9 @@ continue with the new metagraph. Two entry points support this:
      M3 constraint annotations (`requires_compaction_at_boundary`,
      `freeze_scope: per_store`, `read_precondition: post_compaction`)
      state this per backing.
-  7. **`validate()`**: key existence, key uniqueness, and each backing's
-     structural checks — M2's canonical inventory (premises, above).
+  7. **`validate()`**: key existence, value-in-arena, and each backing's
+     structural checks — M2's canonical inventory (premises, above; key
+     uniqueness is enforced at staging, not here).
   Order contracts: kept elements keep their relative iteration order; new
   arena records append in replay order. Iteration order itself is a
   per-backing contract (M3 annotation: intrusive_list iterates
@@ -156,15 +160,19 @@ continue with the new metagraph. Two entry points support this:
   rebuilt heads, so new members iterate first and the reverse-insertion
   contract holds for them.
 - **Flush errors are runtime data**, not compile errors: a `FlushError`
-  lists each violation (dangling endpoint, duplicate key) by change-set
+  lists each violation (dangling endpoint) by change-set
   op index. No spans; the op index is the debugging handle. The full
-  surface: dangling endpoint (named in old ids), duplicate key, unknown
+  surface: dangling endpoint (named in old ids), unknown
   old id, `set_` or `remove` of a removed element, double removal, and
   ops staged under a nested path whose record was removed (the change
   set must be coherent; a silent discard would hide staging bugs).
   Distinct from these are **staging-time programming errors, which
   panic at the staging call** rather than joining `FlushError`: a
-  foreign or stale ref stamp, and removal of a `Pending` ref. The
+  foreign or stale ref stamp, removal of a `Pending` ref, and a keyed
+  insert onto a live key (checked against the borrowed old store and
+  the already-staged inserts; M2's builder does the same at its insert,
+  and a silent `HashMap` overwrite there is exactly the failure the
+  check exists to prevent). The
   dividing line: `FlushError` is for change sets that are coherent as
   staged but invalid against the store; panics are for change sets that
   could never have meant anything.
@@ -182,7 +190,7 @@ trait implemented by the store's transaction type.
 | `many`, primitive | `p.tags()` | `insert_<arrow>(Ref<A>, Ref<B>)` — membership asserted directly |
 | `many`, existence-derived | `g.nodes()` | none beyond `add_<entity>`/`remove_<entity>` — membership is record existence |
 | `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
-| keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` — function semantics; duplicate key is a flush error |
+| keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is root-marked (one self, no id — the edge-induced composition, M2), `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — function semantics; a live key is rejected at the staging call, like a foreign ref |
 
 Derived read arrows (`:= union`) have no write side, exactly as they have
 no backing. A `by`-derived `many` arrow's hooks fire when the determining
@@ -236,8 +244,11 @@ determining fields.
 
 ## Nested stores
 
-A change-set entry is an `(index path, operation)` pair — the same
-addressing scheme handles already use. The transaction API exposes scoped
+A "nested store" is the set of arenas the placement rule (M2) embeds in
+a host record — `Vec<Data>` fields on the host class's record struct,
+never a nested `Store` struct; handles keep one root-store reference
+throughout. A change-set entry is an `(index path, operation)` pair —
+the same addressing scheme handles already use. The transaction API exposes scoped
 sub-transactions: `tx.within(node)` stages operations against the subgraph
 store embedded in that (possibly provisional) node's record. Since the
 change set is already path-addressed, `within` records a path prefix and
@@ -250,7 +261,9 @@ top-down.
 
 The edge-induced subgraph requires that adding a subedge induces subnodes
 for its main edge's endpoints. Induction is constructor logic, not schema
-vocabulary: the builder's `add_subedge(sg, me)` reads `me`'s endpoints and
+vocabulary: the builder's `add_subedge(me)` — the edge-induced
+composition's self is the single, root-marked subgraph (M2's Tests), so
+there is no `sg` to pass — reads `me`'s endpoints and
 ensures a subnode for each, deduplicated through the `subnode` hash index.
 This holds by construction rather than by check, because constructors are
 the single write path (M2 builder shape): every subedge in existence came
@@ -265,7 +278,9 @@ implementation (`in_edges` knowing its link fields, `add_edge` knowing to
 push-front). The toolkit never invents logic; the macro splices schema
 facts into code written once, and the inducing constructor is code
 written once, composing generated primitives (`add_subnode`, the keyed
-lookup) and read traits (`me.source()`, `me.target()`).
+lookup) and the builder's id-based read view (`me.source()` and
+`me.target()` read as id getters — M2's Builder shape; handles cannot
+exist against the `&mut` builder, which is why the view exists).
 
 It is *undeclared* — the schema says nothing about it — but that is the
 normal case, not a gap: a declaration exists so the macro has something
@@ -283,12 +298,12 @@ builder owns the store mutably, and pattern code can't touch generated
 private fields. The builder therefore exposes a **read view of the store
 under construction as generated id-based getters** (field reads by id,
 returning ids and copies — never handles; specified in M2's builder
-shape, which needs it for the same inducing constructor). Handles are rejected here on
-purpose: a whole-store handle's shared borrow cannot coexist with the
-`&mut` field access that mutates a nested store (the borrow checker
-forbids it exactly in the case induction needs). A restricted root handle
-is viable only in the flat case, where the store being read is not the
-store being mutated; id getters work in both. The same view serves flush
+shape, which needs it for the same inducing constructor). Handles are
+rejected during construction — there is one store, read and mutated at
+once, and the borrow checker forbids exactly the coexistence induction
+needs; a read-only handle over the *old* store becomes viable under
+`edit()`/flush, where the old store is only ever read; id getters work
+everywhere. The same view serves flush
 replay, which reads copied old data plus already-replayed ops.
 
 Note the edge-induced form is the special case: a general subgraph may
@@ -373,9 +388,10 @@ refs already handed out, because nothing is applied until flush.
    edges via per-arrow ops, primitive arrows only) as the portability
    proof.
 3. Flush-error surface: the full list from the core model (dangling
-   endpoint, duplicate key, unknown old id, `set_`/`remove` of a removed
-   element, double removal, removal of a `Pending` ref, ops under a
-   removed nested path).
+   endpoint, unknown old id, `set_`/`remove` of a removed
+   element, double removal, ops under a
+   removed nested path) and the staging panics (foreign or stale ref
+   stamp, removal of a `Pending` ref, keyed insert onto a live key).
 4. Nested stores: path-addressed ops and sub-transactions; hierarchy
    edit tests (stage a new outer node *and* its subgraph in one flush).
 5. Induction for the subgraph pattern: the inducing `add_subedge`

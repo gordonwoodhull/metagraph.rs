@@ -95,6 +95,12 @@ disambiguates, but the milestone specs lean on all four:
 - **Crate root** (module namespace): where `#[macro_export]` anchors
   couriers (M1's courier path resolution).
 
+Adjacent to these, one more marking the specs lean on: an **element
+entity** is an entity *not* marked `root` — the "host element" of M2's
+placement rule and the "element members" of its fusion checks. Element
+entities own records and arenas unless open (open entities own nothing
+and resolve to their `<->` partner).
+
 Two cautions follow. First, the stdlib declarations exercise the first two
 senses in adjacent positions (`pattern! { Nodes { entities: root Graph, … } }`
 is a root pattern *and* marks a root entity) — the `root` keyword does not

@@ -80,8 +80,11 @@ sufficient at the phase each check is assigned to? *Result:* mostly yes —
 with two moves. Check 2 (no record contains itself) is vacuous at
 compose time and moved to `implement!` time; check 5 (field homes) in its
 non-vacuous form needs store-partition and reachability vocabulary that
-turns out to be the same decision as the deferred multi-root entry-point
-API. Check 6 (intrusive partition, runtime) was designed and both
+belongs to multi-store layouts, which remain out of scope (the
+multi-root store entry point itself was later resolved by spike 1 — one
+instance-prefixed accessor per unfused root — so check 5's vocabulary
+no longer tracks it). Check 6 (intrusive partition, runtime) was
+designed and both
 corruption shapes reproduced. Folded into milestone-2.
 
 **5. `intrusive_list` re-implemented through a `backing!`-style courier.**
@@ -169,7 +172,13 @@ stores (the spike's first cut said id-only; corrected against the
 reference `arena.rs`, whose `std::ptr::eq` + id shape is what spike 8
 made load-bearing). Macro-side keyed grammar and codegen remain
 unverified. Folded into milestone-2; the Hierarchy keyed bindings are
-un-gated.
+un-gated. A consolidation-review probe (/tmp/m2-probe-edge-induced, 5
+tests) later verified the other configuration — a root-marked self: the
+map sits at store level (M1's contribution contract), the insert op
+drops the self argument, the root-generic associated-`Key` trait
+dispatches at two key sorts, `add_subedge(me)` induces through id
+getters, and a plain HashMap duplicate insert silently overwrites —
+which made duplicate-key rejection an insert-time rule in M2/M4.
 
 ## Sequencing rules (from the original brief)
 

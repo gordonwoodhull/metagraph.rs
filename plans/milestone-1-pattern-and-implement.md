@@ -17,14 +17,18 @@ between macros only through generated code. The pipeline:
    items at the invocation site:
    - for a root single-arrow pattern: the marker-generic trait it owns
      (`pub trait OutEdges<M> { ... }`), with a GAT iterator for `many`
-     arrows, a plain associated type for `one`, and a method-parameter
-     slot reserved in the grammar for M2's keyed arrows
-     (`subnode(&self, main: MainNode) -> Option<SubNode>`);
+     arrows, a plain associated type for `one`, and — for M2's keyed
+     arrows — the method parameter and its associated key type
+     (`fn subnode(&self, key: Self::Key) -> Option<Self::SubNode>`; the
+     key sort is an associated type because the root cannot name the
+     instantiation's key entity);
    - for every root: a **registration courier** publishing the root's
      metadata (trait method name, GAT iterator name, associated type
-     names, cardinality). Roots register themselves; there is no fixed
-     table of stdlib arrows in the macros crate, and user-declared roots
-     work exactly like stdlib ones;
+     names, cardinality; a keyed root additionally publishes its key's
+     associated type name, so codegen types the parameter through the
+     instantiation's `key(LocalEntity)` binding). Roots register
+     themselves; there is no fixed table of stdlib arrows in the macros
+     crate, and user-declared roots work exactly like stdlib ones;
    - for an instantiation pattern: one unit marker struct per arrow
      instantiation (per use, not per root — two instantiations of
      `stdlib::Nodes` get distinct markers), inside a `markers` module
@@ -120,7 +124,9 @@ key-entity binding of a keyed root (M2): the root declares the keyed
 cardinality and owns the method's key parameter, but it cannot name the
 instantiation's key sort, so the instantiation supplies `key(LocalEntity)`
 as a local clause — exactly like `by`, and never a restatement of
-cardinality.
+cardinality. The root's trait types the parameter as an associated type
+(`type Key`; M2's keyed section sketches the declaration and the
+probe-verified trait shape).
 
 **Instantiation arrow names are local aliases.** The trait's method name,
 GAT iterator name, and associated type names all come from the *root's*
@@ -129,7 +135,7 @@ Subgraph -> SubNode` is still called `.nodes()` and yields
 `Nodes::Nodes<'a>` — emitting `fn subnodes` is a trait mismatch (E0407,
 spike-verified). The registration courier's metadata therefore carries
 the full (method name, GAT name, associated type names, cardinality)
-tuple. Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
+tuple — plus the key's associated type name for keyed roots (M2). Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
 `set_<arrow>`) are the opposite: they derive from the instantiation's
 local names, since they are store API, not trait identity. A distinct
 read-side spelling, if wanted, is an inherent alias under the rule in
@@ -179,6 +185,10 @@ pattern! {
   the store's root accessor both read it. (Derivation — "the entity never
   targeted by any arrow" — works for Digraph but breaks the moment an
   arrow points at the root.)
+- No arrow may *target* the root-marked entity: after the no-arena rule
+  it owns no id type to store (M2's pattern-time check, with a real
+  error message; before that rule, generated code simply failed to
+  compile — spike 10). Arrows *sourced* at the root are fine.
 - Membership of a `many` arrow is **primitive, derived, or
   existence-derived**. Primitive membership is asserted directly
   (`tags: Post -> Tag, many`) and gives the builder an explicit
@@ -221,7 +231,9 @@ The pattern is a path (last segment a plain ident); the store name follows
 `field` and their bindings may be omitted; derived arrows (`:= union`)
 take no binding and are rejected if given one. Validation errors: unknown
 arrow, duplicate binding, missing binding, wrong-cardinality backing —
-each quoting the offending tokens in the message text, because spans have
+in both directions once keyed arrows land (M2): `hash_index` on a
+non-keyed arrow, and a keyed arrow bound to anything else — each
+quoting the offending tokens in the message text, because spans have
 degraded to the call site by the time the check runs.
 
 ## Naming conventions
