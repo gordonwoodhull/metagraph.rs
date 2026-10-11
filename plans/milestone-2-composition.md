@@ -4,10 +4,16 @@
 the motivating higher-order graph — is expressible and testable.
 
 Specification level: partial. Syntax sketches are directional, not final;
-M1 will reshape details. The structural-validation phase assignments and
-the edge-chain refinement sketch are spike-verified (hand-built and
-tested); the courier chain itself is proven only as a minimal bounce and
-is the milestone's principal implementability risk.
+M1 will reshape details. Spike-verified (hand-built, tested): the
+structural-validation phase assignments, the edge-chain refinement sketch,
+and the courier chain itself end to end (three-member composition, fusion
+classes, per-instance marker re-minting, placement codegen, nested
+handles, generic `bfs` over composed handles — 16 tests). Spike limits,
+now the milestone's known frontier: embedding depth 1 only, intrusive
+arrows sourced at embedded classes or unfused roots rejected, `<=>`
+transitivity exercised only on two-member classes, and further
+composition of a composed pattern untested (the emitted courier has the
+right shape, but the member-schema grammar would need to nest).
 
 ## In scope
 
@@ -46,7 +52,20 @@ path-derivation rule, composable and implementable by the same machinery.
 The courier rule never grows; composition only reuses the target
 parameter. Because all member schemas are collected at compose time, the
 structural validation checks (below) run at the outermost proc-macro layer
-with real spans.
+with real spans. The design's central ergonomic claim is spike-verified:
+fused handles plus per-instance markers let an unmodified generic `bfs`
+run over composed handles, and unqualified method calls infer in every
+case the qualification rules below say they should.
+
+Spike-pinned mechanics: the chain's configuration (composed name, module
+path, remaining-courier queue, fusion declarations, schemas collected so
+far) rides verbatim in the courier's rest tail, with fusions staying
+opaque token soup until the final hop; the *composed* schema embedded in
+the final courier has its own structured grammar (`instances`, per-member
+schemas, `fusions`), which `__implement_gen!` distinguishes from a flat
+schema by first keyword; and member schemas re-emit their `root`/`(open)`
+entity markers so the placement rule and closure checks read them after
+the hops.
 
 Fusion has two flavors (epic invariant 4):
 
@@ -58,10 +77,13 @@ Fusion has two flavors (epic invariant 4):
   unifies id types only: no records merge, no arenas move, and runtime
   multiplicity is unconstrained — many SubNode records may reference the
   same inner node. An arrow targeting a reference-fused entity is an
-  ordinary id field into the other store. Open entities are closed by
-  `<->`, and may only be *targets* of arrows in their declaring pattern:
-  under reference closure there is no record to hold a sourced arrow's
-  field.
+  ordinary id field into the other store. Codegen resolves this through
+  an explicit **partner map**: at every id/handle/field-type use, an open
+  entity resolves to its fusion partner's class (spike-verified; fields
+  into open entities work as ordinary resolved id fields). Open entities
+  are closed by `<->`, and may only be *targets* of arrows in their
+  declaring pattern: under reference closure there is no record to hold
+  a sourced arrow's field.
 - Colocation fusion forces 1:1 correspondence at the type level: every
   object of the fused entity plays every role, possibly vacuously (an
   atomic node is a node whose subgraph is empty). Constructors merge
@@ -80,7 +102,19 @@ Fusion has two flavors (epic invariant 4):
   while `sub`'s arenas (SubNode/SubEdge plus their indexes) embed in each
   outer node record because `outer.Node <=> sub.Subgraph`. Handles borrow
   through the nesting: a nested handle is the root store reference plus an
-  index path.
+  index path. Placement is a per-instance decision read off the root's
+  fusion class, and embedding is expressed as `Vec<Data>` *fields on the
+  host class's record struct*; constructors of embedded classes take the
+  host id as their first argument and return path ids, and insert hooks
+  address records through nested paths
+  (`store.outer_node_arena[h].sub_subnode_arena[i]`).
+- **Naming under composition is mechanical and collision-first.** Entity
+  names declared in more than one instance get instance-prefixed types
+  (`OuterNode` vs `InnerNode`); arena fields are always
+  instance-qualified (`outer_node_arena`, `sub_subnode_arena`); iterators
+  likewise (`OuterOutEdgesIter`). The store entry point for a composed
+  pattern with several unfused roots is one instance-prefixed accessor
+  per unfused root entity (`outer_graph()`, `inner_graph()`).
 - **Store-less instances still have write ops.** An instance whose root
   is colocation-fused into a host element and whose remaining entities
   are `<->`-closed owns no arenas at all (`chain` in the Refinement
@@ -127,6 +161,11 @@ pattern! {
     }
 }
 ```
+
+Read-side method names here come from the roots, not the local arrow
+names: `subnodes` is called `.nodes()`. The local names drive the
+generated write ops (`insert_<arrow>`) and marker names. See M1's
+trait-identity section for the alias rule.
 
 ### Keyed partial arrows
 
@@ -244,10 +283,9 @@ Two run at `implement!` time, because they need backing bindings:
   check non-vacuous there requires vocabulary the schema does not have —
   a store partition (which fusion class lives in which store), a
   directional store-reachability relation, and the emitting store per
-  binding (derivable from the self-record's class). That vocabulary is
-  also the answer to the deferred multi-root store entry-point question
-  (Deferred details); the two are the same decision, to be made when
-  multi-store layouts arrive.
+  binding (derivable from the self-record's class). That vocabulary
+  belongs to multi-store layouts, which remain out of scope; record it
+  as the prerequisite when they arrive.
 
 Two run at `validate()` time (runtime; caller-invoked in M2, forced by
 M4's flush):
@@ -338,9 +376,6 @@ Pinned down during the milestone, not before:
 - How fusion classes are named in generated docs.
 - The key-entity restriction for keyed arrows: any entity in scope, or
   only entities reachable via nearby total `one` arrows.
-- The store entry-point API for composed patterns with several unfused
-  root entities (`outer.Graph`, `inner.Graph`): one accessor per root
-  entity, or handles constructed directly from ids.
 - Derived arrows are scoped to the instance that declares them;
   cross-instance derivations are out of scope. (The per-instance scoping
   is load-bearing: it keeps union's sibling rule away from

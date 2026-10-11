@@ -21,10 +21,10 @@ between macros only through generated code. The pipeline:
      slot reserved in the grammar for M2's keyed arrows
      (`subnode(&self, main: MainNode) -> Option<SubNode>`);
    - for every root: a **registration courier** publishing the root's
-     metadata (trait method name, associated type names, cardinality).
-     Roots register themselves; there is no fixed table of stdlib arrows
-     in the macros crate, and user-declared roots work exactly like
-     stdlib ones;
+     metadata (trait method name, GAT iterator name, associated type
+     names, cardinality). Roots register themselves; there is no fixed
+     table of stdlib arrows in the macros crate, and user-declared roots
+     work exactly like stdlib ones;
    - for an instantiation pattern: one unit marker struct per arrow
      instantiation (per use, not per root — two instantiations of
      `stdlib::Nodes` get distinct markers), inside a `markers` module
@@ -116,6 +116,19 @@ way the stdlib does. Instantiations name the root by path and never
 restate its cardinality or associated types — those are inherited, and
 `implement!` resolves them through the root's registration courier, so an
 instantiation cannot contradict its root.
+
+**Instantiation arrow names are local aliases.** The trait's method name,
+GAT iterator name, and associated type names all come from the *root's*
+declaration, never from the instantiation: `subnodes: stdlib::Nodes,
+Subgraph -> SubNode` is still called `.nodes()` and yields
+`Nodes::Nodes<'a>` — emitting `fn subnodes` is a trait mismatch (E0407,
+spike-verified). The registration courier's metadata therefore carries
+the full (method name, GAT name, associated type names, cardinality)
+tuple. Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
+`set_<arrow>`) are the opposite: they derive from the instantiation's
+local names, since they are store API, not trait identity. A distinct
+read-side spelling, if wanted, is an inherent alias under the rule in
+M2's marker-qualification section.
 
 Markers are scoped per pattern instance and re-minted by
 `compose_pattern!` per composition instance: fusing two instances of one

@@ -11,8 +11,8 @@ findings are folded back into the milestone plans as they land.
 
 | # | Spike | Milestone | Status |
 |---|-------|-----------|--------|
-| 1 | Compose chain, end to end | M2 | **in progress** |
-| 2 | Nested-store codegen by hand | M2 | descoped (below) |
+| 1 | Compose chain, end to end | M2 | complete — folded in |
+| 2 | Nested-store codegen by hand | M2 | descoped — answered by spike 1 |
 | 3 | Edge-chain refinement, compiled | M2 | complete — folded in |
 | 4 | Structural validation checks as plain functions | M2 | complete — folded in |
 | 5 | `intrusive_list` through a `backing!`-style courier | M3 | complete — folded in |
@@ -28,18 +28,30 @@ bounce to a real composed pattern: two `Digraph` instances plus
 `outer.Node <=> sub.Subgraph`-style colocation, marker re-minting, and
 `implement!` on the composed result. Question: does fusion-class
 computation + placement codegen work when real schemas flow through the
-chain? *Status:* courier conversion to the target-parameterized rule done
-(baseline tests green); the chain and composed codegen are under
-construction. This is M2's principal implementability risk — the one
-mechanism nothing else exercises.
+chain? *Result:* **yes** — the chain collected three member schemas
+hop-by-hop, the final hop minted per-instance markers and emitted the
+composed courier in the unchanged rule shape (so `implement!` needed no
+changes), and the generated two-level store compiles and traverses,
+including an unmodified generic `bfs` over composed handles (16 tests).
+Findings folded into the plans: trait method/GAT names come from the
+root's declaration, not the instantiation alias (E0407 otherwise — the
+one real bug); placement is a per-instance decision expressed as
+`Vec<Data>` fields on the host record, with path-shaped constructors,
+ids, and hooks; generated type names needed a collision rule; the
+composed schema needed its own courier grammar; the multi-root store
+entry point resolved to one instance-prefixed accessor per unfused root.
+Recorded limits (the milestone's frontier): embedding depth 1, intrusive
+arrows sourced at embedded classes rejected, `<=>` transitivity exercised
+only on two-member classes, further composition untested.
 
 **2. Nested-store codegen by hand.** Hand-write the code
 `__implement_gen!` should emit for a Hierarchy-like store, as the codegen
 target spec. *Descoped:* the review already compile-verified index-path
-handles in a nested sketch, and spike 1's `implement!`-on-composed-result
-produces real nested code empirically — a better answer to "what does
-boring generated code look like" than a hand sketch. The question is
-folded into spike 1's report.
+handles in a nested sketch, and spike 1 then produced real nested code —
+which *is* the target spec, empirically: embedded arenas as `Vec<Data>`
+fields on the host record, path ids (`SubNodeId(OuterNodeId(0), idx)`),
+nested-path hook addressing, per-instance prefixed names on collision,
+one root accessor per unfused root.
 
 **3. The edge-chain refinement sketch, compiled.** Chain pattern with
 open `Elem`, intrusive `elems` arrow, reference fusion. *Result:* the
