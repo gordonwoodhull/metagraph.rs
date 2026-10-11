@@ -75,6 +75,35 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
    through that courier — there is no fixed table of stdlib arrows, and
    user-declared roots work exactly like stdlib ones.
 
+## Terminology: the four senses of "root"
+
+The word "root" does four distinct jobs across these plans. Context usually
+disambiguates, but the milestone specs lean on all four:
+
+- **Root pattern** (trait ownership): a single-arrow `pattern!` with no
+  instantiation source. It owns and registers its trait (invariant 7). This
+  is "root" in the instantiation DAG — the node with no parent.
+- **Root-marked entity** (schema structure): one entity per pattern
+  explicitly marked `root` in the entity list (`Graph` in Digraph,
+  `Subgraph` in Subgraph). The marking is per-declaration and does not
+  propagate through instantiation: an instantiation may bind a root
+  pattern's root-marked entity to a non-root local entity. M2's placement
+  rule and the store's root accessor read this marking.
+- **Root store / root level** (storage layout): the single top-level store
+  one `implement!` call generates. Arenas live at root level or embedded in
+  host records; handles are a root store reference plus an index path.
+- **Crate root** (module namespace): where `#[macro_export]` anchors
+  couriers (M1's courier path resolution).
+
+Two cautions follow. First, the stdlib declarations exercise the first two
+senses in adjacent positions (`pattern! { Nodes { entities: root Graph, … } }`
+is a root pattern *and* marks a root entity) — the `root` keyword does not
+make a pattern a root pattern; the absence of an instantiation source does.
+Second, a composed pattern has no root-marked entity of its own: each member
+instance keeps its own marking, unfused ones get root accessors, and what
+"the instance's root-marked entity" means for a composed member is undefined
+until further composition is on the frontier.
+
 ## Milestones
 
 | # | Theme | Spec |
@@ -85,8 +114,8 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
 | 4 | Write-side builders, mutation by rebuild | [preliminary](milestone-4-builders.md) |
 | 5+ | Selection, interop — see below | this file |
 
-Cross-cutting implementability validation (nine throwaway spikes against
-milestones 2–4): [spikes.md](spikes.md) — status, results, and what each
+Cross-cutting implementability validation (eleven throwaway spikes against
+milestones 1–4): [spikes.md](spikes.md) — status, results, and what each
 spike folded back into the plans.
 
 ## Milestone 4 (summary): write-side builders, mutation by rebuild

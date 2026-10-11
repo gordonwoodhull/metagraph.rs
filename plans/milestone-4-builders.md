@@ -23,13 +23,16 @@ nested staging, and induction remains uncompiled.
   intrusive links, hash-index maintenance) lives in a named per-backing
   hook function over `&mut` store state, and the `add_*` constructors are
   thin orchestration (M1 commits to both names and shape).
-- Validation has a named boundary (`validate()`): key existence, key
-  uniqueness per self object — and, per backing, **structural checks**
-  (endpoint ids in arena range, intrusive link well-formedness,
-  membership consistency between an arrow's links and its determining
-  fields). A store with no keyed arrows still validates; keyless
-  backings contribute the structural half. M2 callers invoke it
-  explicitly; flush invokes it unconditionally.
+- Validation has a named boundary (`validate()`), with M2's canonical
+  inventory: key existence, key uniqueness per self object — and, per
+  backing, **structural checks** (endpoint ids in arena range, intrusive
+  link well-formedness, membership consistency between an arrow's links
+  and its determining fields for `by`-derived arrows, and the
+  intrusive-ownership partition check for *primitive* intrusive arrows,
+  which have no determining field to be consistent with). A store with
+  no keyed arrows still validates; keyless backings contribute the
+  structural half. M2 callers invoke it explicitly; flush invokes it
+  unconditionally.
 - Nested stores are addressed by index paths (M2).
 - CSR-style backings (M3) assume a build/flush boundary; M3's constraint
   annotations make the requirement explicit.
@@ -136,7 +139,7 @@ continue with the new metagraph. Two entry points support this:
      `freeze_scope: per_store`, `read_precondition: post_compaction`)
      state this per backing.
   7. **`validate()`**: key existence, key uniqueness, and each backing's
-     structural checks (below).
+     structural checks — M2's canonical inventory (premises, above).
   Order contracts: kept elements keep their relative iteration order; new
   arena records append in replay order. Iteration order itself is a
   per-backing contract (M3 annotation: intrusive_list iterates
@@ -279,7 +282,8 @@ it follows `main_edge` to `source`/`target` — but during construction the
 builder owns the store mutably, and pattern code can't touch generated
 private fields. The builder therefore exposes a **read view of the store
 under construction as generated id-based getters** (field reads by id,
-returning ids and copies — never handles). Handles are rejected here on
+returning ids and copies — never handles; specified in M2's builder
+shape, which needs it for the same inducing constructor). Handles are rejected here on
 purpose: a whole-store handle's shared borrow cannot coexist with the
 `&mut` field access that mutates a nested store (the borrow checker
 forbids it exactly in the case induction needs). A restricted root handle
@@ -361,7 +365,7 @@ refs already handed out, because nothing is applied until flush.
 ## Task sequence (sketch)
 
 1. Change-set data model + provisional refs for flat `Digraph`; flush =
-   the six-step pipeline over a cloned store. Königsberg built via
+   the seven-step pipeline over a cloned store. Königsberg built via
    transaction must equal the M1 store in every observable way (same test
    assertions).
 2. Write traits generated per arrow, with associated ref types; a generic

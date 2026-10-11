@@ -1,11 +1,13 @@
 # Implementability spikes — index and results
 
-Nine throwaway spikes validating the riskiest claims in milestones 2–4
-before those milestones are implemented. Method: sonnet subagents build
-each answer as a compiling scratch crate under `/tmp` (the repo stays
-read-only), each maintaining a `REPORT.md` handoff in its scratch root.
-The output of a spike is answers and target code shapes, not code to keep;
-findings are folded back into the milestone plans as they land.
+Eleven throwaway spikes validating the riskiest claims in milestones 1–4
+before those milestones are implemented (nine from the original brief,
+plus 10 and 11 added by consolidation-review decisions). Method: sonnet
+subagents build each answer as a compiling scratch crate under `/tmp`
+(the repo stays read-only), each maintaining a `REPORT.md` handoff in its
+scratch root. The output of a spike is answers and target code shapes,
+not code to keep; findings are folded back into the milestone plans as
+they land.
 
 ## Status at a glance
 
@@ -20,6 +22,8 @@ findings are folded back into the milestone plans as they land.
 | 7 | Flat-`Digraph` transaction by hand | M4 | complete — folded in |
 | 8 | Generic read→write transform | M4 | complete — folded in |
 | 9 | Removal + compaction + id-remap report | M4 | descoped (below) |
+| 10 | Root-arena drop from flat codegen | M1/M2 | complete — folded in |
+| 11 | Keyed lookup over path ids | M2 | planned — gates Hierarchy keyed bindings |
 
 ## The spikes
 
@@ -40,9 +44,16 @@ one real bug); placement is a per-instance decision expressed as
 ids, and hooks; generated type names needed a collision rule; the
 composed schema needed its own courier grammar; the multi-root store
 entry point resolved to one instance-prefixed accessor per unfused root.
-Recorded limits (the milestone's frontier): embedding depth 1, intrusive
-arrows sourced at embedded classes rejected, `<=>` transitivity exercised
-only on two-member classes, further composition untested.
+Recorded limits (the milestone's frontier, in full): embedding depth 1;
+intrusive arrows sourced at embedded classes or unfused roots rejected;
+field backing into an embedded class rejected (its id needs a host path);
+arena arrows into an embedded class hosted by another class rejected;
+`<=>` transitivity exercised only on two-member classes; constructor
+argument name collisions across instances of one fusion class silently
+deduped (keeps first); further composition of a composed pattern untested.
+One recorded limit was later retired by spike 10 (the flat/composed
+root-arena asymmetry); the insert-op naming deviation was resolved back
+to the `insert_<arrow>` convention (M1).
 
 **2. Nested-store codegen by hand.** Hand-write the code
 `__implement_gen!` should emit for a Hierarchy-like store, as the codegen
@@ -120,7 +131,34 @@ contains removal with compaction, dangler errors named in old ids,
 old→new map round-trips, and survivor iteration-order checks (14 removal
 tests) — spike 9's acceptance criteria were demonstrated there.
 
+**10. Root-arena drop from flat codegen.** Question: is the uniform
+"root-marked entity owns no arena, record, or id — only its handle" rule
+cheap to adopt on the flat path (composed codegen already followed it)?
+Built on spike 1's workspace (copied to /tmp/spike10-root-arena). *Result:*
+yes — a ~38-line diff confined to flat codegen (the entity-kit loop, the
+store's arena-field list, the per-entity count functions); 16/16 tests
+green unmodified; nothing load-bearing (ids are per-entity arena lengths,
+and the root record was never constructed). Sole API casualty:
+`graph_count()`, which always returned 0 and was unused. Also assessed:
+flat/composed unification of entity emission is *not* a small follow-up
+(flat is per-entity with bare `u32` ids; composed is per-fusion-class
+with placement and compound ids) — the shareable pieces are the
+handle/iterator emission templates and the near-verbatim duplicated
+backing-binding validation loop. Folded into M1's naming rule and M2's
+placement rule.
+
+**11. Keyed lookup over path ids.** `hash_index` targeting an embedded
+class stores target ids the way field backing does — exactly the
+configuration spike 1's codegen rejects for fields, since the target's id
+is a host-anchored path (`SubNodeId(OuterNodeId(h), i)`). Question: can
+the keyed backing's map, its insert hook, and the keyed read method
+address embedded targets through path ids, and does lookup hold up
+through the nesting? Status: **planned** — it gates any Hierarchy test
+that binds `sub.subnode`/`sub.subedge`. The edge-induced test is
+unaffected (unfused `sub` root → flat SubNode ids).
+
 ## Sequencing rules (from the original brief)
 
-7 before 8 and 9; 1 before 2's codegen version; 4–6 independent. At most
-two spike agents run concurrently.
+7 before 8 and 9; 1 before 2's codegen version; 4–6 independent; 11
+before any M2 Hierarchy test binds the keyed arrows. At most two spike
+agents run concurrently.

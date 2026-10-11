@@ -8,12 +8,23 @@ M1 will reshape details. Spike-verified (hand-built, tested): the
 structural-validation phase assignments, the edge-chain refinement sketch,
 and the courier chain itself end to end (three-member composition, fusion
 classes, per-instance marker re-minting, placement codegen, nested
-handles, generic `bfs` over composed handles — 16 tests). Spike limits,
-now the milestone's known frontier: embedding depth 1 only, intrusive
-arrows sourced at embedded classes or unfused roots rejected, `<=>`
-transitivity exercised only on two-member classes, and further
-composition of a composed pattern untested (the emitted courier has the
-right shape, but the member-schema grammar would need to nest).
+handles, generic `bfs` over composed handles — 16 tests). **Uncompiled:**
+keyed partial arrows and the `hash_index` backing (the first backing whose
+hooks maintain derived lookup state); the Subgraph pattern exactly as
+sketched (the compiled version was simplified to `subnodes` + `main_node`,
+and its local root lived in the stdlib — declaring a local root alongside
+the pattern is unverified); the inducing `add_subedge` constructor and the
+id-based read view it reads through (Builder shape, below); and the
+bipartite test (M1 machinery only, but never run). Spike limits, now the
+milestone's known frontier, stated in full: embedding depth 1 only;
+intrusive arrows sourced at embedded classes or unfused roots rejected;
+field backing into an embedded class rejected (its id needs a host path);
+arena arrows into an embedded class hosted by another class rejected;
+`<=>` transitivity exercised only on two-member classes; constructor
+argument name collisions across instances of one fusion class silently
+deduped (keeps first); and further composition of a composed pattern
+untested (the emitted courier has the right shape, but the member-schema
+grammar would need to nest).
 
 ## In scope
 
@@ -94,10 +105,11 @@ Fusion has two flavors (epic invariant 4):
 - **Colocation fusion determines arena placement, per instance.** An
   instance's arenas are embedded in the host record exactly when the
   instance's `root`-marked entity is colocation-fused with an element
-  entity of the host instance; unfused roots keep root arenas. Reference
-  fusion never affects placement. The root-marked entity itself owns no
-  arena — its "record" is the (sub)store; instances contribute arenas
-  for their non-root entities only. In the `Hierarchy` example: `inner`'s
+  entity of the host instance; an instance whose root is unfused keeps
+  its arenas at the store's root level. Reference fusion never affects
+  placement. The root-marked entity owns no arena, flat or composed
+  (M1's naming rule): its "record" is the (sub)store, and instances
+  contribute arenas for their non-root entities only. In the `Hierarchy` example: `inner`'s
   arenas live at the root (its root is unfused — one shared inner graph),
   while `sub`'s arenas (SubNode/SubEdge plus their indexes) embed in each
   outer node record because `outer.Node <=> sub.Subgraph`. Handles borrow
@@ -112,7 +124,9 @@ Fusion has two flavors (epic invariant 4):
   names declared in more than one instance get instance-prefixed types
   (`OuterNode` vs `InnerNode`); arena fields are always
   instance-qualified (`outer_node_arena`, `sub_subnode_arena`); iterators
-  likewise (`OuterOutEdgesIter`). The store entry point for a composed
+  likewise (`OuterOutEdgesIter`). Write-op names derive from the
+  instantiation's local names (M1) and take the instance prefix on
+  collision (`add_outer_node`). The store entry point for a composed
   pattern with several unfused roots is one instance-prefixed accessor
   per unfused root entity (`outer_graph()`, `inner_graph()`).
 - **Store-less instances still have write ops.** An instance whose root
@@ -121,9 +135,12 @@ Fusion has two flavors (epic invariant 4):
   sketch) — but its `many` arrows still need insert operations, and
   constructor merging covers only total `one` arrows. The insert op is
   emitted on the store hosting the fused *self* record, named
-  `insert_<arrow>` by the usual convention (the spike's
-  `insert_chain_elem(OuterEdgeId, InnerEdgeId)`); its backing hooks write
-  through to whichever arena in the store tree holds the target records.
+  `insert_<arrow>` from the instantiation's local arrow name by the usual
+  convention — `insert_elems(OuterEdgeId, InnerEdgeId)` for the chain
+  sketch (the spike's hand-written code called it `insert_chain_elem`;
+  that was a deviation from the convention, not a precedent); its backing
+  hooks write through to whichever arena in the store tree holds the
+  target records.
 - Runtime multiplicity is not declared here: `sub` appears once at the type
   level; at runtime each outer node owns its own subgraph store, colocated
   in its record.
@@ -155,8 +172,8 @@ pattern! {
             subedges:  EdgesOf,       Subgraph -> SubEdge;   // new root; stdlib candidate
             main_node: MainNode,      SubNode -> MainNode;   // local root arrow
             main_edge: MainEdge,      SubEdge -> MainEdge;   // local root arrow
-            subnode:   SubNodeOf,     Subgraph -> SubNode, optional, key(MainNode);
-            subedge:   SubEdgeOf,     Subgraph -> SubEdge, optional, key(MainEdge);
+            subnode:   SubNodeOf,     Subgraph -> SubNode, key(MainNode);
+            subedge:   SubEdgeOf,     Subgraph -> SubEdge, key(MainEdge);
         }
     }
 }
@@ -172,13 +189,24 @@ trait-identity section for the alias rule.
 New cardinality: `optional, key(K)` — a partial lookup parameterized by an
 entity of another sort (`subnode(&self, main: MainNode) -> Option<SubNode>`).
 This is the first relation whose method takes an argument beyond `&self`;
-M1's root-trait grammar reserves the parameter slot for it.
+M1's root-trait grammar reserves the parameter slot for it. The keyed
+cardinality is declared on the root, which owns the method and its key
+parameter; the instantiation supplies only the key-entity binding
+(`key(MainNode)`), a local clause like `by` — it never restates the
+cardinality (see M1's trait-identity section).
 
 New built-in backing: `hash_index` — per-self-object map from key id to
 target id, maintained by the builder's insert hooks. It is the first
 backing whose hooks maintain *derived lookup state* (intrusive_list's
 hooks already mutate records; hash_index's maintain a secondary index),
-and it validates the hook interface designed in M1.
+and it validates the hook interface designed in M1. One configuration is
+beyond the spike frontier: a keyed arrow *targeting an embedded class*
+(Hierarchy with `sub.subnode` bound) stores target ids the way field
+backing does — exactly the configuration spike 1's codegen rejects for
+fields, because the target's id is a host-anchored path. Spike 11 (keyed
+lookup over path ids, see spikes.md) must land before any Hierarchy test
+binds the keyed arrows. The edge-induced test is unaffected: with an
+unfused `sub` root, SubNode lives at root level and its ids are flat.
 
 Checks attach to the **`validate()` boundary** M1 establishes: key
 existence (every key id names a real record) and key uniqueness per self
@@ -199,7 +227,8 @@ and exposes `&mut` methods (`add_*`); no separate builder type, no change
 sets, no removal, no write-side traits — those are M4. (Terminology: the
 store in its `&mut` construction phase is *the builder*; M4's staging
 type is *the transaction*. M4's flush re-runs the builder machinery.)
-Three conventions keep M4 additive rather than a rewrite:
+Three conventions keep M4 additive rather than a rewrite, plus one
+read-side addition it will reuse:
 
 - **Hooks are the single write path.** All storage mutation — field
   writes, intrusive links, hash-index maintenance — lives in the named
@@ -215,6 +244,20 @@ Three conventions keep M4 additive rather than a rewrite:
   renaming.
 - **Validation has a named boundary** (`validate()`, above), so M4 hangs
   full referential-integrity validation on a point that already exists.
+- **The builder exposes a read view of the store under construction.**
+  Pattern-level constructor logic needs to *read* — the inducing
+  `add_subedge` (Tests, below) follows `main_edge` to `source`/`target`
+  — but during construction the builder owns the store mutably, and
+  pattern code can't touch generated private fields. The read view is
+  generated id-based getters: field reads by id, returning ids and
+  copies — never handles. Handles are rejected here on purpose: a
+  whole-store handle's shared borrow cannot coexist with the `&mut`
+  field access that mutates a nested store (the borrow checker forbids
+  it exactly in the case induction needs). A restricted root handle is
+  viable only in the flat case, where the store being read is not the
+  store being mutated; id getters work in both. M4's flush replay reads
+  through the same view (copied old data plus already-replayed ops).
+  Uncompiled, like the induction constructor that needs it.
 
 The index-path handle representation doubles as M4's change-set
 addressing scheme: a change-set entry is an `(index path, operation)`
@@ -287,22 +330,34 @@ Two run at `implement!` time, because they need backing bindings:
   belongs to multi-store layouts, which remain out of scope; record it
   as the prerequisite when they arrive.
 
-Two run at `validate()` time (runtime; caller-invoked in M2, forced by
-M4's flush):
+Two kinds of check run at `validate()` time (runtime; caller-invoked in
+M2, forced by M4's flush). This is the canonical inventory — M4's flush
+runs exactly these:
 
-- Key existence and key uniqueness per self object (keyed partial
-  arrows).
-- **Intrusive-ownership partition check.** For each intrusive backing
-  carrying M3's exclusive-membership annotation, walk every list once
-  with a per-walk seen set and a global seen set: an id appearing in
-  *two* lists is shared membership (which silently truncates the old
-  chain); an id repeating *within* one list is a cycle (which makes
-  traversal diverge). The check distinguishes the two failure shapes in
-  its report. Its inputs are all available by `implement!` time: the
-  annotation, the self entity (head field) and target entity (link
-  field), the field names from the backing's contribution list, and the
-  store holding the target arena. (Without this check both corruptions
-  are silent — the spike reproduced both.)
+- **Key checks** (keyed partial arrows): key existence (every key id
+  names a real record) and key uniqueness per self object (a keyed
+  arrow is a function).
+- **Per-backing structural checks.** Endpoint ids in arena range;
+  intrusive link well-formedness (in-range links). For `intrusive_list`
+  there is additionally an exclusive-membership contract — built in
+  while the backings are a fixed table (M1–M2), surfaced as a constraint
+  annotation when M3's `backing!` DSL lands. How the contract is
+  *checked* depends on membership kind. For a `by`-derived arrow,
+  membership consistency against the determining field covers it: each
+  record appears exactly once in the list its determining field names,
+  so shared membership cannot be expressed consistently at all. For a
+  *primitive* intrusive arrow (`chain.elems` in the refinement sketch)
+  there is no determining field, so the check is the
+  **intrusive-ownership partition check**: walk every list once with a
+  per-walk seen set and a global seen set — an id appearing in *two*
+  lists is shared membership (which silently truncates the old chain);
+  an id repeating *within* one list is a cycle (which makes traversal
+  diverge). The check distinguishes the two failure shapes in its
+  report. Its inputs are all available by `implement!` time: the self
+  entity (head field) and target entity (link field), the field names
+  from the backing's contribution list, and the store holding the target
+  arena. (Without the partition check both corruptions are silent — the
+  spike reproduced both.)
 
 Marker collision is not a check: per-instance re-minting makes it
 impossible by construction.
@@ -314,7 +369,9 @@ impossible by construction.
   conditional lookups return `None` for non-members. The builder's
   `add_subedge` induces subnodes for the edge's endpoints (deduplicated
   via the hash index); induction is constructor logic, not schema
-  vocabulary (see M4).
+  vocabulary (see M4), and the inducing constructor reads through the
+  builder's id-based read view (Builder shape, above). Both the
+  constructor and the read view are uncompiled.
 - Hierarchy: outer graph whose nodes contain subgraphs of the inner graph;
   traverse both levels.
 - Bipartite graph as a plain `pattern!` (two node sorts, arrows picked

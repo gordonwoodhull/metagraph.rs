@@ -115,7 +115,12 @@ declares a fresh trait; users may define their own root arrows the same
 way the stdlib does. Instantiations name the root by path and never
 restate its cardinality or associated types — those are inherited, and
 `implement!` resolves them through the root's registration courier, so an
-instantiation cannot contradict its root.
+instantiation cannot contradict its root. The one exception is the
+key-entity binding of a keyed root (M2): the root declares the keyed
+cardinality and owns the method's key parameter, but it cannot name the
+instantiation's key sort, so the instantiation supplies `key(LocalEntity)`
+as a local clause — exactly like `by`, and never a restatement of
+cardinality.
 
 **Instantiation arrow names are local aliases.** The trait's method name,
 GAT iterator name, and associated type names all come from the *root's*
@@ -226,14 +231,23 @@ hand-renamed:
 
 | schema item | generated items |
 |---|---|
-| entity `Node` | id `NodeId(pub u32)`, record `NodeData`, arena field `node_arena`, handle `Node<'g>` |
+| non-root entity `Node` | id `NodeId(pub u32)`, record `NodeData`, arena field `node_arena`, handle `Node<'g>` |
 | arrow `out_edges` | marker `<pattern>::markers::OutEdges`, iterator `OutEdgesIter`, insert op `insert_out_edges` |
-| root entity `Graph` | root accessor `graph()` on the store |
+| root entity `Graph` | handle `Graph<'g>` and root accessor `graph()` on the store — nothing else |
 
-Every entity — including the root — gets a `Vec` arena, an id newtype, and
-a `Copy` handle unconditionally. The root's arena is vestigial (the root
-record is never constructed) but uniformity beats a special case: arrows
-never own arenas, and no code path distinguishes the root's storage.
+Every non-root entity gets a `Vec` arena, an id newtype, a record struct,
+and a `Copy` handle unconditionally: arrows never own arenas, and no code
+path distinguishes one entity's storage from another's. The root-marked
+entity is the single exception, and the exception is semantic, not a
+special case: its record is the store itself. It is never constructed and
+owns no arena, record, or id type — only its handle, which the root
+accessor and the trait methods sourced at it need. (Spike-verified on the
+M2 compose-chain workspace: dropping the root's vestigial kit from flat
+codegen is a ~38-line diff confined to flat codegen — the entity-kit loop,
+the store's arena-field list, and the per-entity count functions — with
+the whole test suite green unmodified. The only API casualty is
+`graph_count()`, which always returned 0 and which no test used; per-entity
+counts are emitted for non-root entities only.)
 
 ## Backings (built-in, fixed table in the macros crate)
 
@@ -271,8 +285,8 @@ Rules:
   implementation detail.
 - **Every generated store has a `validate()` method.** M1 has nothing to
   check — it returns `Ok(())` — but the boundary exists from here on: M2
-  hangs key-existence and key-uniqueness checks on it, and M4's flush
-  calls it unconditionally.
+  hangs the key checks and the per-backing structural checks on it (M2's
+  canonical inventory), and M4's flush calls it unconditionally.
 
 ## Generated API (contract with the tests)
 
