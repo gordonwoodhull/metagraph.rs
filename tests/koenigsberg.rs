@@ -5,10 +5,25 @@
 //!
 //! Landmasses: A = Kneiphof island, B = north bank, C = south bank,
 //! D = Lomse island.
+//!
+//! The store is macro-generated: `implement!` binds the stdlib `Digraph`
+//! pattern's arrows to backings and emits `GraphStore`, its ids, handles,
+//! and trait impls at this call site. Traits come from the stdlib's root
+//! patterns; only imports and construction differ from the hand-written
+//! reference (`arena.rs`, kept until milestone step 10).
 
 use metagraph_exper::algo::{bfs, dfs};
-use metagraph_exper::arena::{GraphStore, NodeId};
-use metagraph_exper::traits::{Edges, InEdges, Nodes, OutEdges, Source, Target};
+use metagraph_exper::implement;
+use metagraph_exper::stdlib::{Edges, InEdges, Nodes, OutEdges, Source, Target};
+
+implement! {
+    metagraph_exper::stdlib::Digraph as GraphStore {
+        nodes:     arena,
+        out_edges: intrusive_list,
+        in_edges:  intrusive_list,
+        // `source`/`target` are `one` arrows: they default to `field`.
+    }
+}
 
 const A: u32 = 0;
 const B: u32 = 1;
@@ -32,7 +47,7 @@ fn koenigsberg() -> GraphStore {
     s
 }
 
-fn node_ids(order: Vec<metagraph_exper::arena::Node<'_>>) -> Vec<u32> {
+fn node_ids(order: Vec<Node<'_>>) -> Vec<u32> {
     order.into_iter().map(|n| n.id().0).collect()
 }
 

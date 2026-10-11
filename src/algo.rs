@@ -1,16 +1,21 @@
 //! Traversal algorithms written against the atomic relations, not against any
 //! backend. Anything with out-edges whose edges have targets can be walked.
+//!
+//! The bounds carry one marker parameter per arrow trait (`OutEdges<MO>`,
+//! `Target<MT>`) — inferred at call sites while each handle carries at most
+//! one impl of each trait; fused handles in M2 qualify with partial
+//! turbofish (`bfs::<_, _, markers::outer::OutEdges, _>(h)`).
 
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
-use crate::traits::{OutEdges, Target};
+use crate::stdlib::{OutEdges, Target};
 
 /// Breadth-first visit order from `start`, each node yielded once.
-pub fn bfs<N, E>(start: N) -> Vec<N>
+pub fn bfs<N, E, MO, MT>(start: N) -> Vec<N>
 where
-    N: Copy + Eq + Hash + OutEdges<Edge = E>,
-    E: Target<Node = N>,
+    N: Copy + Eq + Hash + OutEdges<MO, Edge = E>,
+    E: Target<MT, Node = N>,
 {
     let mut visited = HashSet::new();
     let mut order = Vec::new();
@@ -30,10 +35,10 @@ where
 }
 
 /// Depth-first preorder from `start`, each node yielded once.
-pub fn dfs<N, E>(start: N) -> Vec<N>
+pub fn dfs<N, E, MO, MT>(start: N) -> Vec<N>
 where
-    N: Copy + Eq + Hash + OutEdges<Edge = E>,
-    E: Target<Node = N>,
+    N: Copy + Eq + Hash + OutEdges<MO, Edge = E>,
+    E: Target<MT, Node = N>,
 {
     let mut visited = HashSet::new();
     let mut order = Vec::new();
