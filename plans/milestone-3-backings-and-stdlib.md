@@ -1049,20 +1049,20 @@ phase representation.
 - Depends: 4, 6
 
 **Step 9 — Stdlib promotion + doc pass.** Contract: Stdlib promotion.
-- [ ] M2's discovered roots move into the runtime stdlib;
+- [x] M2's discovered roots move into the runtime stdlib;
       pattern-local declarations re-point by path; names as M2
       resolved them
-- [ ] doc pass to M1 step-11's standard; generated-code doc comments
+- [x] doc pass to M1 step-11's standard; generated-code doc comments
       carry the arrow that produced each item
 - Acceptance:
-- [ ] M2 suites unchanged modulo import paths
+- [x] M2 suites unchanged modulo import paths
 - Depends: 1–8
 
 **Overall gate (the milestone's success criterion, restated):**
-- [ ] `field`, `arena`, `intrusive_list`, `hash_index`, and
+- [x] `field`, `arena`, `intrusive_list`, `hash_index`, and
       `csr_adjacency` are `backing!` declarations shipped in the
       runtime crate
 - [x] the fixed table of backings is gone from the macros crate, and
       no hidden fixed table survives (every behavior filed under (a)
       or (b) in the premise table)
-- [ ] M1 and M2 suites green, unchanged
+- [x] M1 and M2 suites green, unchanged
