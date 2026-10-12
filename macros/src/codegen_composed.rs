@@ -1,10 +1,13 @@
 //! Composed-store codegen — the codegen stage of `__implement_gen!` for a
-//! composed pattern (plans/milestone-2), entered once every member's root
-//! metadata has been collected. Port of the spike's `expand_gen_composed`
-//! onto the M1 baseline (registration-courier metadata, named hooks, the
-//! combined constructor rule, re-scoped home/addressability checks).
-//!
-//! Model:
+//! composed pattern, under M2's placement machinery (union-find fusion
+//! classes, `ClassLoc::Root/Embedded(host)`, the `<->` partner map,
+//! collision prefixing) and M3's declaration-driven emission: every bound
+//! arrow's storage is driven by its resolved `backing!` declaration —
+//! contributed fields (renamed per the declaration's naming formulas),
+//! hook bodies, the access protocols, and validate bodies are the
+//! declaration's authored tokens, bound per placement by the
+//! role-substitution engine ([`crate::roles`]). One authored body, per-
+//! placement bindings; what stays uniform is M2's model:
 //! - Fusion classes: equivalence closure of `<=>` over (instance, entity)
 //!   pairs. A class's record sums its members' capability fields; the class
 //!   is named by its first element member's post-collision name.
@@ -24,24 +27,29 @@
 //!   argument-name collisions across instances of one fusion class share
 //!   one argument when the resolved target classes agree, and take the
 //!   instance prefix when they differ (the combined rule).
-//! - Backings bind per instance (`instance.arrow` keys).
+//! - Backings bind per instance (`instance.arrow` keys); hooks and
+//!   validators are instance-qualified (`__insert_<inst>_<arrow>`,
+//!   `__validate_<inst>_<arrow>`), summoned in binding order.
 
 use std::collections::HashMap;
 
-use proc_macro2::{Ident as Ident2, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use proc_macro2::{Ident as Ident2, Span, TokenStream as TokenStream2};
+use quote::{format_ident, quote, ToTokens};
 
+use crate::backing::{formula_name, BackingDecl, Clause, OnTarget, ValidateVariant};
+use crate::codegen::{body_of, card_of_decl, init_of, on_clause, scaffold_lets, FieldInit};
 use crate::grammar::{
-    camel, marker_ty, path_tokens, snake, Binding, Cardinality, ComposedSchema, RootMeta,
+    camel, marker_ty, path_tokens, snake, Cardinality, ComposedSchema, RootMeta,
 };
+use crate::roles::{self, Ent, RoleBinding};
 use crate::ChainConfig;
 
 /// A resolved arrow of one member instance: declaration, root metadata,
-/// backing (`None` for derived `:= sum` arrows).
-pub(crate) struct ArrowInfo<'a> {
-    pub(crate) decl: &'a crate::grammar::ArrowDecl,
-    pub(crate) meta: &'a RootMeta,
-    pub(crate) backing: Option<String>,
+/// backing declaration (`None` for derived `:= sum` arrows).
+struct ArrowInfo<'a> {
+    decl: &'a crate::grammar::ArrowDecl,
+    meta: &'a RootMeta,
+    backing: Option<&'a BackingDecl>,
 }
 
 /// Location of a fusion class's arena.
@@ -71,23 +79,441 @@ struct ClassData {
     data_name: Ident2,
     /// Always instance-qualified: `outer_node_arena`, `sub_subnode_arena`.
     arena_fld: Ident2,
-    /// Field contributions to this class's record, in collection order.
+    /// Field contributions to this class's record, in collection order
+    /// (composition-instance order, then member schema order).
     fields: Vec<FieldContribution>,
-    /// hash_index map fields on this class's record (keyed arrows sourced
-    /// here): per-self-object key->target maps, hook-maintained.
-    maps: Vec<(Ident2, Ident2, Ident2)>,
 }
 
-/// One field contribution to a class's record: what the record stores and
-/// (for `field`-backed arrows) which constructor argument feeds it.
+/// One field contribution to a class's record (or, with no owner class, to
+/// the store): the emitted name, the placement-rewritten type, how the
+/// record literal initializes it, and what the validate pre-pass needs.
 struct FieldContribution {
     /// Field name as spelled in the record (post collision-resolution).
     field: Ident2,
-    /// Constructor argument feeding the field; `None` for intrusive
-    /// heads/links (initialized empty, relinked by hooks).
-    arg: Option<Ident2>,
-    /// Stored id type (resolved through the partner map for open targets).
-    ty: Ident2,
+    /// Rewritten type (entity-variable id types through the partner map,
+    /// container paths absolutized).
+    ty: TokenStream2,
+    /// The record-literal initializer (ctor arg / `None` / `Default`).
+    init: FieldInit,
+    /// The contributing instance (for qualified naming in docs/errors).
+    inst: usize,
+    /// The contributing arrow's local name.
+    arrow: Ident2,
+    /// `on A` (self-side: "head") vs `on B` (target-side: "link").
+    side_a: bool,
+    /// The type is `Option<id>` — the validate pre-pass range-walks it.
+    option_id: bool,
+}
+
+// ---------------------------------------------------------------------------
+// The composed role binding
+// ---------------------------------------------------------------------------
+
+/// Composed placement of one binding's roles: fusion classes, path ids,
+/// host nesting, the partner map. `FlatRoles` is the flat twin; the role
+/// table this implements is pinned in the M3 handoff (do not relitigate):
+/// `rec`/`records`/`maps`/`host_of`/`idx`/`arena_of`/`map_from`/
+/// `determining`/`handle` per placement, the vacuous host `()` wherever
+/// ids are flat, and the Walk's reserved `host` at embedded targets.
+struct ComposedRoles<'a> {
+    classes: &'a [ClassData],
+    store: TokenStream2,
+    /// Classes of A, B, K (the partner map resolved open entities).
+    class_of: [usize; 3],
+    root_self: bool,
+    a: Option<TokenStream2>,
+    k: Option<TokenStream2>,
+    w: Option<TokenStream2>,
+    map_field: Option<Ident2>,
+    det_field: Option<Ident2>,
+    tgt_handle: Ident2,
+    walk_ty: Option<Ident2>,
+    walk_host: Option<TokenStream2>,
+    renames: Vec<(String, Ident2)>,
+    walk_fields: Vec<(Ident2, TokenStream2)>,
+}
+
+impl<'a> ComposedRoles<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        classes: &'a [ClassData],
+        decl: &BackingDecl,
+        arrow: &crate::grammar::ArrowDecl,
+        class_of: [usize; 3],
+        root_self: bool,
+        tgt_handle: Ident2,
+    ) -> Self {
+        let stem = crate::grammar::link_stem(&arrow.name);
+        let renames = crate::codegen::contributed_fields(decl)
+            .map(|f| (f.logical.to_string(), formula_name(f, f.formula, &arrow.name, &stem)))
+            .collect();
+        let walk_fields = decl
+            .clause(|c| matches!(c, Clause::Iter { .. }))
+            .map(|c| match c {
+                Clause::Iter { fields, .. } => fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.to_token_stream()))
+                    .collect::<Vec<_>>(),
+                _ => unreachable!(),
+            })
+            .unwrap_or_default();
+        ComposedRoles {
+            classes,
+            store: quote!(self),
+            class_of,
+            root_self,
+            a: None,
+            k: None,
+            w: None,
+            map_field: None,
+            det_field: None,
+            tgt_handle,
+            walk_ty: None,
+            walk_host: None,
+            renames,
+            walk_fields,
+        }
+    }
+
+    fn at(mut self, store: TokenStream2) -> Self {
+        self.store = store;
+        self
+    }
+
+    fn with_a(mut self, a: TokenStream2) -> Self {
+        self.a = Some(a);
+        self
+    }
+
+    fn with_k(mut self, k: TokenStream2) -> Self {
+        self.k = Some(k);
+        self
+    }
+
+    fn with_w(mut self, w: TokenStream2) -> Self {
+        self.w = Some(w);
+        self
+    }
+
+    fn with_walk_ty(mut self, w: Ident2) -> Self {
+        self.walk_ty = Some(w);
+        self
+    }
+
+    fn with_walk_host(mut self, h: TokenStream2) -> Self {
+        self.walk_host = Some(h);
+        self
+    }
+
+    fn with_det(mut self, det: Ident2) -> Self {
+        self.det_field = Some(det);
+        self
+    }
+
+    fn with_map(mut self, map: Ident2) -> Self {
+        self.map_field = Some(map);
+        self
+    }
+
+    fn class(&self, e: Ent) -> usize {
+        self.class_of[match e {
+            Ent::A => 0,
+            Ent::B => 1,
+            Ent::K => 2,
+        }]
+    }
+}
+
+impl RoleBinding for ComposedRoles<'_> {
+    fn store(&self) -> TokenStream2 {
+        self.store.clone()
+    }
+    fn param(&self, name: &str) -> Option<TokenStream2> {
+        match name {
+            "a" => self.a.clone().or_else(|| self.root_self.then(|| quote!(()))),
+            "k" => self.k.clone(),
+            "w" => self.w.clone(),
+            _ => None,
+        }
+    }
+    fn id_ty(&self, e: Ent) -> TokenStream2 {
+        if e == Ent::A && self.root_self {
+            // The unfused root owns no id type.
+            return quote!(());
+        }
+        let idt = &self.classes[self.class(e)].id_name;
+        quote!(#idt)
+    }
+    fn rec(&self, arg: TokenStream2, e: Ent) -> TokenStream2 {
+        if self.root_self && e == Ent::A {
+            // The unfused root's record is the store itself.
+            return self.store();
+        }
+        rec_ref(self.classes, self.store(), self.class(e), arg)
+    }
+    fn records(&self, e: Ent) -> TokenStream2 {
+        let ci = self.class(e);
+        if !self.classes[ci].owns_records {
+            return quote!(::core::iter::once(()));
+        }
+        let s = self.store();
+        match self.classes[ci].loc {
+            ClassLoc::Root => {
+                let a = &self.classes[ci].arena_fld;
+                let idt = &self.classes[ci].id_name;
+                quote!((0..#s.#a.len() as u32).map(#idt))
+            }
+            ClassLoc::Embedded(hc) => {
+                let ha = &self.classes[hc].arena_fld;
+                let hid = &self.classes[hc].id_name;
+                let a = &self.classes[ci].arena_fld;
+                let idt = &self.classes[ci].id_name;
+                quote!((0..#s.#ha.len() as u32).flat_map(move |hi| {
+                    (0..#s.#ha[hi as usize].#a.len() as u32)
+                        .map(move |ri| #idt(#hid(hi), ri))
+                }))
+            }
+        }
+    }
+    fn maps(&self) -> TokenStream2 {
+        let f = self.map_field.as_ref().expect("keyed backing contributes its map field");
+        let sc = self.class(Ent::A);
+        let tc = self.class(Ent::B);
+        let s = self.store();
+        if !self.classes[sc].owns_records {
+            // Store-level: one pair, the vacuous host the owner.
+            return quote!(::core::iter::once(((), &#s.#f)));
+        }
+        let sa = &self.classes[sc].arena_fld;
+        match self.classes[tc].loc {
+            ClassLoc::Root => {
+                // Flat ids carry no host component: the vacuous host is each
+                // pair's owner (the "on {:?}" self-id spelling is gone here).
+                quote!((0..#s.#sa.len() as u32).map(|ri| ((), &#s.#sa[ri as usize].#f)))
+            }
+            ClassLoc::Embedded(hc) if sc == hc => {
+                // The self class hosts the target: each record's id is the
+                // host id its map's values must agree with.
+                let sid = &self.classes[sc].id_name;
+                quote!((0..#s.#sa.len() as u32).map(|ri| (#sid(ri), &#s.#sa[ri as usize].#f)))
+            }
+            ClassLoc::Embedded(hc) => {
+                // Self embedded in the target's host (checked at implement
+                // time): one pair per embedded record, the host id the owner.
+                let ha = &self.classes[hc].arena_fld;
+                let hid = &self.classes[hc].id_name;
+                quote!((0..#s.#ha.len() as u32).flat_map(move |hi| {
+                    (0..#s.#ha[hi as usize].#sa.len() as u32)
+                        .map(move |ri| (#hid(hi), &#s.#ha[hi as usize].#sa[ri as usize].#f))
+                }))
+            }
+        }
+    }
+    fn host_of(&self, arg: TokenStream2, e: Ent) -> TokenStream2 {
+        match self.classes[self.class(e)].loc {
+            ClassLoc::Root => quote!(()),
+            ClassLoc::Embedded(_) => quote!((#arg).0),
+        }
+    }
+    fn idx(&self, arg: TokenStream2, e: Ent) -> TokenStream2 {
+        match self.classes[self.class(e)].loc {
+            ClassLoc::Root => quote!((#arg).0 as usize),
+            ClassLoc::Embedded(_) => quote!((#arg).1 as usize),
+        }
+    }
+    fn arena_of(&self, e: Ent, arg: TokenStream2) -> TokenStream2 {
+        let ci = self.class(e);
+        let s = self.store();
+        match self.classes[ci].loc {
+            ClassLoc::Root => {
+                let a = &self.classes[ci].arena_fld;
+                quote!(#s.#a)
+            }
+            // The arg names a host-class record (the only shape the
+            // declarations use: `b_arena_of(a)` with A the host, and
+            // `*_arena_of(host_of(v))`).
+            ClassLoc::Embedded(hc) => {
+                let a = &self.classes[ci].arena_fld;
+                let r = rec_ref(self.classes, s, hc, arg);
+                quote!(#r.#a)
+            }
+        }
+    }
+    fn map_from(&self, arg: TokenStream2) -> TokenStream2 {
+        let f = self.map_field.as_ref().expect("keyed backing contributes its map field");
+        if !self.classes[self.class(Ent::A)].owns_records {
+            let s = self.store();
+            return quote!(#s.#f);
+        }
+        let r = self.rec(arg, Ent::A);
+        quote!(#r.#f)
+    }
+    fn determining(&self, arg: TokenStream2) -> TokenStream2 {
+        let f = self.det_field.as_ref().expect("validate by binds det_label and the determinant field");
+        let r = self.rec(arg, Ent::B);
+        quote!(#r.#f)
+    }
+    fn handle(&self, arg: TokenStream2, raw: bool) -> TokenStream2 {
+        let h = &self.tgt_handle;
+        let s = self.store();
+        let tc = self.class(Ent::B);
+        match (self.classes[tc].loc, raw) {
+            (ClassLoc::Root, false) => quote!(#h { store: #s, id: #arg }),
+            (ClassLoc::Root, true) => {
+                let idt = &self.classes[tc].id_name;
+                quote!(#h { store: #s, id: #idt(#arg) })
+            }
+            (ClassLoc::Embedded(_), false) => quote!(#h { store: #s, host: (#arg).0, id: (#arg).1 }),
+            // The r4-advance index mint: the path id `#Id(host, x)` split
+            // into the handle's fields, the host read from the Walk's
+            // reserved field.
+            (ClassLoc::Embedded(_), true) => {
+                let host = self
+                    .walk_host
+                    .clone()
+                    .expect("a raw handle at an embedded target needs the Walk's host");
+                quote!(#h { store: #s, host: #host, id: #arg })
+            }
+        }
+    }
+    fn walk_ty(&self) -> Option<Ident2> {
+        self.walk_ty.clone()
+    }
+    fn walk_host(&self) -> Option<TokenStream2> {
+        self.walk_host.clone()
+    }
+    fn rename_field(&self, logical: &str) -> Option<Ident2> {
+        self.renames
+            .iter()
+            .find(|(l, _)| l == logical)
+            .map(|(_, e)| e.clone())
+    }
+    fn walk_field_is_raw(&self, field: &str) -> bool {
+        self.walk_fields
+            .iter()
+            .any(|(n, t)| n.to_string() == field && t.to_string() == "u32")
+    }
+    fn is_walk_field(&self, field: &str) -> bool {
+        self.walk_fields.iter().any(|(n, _)| n.to_string() == field)
+    }
+}
+
+/// Record access by an id *value* through a store token: `store.<arena>[id.0]`
+/// at root level, nested through the host arena for path ids.
+fn rec_ref(classes: &[ClassData], store: TokenStream2, ci: usize, idv: TokenStream2) -> TokenStream2 {
+    match classes[ci].loc {
+        ClassLoc::Root => {
+            let a = &classes[ci].arena_fld;
+            quote!(#store.#a[(#idv).0 as usize])
+        }
+        ClassLoc::Embedded(host) => {
+            let ha = &classes[host].arena_fld;
+            let a = &classes[ci].arena_fld;
+            quote!(#store.#ha[(#idv).0.0 as usize].#a[(#idv).1 as usize])
+        }
+    }
+}
+
+/// Collect one declared contributed field into its owner's bucket (a class
+/// record; `owner == None` is the store, for an unfused-root self). The
+/// declaration's naming formula, collision prefixing (the instance names
+/// the colliding scope), the combined ctor rule (share one argument when
+/// the resolved target classes agree, else prefix), and the uniform init
+/// rule are decided here; the per-arrow registries (`field_of_arrow` for
+/// ctor-fed fields, `map_of_arrow` for keyed maps) record the results.
+#[allow(clippy::too_many_arguments)]
+fn push_contribution(
+    classes: &mut [ClassData],
+    store_fields: &mut Vec<FieldContribution>,
+    owner: Option<usize>,
+    field_of_arrow: &mut HashMap<(usize, String), Ident2>,
+    map_of_arrow: &mut HashMap<(usize, String), Ident2>,
+    members: &[(Ident2, String, crate::grammar::SchemaBody)],
+    i: usize,
+    a: &crate::grammar::ArrowDecl,
+    d: &BackingDecl,
+    f: &crate::backing::ContribField,
+    side_a: bool,
+    class_of_arrow: &dyn Fn(usize, &crate::grammar::ArrowDecl) -> syn::Result<[usize; 3]>,
+) -> syn::Result<()> {
+    let stem = crate::grammar::link_stem(&a.name);
+    let want = formula_name(f, f.formula, &a.name, &stem);
+    let inst_snake = snake(&members[i].0.to_string());
+    let ty = {
+        let class_of = class_of_arrow(i, a)?;
+        let roles = ComposedRoles::new(classes, d, a, class_of, false, a.target.clone());
+        roles::rewrite_ty(&f.ty.to_token_stream(), &roles)
+    };
+    let option_id = f
+        .ty
+        .to_token_stream()
+        .to_string()
+        .replace(' ', "")
+        .starts_with("Option<");
+    let bucket: &mut Vec<FieldContribution> = match owner {
+        Some(c) => &mut classes[c].fields,
+        None => store_fields,
+    };
+    // The combined ctor rule: intra-class argument-name collisions share
+    // one argument when the resolved target classes agree, else prefix.
+    if side_a && d.has(|c| matches!(c, Clause::CtorArg { .. })) {
+        if let Some(pos) = bucket
+            .iter()
+            .position(|fc| fc.field == want && matches!(fc.init, FieldInit::CtorArg(_)))
+        {
+            if bucket[pos].ty.to_string() == ty.to_string() {
+                field_of_arrow.insert((i, a.name.to_string()), bucket[pos].field.clone());
+                return Ok(());
+            }
+            let prefixed = format_ident!("{}_{}", inst_snake, want);
+            field_of_arrow.insert((i, a.name.to_string()), prefixed.clone());
+            bucket.push(FieldContribution {
+                field: prefixed.clone(),
+                ty,
+                init: FieldInit::CtorArg(prefixed),
+                inst: i,
+                arrow: a.name.clone(),
+                side_a,
+                option_id,
+            });
+            return Ok(());
+        }
+        let arg = Ident2::new(&want.to_string(), a.name.span());
+        field_of_arrow.insert((i, a.name.to_string()), arg.clone());
+        bucket.push(FieldContribution {
+            field: arg.clone(),
+            ty,
+            init: FieldInit::CtorArg(arg),
+            inst: i,
+            arrow: a.name.clone(),
+            side_a,
+            option_id,
+        });
+        if card_of_decl(d) == Cardinality::Keyed {
+            map_of_arrow.insert((i, a.name.to_string()), bucket.last().unwrap().field.clone());
+        }
+        return Ok(());
+    }
+    // Collision prefixing names the colliding scope (the instance).
+    let emitted = if bucket.iter().any(|fc| fc.field == want) {
+        format_ident!("{}_{}", inst_snake, want)
+    } else {
+        Ident2::new(&want.to_string(), f.logical.span())
+    };
+    if card_of_decl(d) == Cardinality::Keyed && side_a {
+        map_of_arrow.insert((i, a.name.to_string()), emitted.clone());
+    }
+    let init = init_of(d, side_a, f, &a.name)?;
+    bucket.push(FieldContribution {
+        field: emitted,
+        ty,
+        init,
+        inst: i,
+        arrow: a.name.clone(),
+        side_a,
+        option_id,
+    });
+    Ok(())
 }
 
 pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2> {
@@ -235,7 +661,6 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     data_name: Ident2::new("_pending", proc_macro2::Span::call_site()),
                     arena_fld: Ident2::new("_pending", proc_macro2::Span::call_site()),
                     fields: Vec::new(),
-                    maps: Vec::new(),
                 });
                 classes.len() - 1
             });
@@ -320,7 +745,14 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         }
     }
 
-    // ---- per-instance arrow resolution (qualified binding keys) ----
+    // ---- per-instance arrow resolution (declaration-driven) ----
+    let decl_of = |key: &str| -> Option<&BackingDecl> {
+        config
+            .backing_decls
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, p)| &p.decl)
+    };
     let mut inst_infos: Vec<Vec<ArrowInfo>> = Vec::new();
     for (inst_name, _, body) in members.iter() {
         let mut infos: Vec<ArrowInfo> = Vec::new();
@@ -352,22 +784,18 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             let explicit = config
                 .bindings
                 .iter()
-                .find(|b| b.instance.as_ref() == Some(inst_name) && b.arrow == decl.name)
-                .map(|b| b.backing.to_string());
+                .find(|b| b.instance.as_ref() == Some(inst_name) && b.arrow == decl.name);
             let backing = if decl.sum.is_some() {
                 None
             } else if let Some(b) = explicit {
-                let ok = match b.as_str() {
-                    "field" => meta.card == Cardinality::One,
-                    "arena" | "intrusive_list" => meta.card == Cardinality::Many,
-                    "hash_index" => meta.card == Cardinality::Keyed,
-                    _ => true,
-                };
-                if !ok {
+                let d = decl_of(&b.key_str())
+                    .expect("stage1 queued every explicit binding's courier");
+                if card_of_decl(d) != meta.card {
                     return Err(syn::Error::new(
                         proc_macro2::Span::call_site(),
                         format!(
-                            "backing `{b}` has wrong cardinality for arrow `{inst_name}.{}` (a `{}` arrow)",
+                            "backing `{}` has wrong cardinality for arrow `{inst_name}.{}` (a `{}` arrow)",
+                            d.name,
                             decl.name,
                             match meta.card {
                                 Cardinality::Many => "many",
@@ -377,7 +805,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         ),
                     ));
                 }
-                Some(b)
+                Some(d)
             } else if meta.card == Cardinality::Many {
                 return Err(syn::Error::new(
                     proc_macro2::Span::call_site(),
@@ -395,25 +823,13 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     ),
                 ));
             } else {
-                Some("field".to_string())
+                // `one` arrows default to `field`; the default-decl hop has
+                // collected its declaration under the arrow's key.
+                Some(decl_of(&format!("{inst_name}.{}", decl.name)).expect("defaulted one arrow's field declaration collected"))
             };
             infos.push(ArrowInfo { decl, meta, backing });
         }
         inst_infos.push(infos);
-    }
-    for b in &config.bindings {
-        if !["arena", "field", "intrusive_list", "hash_index"]
-            .contains(&b.backing.to_string().as_str())
-        {
-            return Err(syn::Error::new(
-                b.arrow.span(),
-                format!(
-                    "unknown backing `{}` for arrow `{}` (built-ins: `arena`, `field`, `intrusive_list`, `hash_index`)",
-                    b.backing,
-                    b.key_str()
-                ),
-            ));
-        }
     }
 
     // ---- resolved class helpers ----
@@ -437,10 +853,190 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 )
             })
     };
-    // ---- field contributions per class, with the combined ctor rule ----
-    // (member i, arrow name) -> field name in the class record; per class,
-    // contributions ride in ClassData::fields in collection order
-    // (composition-instance order, then member schema order).
+    // A/B/K classes of one arrow (the partner map resolved open entities).
+    let class_of_arrow = |i: usize, a: &crate::grammar::ArrowDecl| -> syn::Result<[usize; 3]> {
+        Ok([
+            class_index_of(i, ent_index(i, &a.source)?),
+            class_index_of(i, ent_index(i, &a.target)?),
+            match &a.key {
+                Some(k) => class_index_of(i, ent_index(i, k)?),
+                None => class_index_of(i, ent_index(i, &a.target)?),
+            },
+        ])
+    };
+
+    // ---- per-declaration applicability, against computed placement ----
+    // Triggers are declaration facts (clauses, cardinality, declared
+    // predicates); the messages are the pinned ones (a backing's
+    // declaration name is its binding spelling).
+    for (i, infos) in inst_infos.iter().enumerate() {
+        for info in infos {
+            let Some(d) = info.backing else { continue };
+            let a = info.decl;
+            let named = format!("{}.{}", members[i].0, a.name);
+            let sc = class_index_of(i, ent_index(i, &a.source)?);
+            let tc = class_index_of(i, ent_index(i, &a.target)?);
+            // Phased backings and the type-state store land with M3 step 8.
+            if d.is_phased()
+                || d.has(|c| matches!(c, Clause::Compact { .. }))
+                || d.clauses.iter().any(|c| matches!(c, Clause::On { label: Some(_), .. }))
+            {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "backing `{}` (arrow `{named}`) is phased (`phase:`/`compact`/labeled `on store` clauses); phased backings and the type-state store land with M3 step 8",
+                        d.name
+                    ),
+                ));
+            }
+            // Constructor-orchestrated clauses need an `add_<A>`-orchestrated
+            // self: an unfused root owns no constructor and no self id.
+            let orchestrated = d.has(|c| matches!(c, Clause::CtorArg { .. }))
+                || d.has(|c| matches!(c, Clause::OnAdd { .. }));
+            if orchestrated && !classes[sc].owns_records {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "arrow `{named}` is sourced at the root-marked entity `{}`, which is unfused; the `{}` backing needs a self record, and an unfused root owns none (it *is* the store)",
+                        members[i].2.entities[ent_index(i, &a.source)?].name,
+                        d.name
+                    ),
+                ));
+            }
+            // The `one` access protocol returns an id the handle mint
+            // wraps; an embedded (host-anchored) id cannot be supplied.
+            if card_of_decl(d) == Cardinality::One {
+                if let ClassLoc::Embedded(_) = classes[tc].loc {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "arrow `{named}` is `{}`-backed into the embedded class `{}`; an embedded id needs a host path the constructor argument cannot supply",
+                            d.name,
+                            classes[tc].name
+                        ),
+                    ));
+                }
+            }
+            // `direct_records` (declared predicate): contributed fields
+            // locate on root-level classes or the store in M3.
+            if d.has(|c| matches!(c, Clause::Requires { items, .. } if items.iter().any(|x| *x == "direct_records")))
+                && matches!(classes[sc].loc, ClassLoc::Embedded(_))
+            {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "arrow `{named}` is `{}`-backed and sourced at the embedded class `{}` (frontier limit: intrusive arrows sourced at embedded classes)",
+                        d.name,
+                        classes[sc].name
+                    ),
+                ));
+            }
+            // `hosts_arena` (declared predicate): B's arena is hosted by A's
+            // record — at an unfused-root self, any root-level B arena.
+            if d.has(|c| matches!(c, Clause::Requires { items, .. } if items.iter().any(|x| *x == "hosts_arena"))) {
+                if let ClassLoc::Embedded(host) = classes[tc].loc {
+                    if sc != host {
+                        return Err(syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!(
+                                "arrow `{named}` is `{}`-backed into the embedded class `{}`, which is hosted by another class (frontier: arena arrows into an embedded class hosted by another class)",
+                                d.name,
+                                classes[tc].name
+                            ),
+                        ));
+                    }
+                }
+            }
+            // The keyed host-agreement gap: the authored
+            // `host_of(v) != owner` check compares against a self-side
+            // anchor of the host id type — the self record (it IS the host)
+            // or the self's own host component. Any other placement has no
+            // such anchor, so the uniform body cannot typecheck.
+            if card_of_decl(d) == Cardinality::Keyed {
+                if let ClassLoc::Embedded(hc) = classes[tc].loc {
+                    let anchored =
+                        sc == hc || matches!(classes[sc].loc, ClassLoc::Embedded(sch) if sch == hc);
+                    if !anchored {
+                        let self_loc = match classes[sc].loc {
+                            ClassLoc::Root => "root level".to_string(),
+                            ClassLoc::Embedded(sch) => {
+                                format!("embedded in `{}`", classes[sch].name)
+                            }
+                        };
+                        return Err(syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!(
+                                "arrow `{named}` keys into the embedded class `{}` (hosted by `{}`), but its self `{}` is neither that host nor embedded in it — the authored value-host-agreement check has no self-side anchor of the host id type (placement: self `{}` at {self_loc}, target `{}` embedded in `{}`)",
+                                classes[tc].name,
+                                classes[hc].name,
+                                classes[sc].name,
+                                classes[sc].name,
+                                classes[tc].name,
+                                classes[hc].name
+                            ),
+                        ));
+                    }
+                }
+            }
+            // Validate-variant selection: the arrow's membership facts pick
+            // the body; a declaration that does not author it is rejected.
+            if card_of_decl(d) == Cardinality::Many {
+                let wanted = if a.by.is_some() {
+                    ValidateVariant::By
+                } else {
+                    ValidateVariant::Primitive
+                };
+                let has_it = d.has(|c| matches!(c, Clause::Validate { variant: v, .. } if *v == wanted));
+                if !has_it && d.has(|c| matches!(c, Clause::Validate { .. })) {
+                    let missing = match wanted {
+                        ValidateVariant::By => "`validate by`",
+                        ValidateVariant::Primitive => "`validate primitive`",
+                        ValidateVariant::Plain => "`validate`",
+                    };
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "backing `{}` authors no {missing} body, but arrow `{named}` needs it (the declaration binds only the other membership kind)",
+                            d.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // `by <det>`: the determining arrow must be total (its root says `one`).
+    for (i, infos) in inst_infos.iter().enumerate() {
+        for info in infos {
+            let Some(det_name) = &info.decl.by else { continue };
+            let det = infos.iter().find(|x| &x.decl.name == det_name).ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!("`by {}` does not name a resolvable arrow of instance `{}`", det_name, members[i].0),
+                )
+            })?;
+            if det.meta.card != Cardinality::One {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "`by {}` names arrow `{}.{}`, which is not total (`one`) — membership would be undefined",
+                        det_name,
+                        members[i].0,
+                        det.decl.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    // ---- field contributions per class, from the declarations ----
+    // (instance, arrow name) -> emitted ctor-fed field / keyed map field.
+    let mut field_of_arrow: HashMap<(usize, String), Ident2> = HashMap::new();
+    let mut map_of_arrow: HashMap<(usize, String), Ident2> = HashMap::new();
+    // Store-level contributions: an `on A` clause whose self is an unfused
+    // root folds to the store (its record is the store).
+    let mut store_fields: Vec<FieldContribution> = Vec::new();
+
     // An open entity closed by `<->` is never a class member — its records
     // ARE the partner's — so its arrow fields contribute to the hosting
     // class (e.g. the `next_elems` link of a chain rides the inner-edge
@@ -460,109 +1056,51 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         }
         hosted
     };
-    let mut field_of_arrow: HashMap<(usize, String), Ident2> = HashMap::new();
+
+    // Collect one declared contributed field into its owner's bucket (a
+    // class record, or the store when the self is an unfused root). The
+    // caller has already computed the placement-derived facts (the
+    // formula-named base, the rewritten type); this decides naming,
+    // collisions, and initialization.
     for ci in 0..classes.len() {
         if !classes[ci].owns_records {
             continue;
         }
-        let cls_members = hosted[ci].clone();
-        for (i, e) in cls_members {
+        for (i, e) in hosted[ci].clone() {
+            let ent = &members[i].2.entities[e].name;
             for info in &inst_infos[i] {
-                let d = info.decl;
-                match info.backing.as_deref() {
-                    Some("field") if members[i].2.entities[e].name == d.source => {
-                        let tid = classes[class_index_of(i, ent_index(i, &d.target)?)].id_name.clone();
-                        let want = d.name.to_string();
-                        if let Some(pos) = classes[ci].fields
-                            .iter()
-                            .position(|fc| fc.field.to_string() == want && fc.arg.is_some())
-                        {
-                            // Intra-class argument-name collision: share when
-                            // the resolved target classes agree (the partner
-                            // map usually guarantees this), else prefix.
-                            if classes[ci].fields[pos].ty == tid {
-                                field_of_arrow.insert((i, want.clone()), classes[ci].fields[pos].field.clone());
-                                continue;
-                            }
-                            let prefixed = format_ident!(
-                                "{}_{}",
-                                snake(&members[i].0.to_string()),
-                                want
-                            );
-                            field_of_arrow.insert((i, want.clone()), prefixed.clone());
-                            classes[ci].fields.push(FieldContribution {
-                                field: prefixed.clone(),
-                                arg: Some(prefixed),
-                                ty: tid,
-                            });
-                            continue;
-                        }
-                        let f = d.name.clone();
-                        field_of_arrow.insert((i, want), f.clone());
-                        classes[ci].fields.push(FieldContribution {
-                            field: f.clone(),
-                            arg: Some(f),
-                            ty: tid,
-                        });
-                    }
-                    Some("intrusive_list") => {
-                        let head = format_ident!("first_{}", crate::grammar::link_stem(&d.name));
-                        let next = format_ident!("next_{}", crate::grammar::link_stem(&d.name));
-                        let tid = classes[class_index_of(i, ent_index(i, &d.target)?)].id_name.clone();
-                        if members[i].2.entities[e].name == d.source {
-                            if classes[ci].fields.iter().any(|fc| fc.field == head) {
-                                let p = format_ident!(
-                                    "{}_{}",
-                                    snake(&members[i].0.to_string()),
-                                    head
-                                );
-                                classes[ci].fields.push(FieldContribution { field: p, arg: None, ty: tid.clone() });
-                            } else {
-                                classes[ci].fields.push(FieldContribution {
-                                    field: head,
-                                    arg: None,
-                                    ty: tid.clone(),
-                                });
-                            }
-                        }
-                        if members[i].2.entities[e].name == d.target {
-                            if classes[ci].fields.iter().any(|fc| fc.field == next) {
-                                let p = format_ident!(
-                                    "{}_{}",
-                                    snake(&members[i].0.to_string()),
-                                    next
-                                );
-                                classes[ci].fields.push(FieldContribution { field: p, arg: None, ty: tid });
-                            } else {
-                                classes[ci].fields.push(FieldContribution {
-                                    field: next,
-                                    arg: None,
-                                    ty: tid,
-                                });
-                            }
+                let Some(d) = info.backing else { continue };
+                let a = info.decl;
+                if *ent == a.source {
+                    if let Some(Clause::On { fields, .. }) = on_clause(d, OnTarget::A) {
+                        for f in fields {
+                            push_contribution(&mut classes, &mut store_fields, Some(ci), &mut field_of_arrow, &mut map_of_arrow, members, i, a, d, f, true, &class_of_arrow)?;
                         }
                     }
-                    // hash_index map on the self record (per-self-object
-                    // map; a pure-root self contributes at store level
-                    // instead — handled with the store fields below).
-                    Some("hash_index") if members[i].2.entities[e].name == d.source => {
-                        let kid = classes
-                            [class_index_of(i, ent_index(i, d.key.as_ref().unwrap())?)]
-                        .id_name
-                        .clone();
-                        let vt = classes
-                            [class_index_of(i, ent_index(i, &d.target)?)]
-                        .id_name
-                        .clone();
-                        let base = format_ident!("{}_index", d.name);
-                        let idx = if classes[ci].maps.iter().any(|(f, _, _)| *f == base) {
-                            format_ident!("{}_{}", snake(&members[i].0.to_string()), base)
-                        } else {
-                            base
-                        };
-                        classes[ci].maps.push((idx, kid, vt));
+                }
+                if *ent == a.target {
+                    if let Some(Clause::On { fields, .. }) = on_clause(d, OnTarget::B) {
+                        for f in fields {
+                            push_contribution(&mut classes, &mut store_fields, Some(ci), &mut field_of_arrow, &mut map_of_arrow, members, i, a, d, f, false, &class_of_arrow)?;
+                        }
                     }
-                    _ => {}
+                }
+            }
+        }
+    }
+    // Store-level pass: `on A` at an unfused-root self (the relaxed
+    // intrusive head; a keyed map; anything else the declarations state).
+    for (i, infos) in inst_infos.iter().enumerate() {
+        for info in infos {
+            let Some(d) = info.backing else { continue };
+            let a = info.decl;
+            let sc = class_index_of(i, ent_index(i, &a.source)?);
+            if classes[sc].owns_records {
+                continue;
+            }
+            if let Some(Clause::On { fields, .. }) = on_clause(d, OnTarget::A) {
+                for f in fields {
+                    push_contribution(&mut classes, &mut store_fields, None, &mut field_of_arrow, &mut map_of_arrow, members, i, a, d, f, true, &class_of_arrow)?;
                 }
             }
         }
@@ -570,80 +1108,6 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
 
     let id_ty_of =
         |i: usize, e: usize| -> Ident2 { classes[class_index_of(i, e)].id_name.clone() };
-
-    // ---- re-scoped home/addressability checks (implement! time) ----
-    for (i, infos) in inst_infos.iter().enumerate() {
-        for info in infos {
-            let d = info.decl;
-            let sc = class_index_of(i, ent_index(i, &d.source)?);
-            let tc = class_index_of(i, ent_index(i, &d.target)?);
-            let named = format!("{}.{}", members[i].0, d.name);
-            match info.backing.as_deref() {
-                Some("field") => {
-                    if !classes[sc].owns_records {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "arrow `{named}` is sourced at the root-marked entity `{}`, which is unfused; the `field` backing needs a self record, and an unfused root owns none (it *is* the store)",
-                                members[i].2.entities[ent_index(i, &d.source)?].name
-                            ),
-                        ));
-                    }
-                    if let ClassLoc::Embedded(_) = classes[tc].loc {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "arrow `{named}` is `field`-backed into the embedded class `{}`; an embedded id needs a host path the constructor argument cannot supply",
-                                classes[tc].name
-                            ),
-                        ));
-                    }
-                }
-                Some("intrusive_list") => {
-                    if !classes[sc].owns_records {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "arrow `{named}` is sourced at the root-marked entity `{}`, which is unfused; the `intrusive_list` backing needs a head field on the self record, and an unfused root owns none (it *is* the store)",
-                                members[i].2.entities[ent_index(i, &d.source)?].name
-                            ),
-                        ));
-                    }
-                    if let ClassLoc::Embedded(_) = classes[sc].loc {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "arrow `{named}` is `intrusive_list`-backed and sourced at the embedded class `{}` (frontier limit: intrusive arrows sourced at embedded classes)",
-                                classes[sc].name
-                            ),
-                        ));
-                    }
-                }
-                Some("hash_index") => {
-                    // Hook-maintained derived lookup state: exempt from the
-                    // self-record home rule (a root-marked self contributes
-                    // at store level; spike 11 pinned path-id values legal).
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // ---- access-path helpers ----
-    // Record-data reference through a HANDLE binding.
-    let rec_ref_handle = |ci: usize, h: TokenStream2| -> TokenStream2 {
-        match classes[ci].loc {
-            ClassLoc::Root => {
-                let a = &classes[ci].arena_fld;
-                quote!(#h.store.#a[(#h).id.0 as usize])
-            }
-            ClassLoc::Embedded(host) => {
-                let ha = &classes[host].arena_fld;
-                let a = &classes[ci].arena_fld;
-                quote!(#h.store.#ha[(#h).host.0 as usize].#a[(#h).id as usize])
-            }
-        }
-    };
 
     let mut out = TokenStream2::new();
 
@@ -675,20 +1139,18 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         ClassLoc::Root => 1,
     });
     for ci in order {
-        // Field-backed one-arrow fields hold the id directly; intrusive
-        // heads/links are Options (initialized empty, relinked by hooks).
         let mut fields = TokenStream2::new();
         for fc in &classes[ci].fields {
             let f = &fc.field;
             let ty = &fc.ty;
-            if fc.arg.is_some() {
-                fields.extend(quote!(#f: #ty,));
-            } else {
-                fields.extend(quote!(#f: ::core::option::Option<#ty>,));
-            }
+            let inst_name = &members[fc.inst].0;
+            let arrow = &fc.arrow;
+            fields.extend(quote! {
+                #[doc = concat!("field contribution of arrow `", stringify!(#inst_name), ".", stringify!(#arrow), "`.")]
+                #f: #ty,
+            });
         }
-        // Embedded arenas contributed by instances placed in this class,
-        // and the class's hash_index maps.
+        // Embedded arenas contributed by instances placed in this class.
         for d in classes.iter() {
             if let ClassLoc::Embedded(h) = d.loc {
                 if h == ci {
@@ -697,9 +1159,6 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     fields.extend(quote!(#a: ::std::vec::Vec<#dat>,));
                 }
             }
-        }
-        for (f, k, v) in &classes[ci].maps {
-            fields.extend(quote!(#f: ::std::collections::HashMap<#k, #v>,));
         }
         let dat = &classes[ci].data_name;
         let doc_name = &classes[ci].name;
@@ -720,49 +1179,16 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             quote!(#a: ::std::vec::Vec<#dat>,)
         })
         .collect();
-    // Store-level hash_index maps: a keyed arrow whose self is an unfused
-    // root contributes its map here (exactly one self per store, no record
-    // to hold it — the store-level contribution site). The field name rides
-    // in `root_map_of` so the hooks and read impls name the same field;
-    // colliding arrow names across instances take the instance prefix.
-    let mut root_map_of: HashMap<(usize, String), Ident2> = HashMap::new();
-    {
-        let mut used: Vec<String> = Vec::new();
-        for i in 0..n_inst {
-            for info in &inst_infos[i] {
-                if info.backing.as_deref() != Some("hash_index") {
-                    continue;
-                }
-                let d = info.decl;
-                let sc = class_index_of(i, ent_index(i, &d.source)?);
-                if classes[sc].owns_records {
-                    continue; // per-self-object maps ride on the record
-                }
-                let base = format_ident!("{}_index", d.name);
-                let f = if used.contains(&base.to_string()) {
-                    format_ident!("{}_{}", snake(&members[i].0.to_string()), base)
-                } else {
-                    base
-                };
-                used.push(f.to_string());
-                root_map_of.insert((i, d.name.to_string()), f);
-            }
+    let store_contrib = store_fields.iter().map(|fc| {
+        let n = &fc.field;
+        let ty = &fc.ty;
+        let inst_name = &members[fc.inst].0;
+        let arrow = &fc.arrow;
+        quote! {
+            #[doc = concat!("store-level contribution of arrow `", stringify!(#inst_name), ".", stringify!(#arrow), "`.")]
+            #n: #ty,
         }
-    }
-    let mut root_maps: Vec<TokenStream2> = Vec::new();
-    for i in 0..n_inst {
-        for info in &inst_infos[i] {
-            let d = info.decl;
-            let Some(f) = root_map_of.get(&(i, d.name.to_string())) else {
-                continue;
-            };
-            let kid = classes[class_index_of(i, ent_index(i, d.key.as_ref().unwrap())?)]
-                .id_name
-                .clone();
-            let vt = classes[class_index_of(i, ent_index(i, &d.target)?)].id_name.clone();
-            root_maps.push(quote!(#f: ::std::collections::HashMap<#kid, #vt>,));
-        }
-    }
+    });
     let store_pattern_name = config
         .pattern_path
         .segments
@@ -774,7 +1200,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         #[derive(Default, Debug)]
         pub struct #store {
             #(#root_arenas)*
-            #(#root_maps)*
+            #(#store_contrib)*
         }
 
         impl #store {
@@ -830,25 +1256,29 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 )
             }
         };
-        // Merged ctor args: the class's field contributions with args, in
+        // Merged ctor args: the class's ctor-fed field contributions, in
         // contribution order (composition-instance order, then member
         // schema order) — the combined rule was applied at collection.
-        let arg_defs = classes[ci].fields
-            .iter()
-            .filter(|fc| fc.arg.is_some())
-            .map(|fc| {
-                let a = fc.arg.as_ref().unwrap();
+        let arg_defs = classes[ci].fields.iter().filter_map(|fc| match &fc.init {
+            FieldInit::CtorArg(a) => {
                 let ty = &fc.ty;
-                quote!(#a: #ty,)
-            });
-        // Record literal: field args move in; intrusive links start empty
-        // (the hooks relink on insert); embedded arenas start empty.
+                Some(quote!(#a: #ty,))
+            }
+            _ => None,
+        });
+        // Record literal: field args move in; hook-maintained fields start
+        // empty (the hooks relink on insert); embedded arenas start empty.
         let mut record_fields = TokenStream2::new();
         for fc in &classes[ci].fields {
             let f = &fc.field;
-            match &fc.arg {
-                Some(a) => record_fields.extend(quote!(#f: #a,)),
-                None => record_fields.extend(quote!(#f: ::core::option::Option::None,)),
+            match &fc.init {
+                FieldInit::CtorArg(a) => record_fields.extend(quote!(#f: #a,)),
+                FieldInit::None_ => {
+                    record_fields.extend(quote!(#f: ::core::option::Option::None,))
+                }
+                FieldInit::New => {
+                    record_fields.extend(quote!(#f: ::std::default::Default::default(),))
+                }
             }
         }
         for d in classes.iter() {
@@ -859,19 +1289,19 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 }
             }
         }
-        // hash_index maps on this class's record start empty; inserts go
-        // through the keyed hook.
-        for (f, _, _) in &classes[ci].maps {
-            record_fields.extend(quote!(#f: ::std::collections::HashMap::new(),));
-        }
-        // `by`-derived hooks firing at construction of this class: the
-        // determinant `one` arrow originates at a member entity.
+        // `by`-derived hooks firing at construction of this class: every
+        // member arrow with an authored on_insert whose determinant `one`
+        // arrow originates at a member entity.
         let mut hook_calls = TokenStream2::new();
         for &(i, e) in &cl.members {
             for info in &inst_infos[i] {
                 let d = info.decl;
                 let Some(det_name) = &d.by else { continue };
-                if info.backing.as_deref() != Some("intrusive_list") {
+                if !info
+                    .backing
+                    .map(|b| b.has(|c| matches!(c, Clause::OnInsert { .. })))
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let det = members[i]
@@ -942,257 +1372,263 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         }
     }
 
-    // Intrusive hooks + primitive insert ops; field-write hooks + set ops.
+    // Insert hooks + ops, field-write hooks + set ops, live-key predicates.
     // Hook names are always instance-qualified (internal); public op names
     // take the instance prefix only on cross-instance arrow-name collision.
+    // Hook parameters keep the authored spellings (`a`, `b`, `k`) with
+    // mixed-site spans; an unfused-root self omits `a` (it owns no id).
     for (i, infos) in inst_infos.iter().enumerate() {
         let inst_snake = snake(&members[i].0.to_string());
         let inst_name = &members[i].0;
         for info in infos {
-            let d = info.decl;
-            let arrow_users = arrow_name_users[&d.name.to_string()];
-            match info.backing.as_deref() {
-                Some("intrusive_list") => {
-                    let hook = format_ident!("__insert_{}_{}", inst_snake, d.name);
-                    let head = format_ident!("first_{}", crate::grammar::link_stem(&d.name));
-                    let next = format_ident!("next_{}", crate::grammar::link_stem(&d.name));
-                    // Intra-class collisions were prefixed at collection;
-                    // find the actual field names in the self/target class.
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let tc = class_index_of(i, ent_index(i, &d.target)?);
-                    let head_field = classes[sc].fields
-                        .iter()
-                        .find(|fc| {
-                            fc.field == head
-                                || fc.field
-                                    == format_ident!("{}_{}", inst_snake, head)
-                        })
-                        .map(|fc| fc.field.clone())
-                        .unwrap_or(head.clone());
-                    let next_field = classes[tc].fields
-                        .iter()
-                        .find(|fc| {
-                            fc.field == next
-                                || fc.field
-                                    == format_ident!("{}_{}", inst_snake, next)
-                        })
-                        .map(|fc| fc.field.clone())
-                        .unwrap_or(next.clone());
-                    let sid = classes[sc].id_name.clone();
-                    let tid = classes[tc].id_name.clone();
-                    let (sref, tref) = (
-                        rec_ref_ts(&classes, sc, quote!(self_id)),
-                        rec_ref_ts(&classes, tc, quote!(member)),
+            let Some(d) = info.backing else { continue };
+            let a = info.decl;
+            let arrow_users = arrow_name_users[&a.name.to_string()];
+            let sc = class_index_of(i, ent_index(i, &a.source)?);
+            let tc = class_index_of(i, ent_index(i, &a.target)?);
+            let root_self = !classes[sc].owns_records;
+            let sid = classes[sc].id_name.clone();
+            let tid = classes[tc].id_name.clone();
+            let arrow_doc = &a.name;
+
+            // on_insert hook (+ primitive insert op).
+            if let Some(body) = body_of(d, |c| matches!(c, Clause::OnInsert { .. })) {
+                let backing_name = &d.name;
+                let keyed = card_of_decl(d) == Cardinality::Keyed;
+                let kid = if keyed {
+                    Some(id_ty_of(i, ent_index(i, a.key.as_ref().unwrap())?))
+                } else {
+                    None
+                };
+                let hook = format_ident!("__insert_{}_{}", inst_snake, a.name);
+                let class_of = class_of_arrow(i, a)?;
+                let mut roles =
+                    ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self));
+                if keyed {
+                    roles = roles.with_map(
+                        map_of_arrow[&(i, a.name.to_string())].clone(),
                     );
-                    let arrow_doc = &d.name;
-                    store_impl.extend(quote! {
-                        #[doc(hidden)]
-                        #[doc = concat!("intrusive_list insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "): push `member` onto the front of `self_id`'s list")]
-                        fn #hook(&mut self, self_id: #sid, member: #tid) {
-                            let next = #sref.#head_field;
-                            #tref.#next_field = next;
-                            #sref.#head_field = ::core::option::Option::Some(member);
-                        }
-                    });
-                    // Primitive membership (no `by`): explicit insert op.
-                    if d.by.is_none() {
-                        let op = if arrow_users > 1 {
-                            format_ident!("insert_{}_{}", inst_snake, d.name)
-                        } else {
-                            format_ident!("insert_{}", d.name)
-                        };
-                        op_names.push(op.to_string());
-                        store_impl.extend(quote! {
-                            #[doc = concat!("Insert `member` into `self_id`'s `", stringify!(#arrow_doc), "` list (instance ", stringify!(#inst_name), "; primitive membership; push-front).")]
-                            pub fn #op(&mut self, self_id: #sid, member: #tid) {
-                                self.#hook(self_id, member);
-                            }
-                        });
-                    }
                 }
-                Some("field") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let sid = classes[sc].id_name.clone();
-                    let tid = id_ty_of(i, ent_index(i, &d.target)?);
-                    let field = field_of_arrow
-                        .get(&(i, d.name.to_string()))
-                        .expect("field contributions collected")
-                        .clone();
-                    let hook = format_ident!("__set_{}_{}", inst_snake, d.name);
-                    let sref = rec_ref_ts(&classes, sc, quote!(self_id));
-                    let arrow_doc = &d.name;
-                    store_impl.extend(quote! {
-                        #[doc(hidden)]
-                        #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ")")]
-                        fn #hook(&mut self, self_id: #sid, value: #tid) {
-                            #sref.#field = value;
-                        }
-                    });
+                if root_self {
+                    roles = roles.with_a(quote!(()));
+                }
+                let body_rw = roles::rewrite(body, &roles);
+                let label = format!("arrow `{inst_name}.{}`", a.name);
+                let scaffolds = scaffold_lets(body, &label, None, false);
+                let (sig, op_sig, op_args) = match (keyed, kid.as_ref(), root_self) {
+                    (true, Some(kidt), true) => (
+                        {
+                            let k = Ident2::new("k", Span::mixed_site());
+                            let b = Ident2::new("b", Span::mixed_site());
+                            quote!(#k: #kidt, #b: #tid)
+                        },
+                        quote!(key: #kidt, target: #tid),
+                        quote!(key, target),
+                    ),
+                    (true, Some(kidt), false) => (
+                        {
+                            let aa = Ident2::new("a", Span::mixed_site());
+                            let k = Ident2::new("k", Span::mixed_site());
+                            let b = Ident2::new("b", Span::mixed_site());
+                            quote!(#aa: #sid, #k: #kidt, #b: #tid)
+                        },
+                        quote!(self_id: #sid, key: #kidt, target: #tid),
+                        quote!(self_id, key, target),
+                    ),
+                    (false, _, true) => (
+                        {
+                            let b = Ident2::new("b", Span::mixed_site());
+                            quote!(#b: #tid)
+                        },
+                        quote!(member: #tid),
+                        quote!(member),
+                    ),
+                    (false, _, false) => (
+                        {
+                            let aa = Ident2::new("a", Span::mixed_site());
+                            let b = Ident2::new("b", Span::mixed_site());
+                            quote!(#aa: #sid, #b: #tid)
+                        },
+                        quote!(self_id: #sid, member: #tid),
+                        quote!(self_id, member),
+                    ),
+                    (true, None, _) => unreachable!("keyed arrows bind a key sort"),
+                };
+                store_impl.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`)")]
+                    fn #hook(&mut self, #sig) {
+                        #scaffolds
+                        #body_rw
+                    }
+                });
+                // Primitive membership (no `by`): explicit insert op.
+                if a.by.is_none() {
                     let op = if arrow_users > 1 {
-                        format_ident!("set_{}_{}", inst_snake, d.name)
+                        format_ident!("insert_{}_{}", inst_snake, a.name)
                     } else {
-                        format_ident!("set_{}", d.name)
+                        format_ident!("insert_{}", a.name)
                     };
                     op_names.push(op.to_string());
                     store_impl.extend(quote! {
-                        #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc), "` to `value` (instance ", stringify!(#inst_name), "; field-backed `one` arrow).")]
-                        pub fn #op(&mut self, self_id: #sid, value: #tid) {
-                            self.#hook(self_id, value);
+                        #[doc = concat!("Insert through the `", stringify!(#arrow_doc), "` insert hook (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`).")]
+                        pub fn #op(&mut self, #op_sig) {
+                            self.#hook(#op_args);
                         }
                     });
                 }
-                Some("hash_index") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let kid = id_ty_of(i, ent_index(i, d.key.as_ref().unwrap())?);
-                    let vt = id_ty_of(i, ent_index(i, &d.target)?);
-                    let arrow_doc = &d.name;
-                    let pred = format_ident!("__{}_{}_key_live", inst_snake, d.name);
-                    let hook = format_ident!("__insert_{}_{}", inst_snake, d.name);
-                    let op = if arrow_users > 1 {
-                        format_ident!("insert_{}_{}", inst_snake, d.name)
-                    } else {
-                        format_ident!("insert_{}", d.name)
-                    };
-                    op_names.push(op.to_string());
-                    if !classes[sc].owns_records {
-                        // Unfused-root self: exactly one self per store and
-                        // no id to pass; the map is store-level and the op
-                        // omits the self argument (the review probe's shape).
-                        let map = root_map_of[&(i, d.name.to_string())].clone();
-                        store_impl.extend(quote! {
-                            #[doc(hidden)]
-                            #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; store-level map)")]
-                            fn #pred(&self, key: #kid) -> bool {
-                                self.#map.contains_key(&key)
-                            }
-                            #[doc(hidden)]
-                            #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; store-level map)")]
-                            fn #hook(&mut self, key: #kid, target: #vt) {
-                                if self.#pred(key) {
-                                    ::core::panic!("duplicate key {:?} for arrow `{}`: a keyed arrow is a function", key, stringify!(#arrow_doc));
-                                }
-                                self.#map.insert(key, target);
-                            }
-                            #[doc = concat!("Map `key` to `target` in the `", stringify!(#arrow_doc), "` index (instance ", stringify!(#inst_name), "; root-sourced keyed arrow; no self id).")]
-                            pub fn #op(&mut self, key: #kid, target: #vt) {
-                                self.#hook(key, target);
-                            }
-                        });
-                    } else {
-                        // Per-self-object map on the fused record; the
-                        // insert hook takes `&mut` store state and addresses
-                        // through the nesting (the arena append and the map
-                        // insert cannot share one `&mut` host-record borrow).
-                        let sid = classes[sc].id_name.clone();
-                        let map = classes[sc]
-                            .maps
-                            .iter()
-                            .find(|(f, k, v)| {
-                                *k == kid && *v == vt
-                                    && f.to_string().starts_with(&format!("{}_index", d.name))
-                            })
-                            .map(|(f, _, _)| f.clone())
-                            .unwrap_or_else(|| format_ident!("{}_index", d.name));
-                        let sref = rec_ref_ts(&classes, sc, quote!(self_id));
-                        store_impl.extend(quote! {
-                            #[doc(hidden)]
-                            #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ") on one self object")]
-                            fn #pred(&self, self_id: #sid, key: #kid) -> bool {
-                                #sref.#map.contains_key(&key)
-                            }
-                            #[doc(hidden)]
-                            #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ")")]
-                            fn #hook(&mut self, self_id: #sid, key: #kid, target: #vt) {
-                                if self.#pred(self_id, key) {
-                                    ::core::panic!("duplicate key {:?} for arrow `{}` on {:?}: a keyed arrow is a function", key, stringify!(#arrow_doc), self_id);
-                                }
-                                #sref.#map.insert(key, target);
-                            }
-                            #[doc = concat!("Map `key` to `target` in `self_id`'s `", stringify!(#arrow_doc), "` index (instance ", stringify!(#inst_name), ").")]
-                            pub fn #op(&mut self, self_id: #sid, key: #kid, target: #vt) {
-                                self.#hook(self_id, key, target);
-                            }
-                        });
+            }
+
+            // Field-write hook + `set_` op: the single write path after
+            // construction for a `ctor_arg`-fed field (M4's flush replays
+            // through it).
+            if d.has(|c| matches!(c, Clause::CtorArg { .. })) {
+                let field = field_of_arrow
+                    .get(&(i, a.name.to_string()))
+                    .expect("field contributions collected")
+                    .clone();
+                let hook = format_ident!("__set_{}_{}", inst_snake, a.name);
+                let sref = rec_ref(&classes, quote!(self), sc, quote!(self_id));
+                store_impl.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "): set `self_id`'s field to `value`")]
+                    fn #hook(&mut self, self_id: #sid, value: #tid) {
+                        #sref.#field = value;
                     }
+                });
+                let op = if arrow_users > 1 {
+                    format_ident!("set_{}_{}", inst_snake, a.name)
+                } else {
+                    format_ident!("set_{}", a.name)
+                };
+                op_names.push(op.to_string());
+                store_impl.extend(quote! {
+                    #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc), "` to `value` (instance ", stringify!(#inst_name), "; field-backed `one` arrow).")]
+                    pub fn #op(&mut self, self_id: #sid, value: #tid) {
+                        self.#hook(self_id, value);
+                    }
+                });
+            }
+
+            // Live-key predicate (keyed): the pure form of the check-then-
+            // write insert — M4's staging calls it without performing the
+            // write. Derived from the authored lookup body.
+            if card_of_decl(d) == Cardinality::Keyed {
+                let kid = id_ty_of(i, ent_index(i, a.key.as_ref().unwrap())?);
+                let lookup = body_of(d, |c| matches!(c, Clause::Lookup { .. }))
+                    .ok_or_else(|| syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!("backing `{}` authors no lookup(a, k) body", d.name),
+                    ))?;
+                let class_of = class_of_arrow(i, a)?;
+                let mut roles =
+                    ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self))
+                        .with_map(map_of_arrow[&(i, a.name.to_string())].clone())
+                        .with_k(quote!(key));
+                if root_self {
+                    roles = roles.with_a(quote!(()));
+                } else {
+                    roles = roles.with_a(quote!(self_id));
                 }
-                _ => {}
+                let lb = roles::rewrite(lookup, &roles);
+                let pred = format_ident!("__{}_{}_key_live", inst_snake, a.name);
+                if root_self {
+                    store_impl.extend(quote! {
+                        #[doc(hidden)]
+                        #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; store-level map)")]
+                        fn #pred(&self, key: #kid) -> bool {
+                            (#lb).is_some()
+                        }
+                    });
+                } else {
+                    store_impl.extend(quote! {
+                        #[doc(hidden)]
+                        #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ") on one self object")]
+                        fn #pred(&self, self_id: #sid, key: #kid) -> bool {
+                            (#lb).is_some()
+                        }
+                    });
+                }
             }
         }
     }
 
     // The builder's read view: id-based getters on the store, taking and
     // returning ids and copies — never handles (no handle can coexist with
-    // the `&mut` builder). One field-read getter per bound `one` arrow
-    // (named after the arrow whose field it reads; instance-prefixed on
-    // cross-instance arrow-name collision), plus a cross-boundary form
-    // `<a>_<b>` for each `<->` closure: `a` is the read-through arrow
-    // targeting the open entity, `b` the underlying read on the partner
-    // instance (the probe's `main_edge_source(me)` spelling). One keyed
-    // lookup per keyed arrow (`<arrow>_by_key`). The names are contract:
-    // user-written constructor logic (induction, dedup) reads through them.
+    // the `&mut` builder). One field-read getter per bound `one` arrow,
+    // one keyed lookup per keyed arrow, both instance-prefixed on
+    // cross-instance arrow-name collision; plus the cross-boundary form
+    // below. The names are contract: user-written constructor logic
+    // (induction, dedup) reads through them.
     for (i, infos) in inst_infos.iter().enumerate() {
         let inst_snake = snake(&members[i].0.to_string());
         let inst_name = &members[i].0;
         for info in infos {
-            let d = info.decl;
-            match info.backing.as_deref() {
-                Some("field") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+            let Some(d) = info.backing else { continue };
+            let a = info.decl;
+            let sc = class_index_of(i, ent_index(i, &a.source)?);
+            let tc = class_index_of(i, ent_index(i, &a.target)?);
+            let root_self = !classes[sc].owns_records;
+            let arrow_doc = &a.name;
+            match card_of_decl(d) {
+                Cardinality::One => {
+                    let Some(body) = body_of(d, |c| matches!(c, Clause::Read { .. })) else { continue };
                     let sid = classes[sc].id_name.clone();
-                    let tid = id_ty_of(i, ent_index(i, &d.target)?);
-                    let field = field_of_arrow[&(i, d.name.to_string())].clone();
-                    let getter = if arrow_name_users[&d.name.to_string()] > 1 {
-                        format_ident!("{}_{}", inst_snake, d.name)
+                    let tid = id_ty_of(i, ent_index(i, &a.target)?);
+                    let getter = if arrow_name_users[&a.name.to_string()] > 1 {
+                        format_ident!("{}_{}", inst_snake, a.name)
                     } else {
-                        d.name.clone()
+                        a.name.clone()
                     };
                     op_names.push(getter.to_string());
-                    let sref = rec_ref_ts(&classes, sc, quote!(self_id));
-                    let arrow_doc = &d.name;
+                    let class_of = class_of_arrow(i, a)?;
+                    let roles = ComposedRoles::new(&classes, d, a, class_of, false, classes[tc].name.clone())
+                        .at(quote!(self))
+                        .with_a(quote!(self_id));
+                    let body_rw = roles::rewrite(body, &roles);
                     store_impl.extend(quote! {
                         #[doc = concat!("Builder read view: the `", stringify!(#arrow_doc), "` field of `self_id` (instance ", stringify!(#inst_name), ").")]
                         pub fn #getter(&self, self_id: #sid) -> #tid {
-                            #sref.#field
+                            #body_rw
                         }
                     });
                 }
-                Some("hash_index") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let kid = id_ty_of(i, ent_index(i, d.key.as_ref().unwrap())?);
-                    let vt = id_ty_of(i, ent_index(i, &d.target)?);
-                    let getter = if arrow_name_users[&d.name.to_string()] > 1 {
-                        format_ident!("{}_{}_by_key", inst_snake, d.name)
+                Cardinality::Keyed => {
+                    let Some(body) = body_of(d, |c| matches!(c, Clause::Lookup { .. })) else { continue };
+                    let kid = id_ty_of(i, ent_index(i, a.key.as_ref().unwrap())?);
+                    let vt = id_ty_of(i, ent_index(i, &a.target)?);
+                    let getter = if arrow_name_users[&a.name.to_string()] > 1 {
+                        format_ident!("{}_{}_by_key", inst_snake, a.name)
                     } else {
-                        format_ident!("{}_by_key", d.name)
+                        format_ident!("{}_by_key", a.name)
                     };
                     op_names.push(getter.to_string());
-                    let arrow_doc = &d.name;
-                    if !classes[sc].owns_records {
-                        let map = root_map_of[&(i, d.name.to_string())].clone();
+                    let class_of = class_of_arrow(i, a)?;
+                    let mut roles = ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self))
+                        .with_map(map_of_arrow[&(i, a.name.to_string())].clone())
+                        .with_k(quote!(key));
+                    if root_self {
+                        roles = roles.with_a(quote!(()));
+                    } else {
+                        roles = roles.with_a(quote!(self_id));
+                    }
+                    let body_rw = roles::rewrite(body, &roles);
+                    if root_self {
                         store_impl.extend(quote! {
                             #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (instance ", stringify!(#inst_name), "; root-sourced; no self id).")]
                             pub fn #getter(&self, key: #kid) -> ::core::option::Option<#vt> {
-                                self.#map.get(&key).copied()
+                                #body_rw
                             }
                         });
                     } else {
                         let sid = classes[sc].id_name.clone();
-                        let map = classes[sc]
-                            .maps
-                            .iter()
-                            .find(|(f, _, _)| {
-                                let want = format_ident!("{}_index", d.name);
-                                let prefixed =
-                                    format_ident!("{}_{}", inst_snake, want);
-                                *f == want || *f == prefixed
-                            })
-                            .map(|(f, _, _)| f.clone())
-                            .expect("hash_index map contributed at collection");
-                        let sref = rec_ref_ts(&classes, sc, quote!(self_id));
                         store_impl.extend(quote! {
                             #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object (instance ", stringify!(#inst_name), ").")]
                             pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#vt> {
-                                #sref.#map.get(&key).copied()
+                                #body_rw
                             }
                         });
                     }
@@ -1239,11 +1675,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     .position(|e| e.name == b.source)
                     == Some(ei)
             }) {
-                let yinfo = inst_infos[yi]
-                    .iter()
-                    .find(|inf| inf.decl.name == yb.name)
-                    .expect("every arrow resolved");
-                if yinfo.backing.as_deref() != Some("field") {
+                if !field_of_arrow.contains_key(&(yi, yb.name.to_string())) {
                     continue;
                 }
                 let getter = format_ident!("{}_{}", xa.name, yb.name);
@@ -1252,7 +1684,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 let tid = id_ty_of(yi, ent_index(yi, &yb.target)?);
                 let sc = class_index_of(yi, ei);
                 let field = field_of_arrow[&(yi, yb.name.to_string())].clone();
-                let sref = rec_ref_ts(&classes, sc, quote!(self_id));
+                let sref = rec_ref(&classes, quote!(self), sc, quote!(self_id));
                 let through = &xa.name;
                 let read = &yb.name;
                 let xinst = &members[xi].0;
@@ -1288,15 +1720,11 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         });
     }
 
-    // ---- validate(): the canonical runtime inventory (M2 step 12) ----
-    // Exactly what M4's flush will run: key existence, value-in-arena, and
-    // value-host agreement for keyed maps (path ids need the host check —
-    // value-in-arena alone passes a value parked in the wrong host's
-    // arena); endpoint range checks plus the intrusive-ownership check for
-    // list backings — the partition walk for primitive membership,
-    // consistency against the determining field for `by`-derived
-    // membership. `arena` backing stores no endpoints: membership is
-    // presence in the target arena.
+    // ---- validate(): one doc-hidden __validate_<inst>_<arrow> method per
+    // bound backing, summoned in binding order (then defaulted arrows in
+    // schema order). A uniform range pre-pass over contributed `Option<id>`
+    // fields runs before the authored body and returns early on damage, so
+    // authored walks may assume links in range and use `rec(x)` freely.
     // Value-in-arena test for an id `v` of class cj (path-aware: a path id
     // is in-bounds only within the arena its host component names).
     let out_of_range = |cj: usize, v: TokenStream2| -> TokenStream2 {
@@ -1347,258 +1775,171 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             }
         }
     };
-    // Safe record access for walks: None when an id is out of range (the
-    // range pre-pass has already reported it; the walk must not panic).
-    let rec_get = |cj: usize, idv: TokenStream2| -> TokenStream2 {
-        match classes[cj].loc {
-            ClassLoc::Root => {
-                let ta = &classes[cj].arena_fld;
-                quote!(self.#ta.get((#idv).0 as usize))
-            }
-            ClassLoc::Embedded(hc) => {
-                let ha = &classes[hc].arena_fld;
-                let ta = &classes[cj].arena_fld;
-                quote!(self.#ha.get((#idv).0.0 as usize).and_then(|h| h.#ta.get((#idv).1 as usize)))
-            }
-        }
+    // The class an `Option<...>` contribution's element type names (by id
+    // type name); `None` when the element is not a class id (skipped — the
+    // pre-pass range-walks ids only).
+    let elem_class_of = |fc: &FieldContribution| -> Option<usize> {
+        let ty = fc.ty.to_string().replace(' ', "");
+        let inner = ty
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))?;
+        classes.iter().position(|c| c.id_name.to_string() == inner)
     };
-    let mut validate_checks: Vec<TokenStream2> = Vec::new();
+    let mut validate_order: Vec<String> = config.bindings.iter().map(|b| b.key_str()).collect();
     for (i, infos) in inst_infos.iter().enumerate() {
-        let inst_name = &members[i].0;
-        let inst_snake = snake(&members[i].0.to_string());
-        let arrow_label = |n: &Ident2| quote!(stringify!(#inst_name), stringify!(#n));
         for info in infos {
-            let d = info.decl;
-            match info.backing.as_deref() {
-                Some("field") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let tc = class_index_of(i, ent_index(i, &d.target)?);
-                    let field = field_of_arrow[&(i, d.name.to_string())].clone();
-                    let bad = out_of_range(tc, quote!(v));
-                    let label = arrow_label(&d.name);
-                    validate_checks.push(enum_recs(sc, quote! {
-                        let v = srec.#field;
-                        if #bad {
-                            errs.push(::std::format!("arrow `{}.{}`: {:?} points at {:?}, which is not a live record", #label, self_id, v));
-                        }
-                    }));
+            if info.backing.is_some() && info.decl.sum.is_none() {
+                let key = format!("{}.{}", members[i].0, info.decl.name);
+                if !validate_order.contains(&key) {
+                    validate_order.push(key);
                 }
-                Some("intrusive_list") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let tc = class_index_of(i, ent_index(i, &d.target)?);
-                    let tid = classes[tc].id_name.clone();
-                    let head = format_ident!("first_{}", crate::grammar::link_stem(&d.name));
-                    let next = format_ident!("next_{}", crate::grammar::link_stem(&d.name));
-                    let head_field = classes[sc].fields
-                        .iter()
-                        .find(|fc| fc.field == head || fc.field == format_ident!("{}_{}", inst_snake, head))
-                        .map(|fc| fc.field.clone())
-                        .unwrap_or(head.clone());
-                    let next_field = classes[tc].fields
-                        .iter()
-                        .find(|fc| fc.field == next || fc.field == format_ident!("{}_{}", inst_snake, next))
-                        .map(|fc| fc.field.clone())
-                        .unwrap_or(next.clone());
-                    let label = arrow_label(&d.name);
-                    // Range pre-pass over every endpoint the backing stores.
-                    let bad_link = out_of_range(tc, quote!(n));
-                    validate_checks.push(enum_recs(tc, quote! {
-                        if let ::core::option::Option::Some(n) = srec.#next_field {
-                            if #bad_link {
-                                errs.push(::std::format!(
-                                    "arrow `{}.{}`: `{}` link of {:?} points at {:?}, which is not a live record",
-                                    #label, stringify!(#next_field), self_id, n,
-                                ));
-                            }
-                        }
-                    }));
-                    let bad_head = out_of_range(tc, quote!(h));
-                    validate_checks.push(enum_recs(sc, quote! {
-                        if let ::core::option::Option::Some(h) = srec.#head_field {
-                            if #bad_head {
-                                errs.push(::std::format!(
-                                    "arrow `{}.{}`: `{}` head of {:?} points at {:?}, which is not a live record",
-                                    #label, stringify!(#head_field), self_id, h,
-                                ));
-                            }
-                        }
-                    }));
-                    let get_rec = rec_get(tc, quote!(mid));
-                    if d.by.is_none() {
-                        // Primitive membership: the intrusive-ownership
-                        // partition check. Per-walk repeats are cycles
-                        // (traversal diverges); cross-list repeats are
-                        // shared membership (insert silently truncated the
-                        // older list).
-                        let per_rec = enum_recs(sc, quote! {
-                            let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
-                            let mut cur = srec.#head_field;
-                            while let ::core::option::Option::Some(mid) = cur {
-                                if !walk.insert(mid) {
-                                    errs.push(::std::format!(
-                                        "arrow `{}.{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
-                                        #label, self_id, mid,
-                                    ));
-                                    break;
-                                }
-                                if !seen.insert(mid) {
-                                    errs.push(::std::format!(
-                                        "arrow `{}.{}`: {:?} appears in more than one list — shared membership; the insert silently truncated the older list",
-                                        #label, mid,
-                                    ));
-                                    break;
-                                }
-                                cur = match #get_rec {
-                                    ::core::option::Option::Some(r) => r.#next_field,
-                                    ::core::option::Option::None => break,
-                                };
-                            }
-                        });
-                        validate_checks.push(quote! {
-                            {
-                                let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
-                                #per_rec
-                            }
-                        });
-                    } else {
-                        // `by`-derived membership: consistency against the
-                        // determining field plus exactly-once coverage —
-                        // every record must appear in the list its
-                        // determinant names (membership anywhere else
-                        // already contradicts the determinant, so a
-                        // per-determinant seen set suffices).
-                        let det_name = d.by.as_ref().unwrap();
-                        let detf = field_of_arrow[&(i, det_name.to_string())].clone();
-                        let sid_ty = classes[sc].id_name.clone();
-                        let per_rec = enum_recs(sc, quote! {
-                            let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
-                            let mut cur = srec.#head_field;
-                            while let ::core::option::Option::Some(mid) = cur {
-                                let mrec = match #get_rec {
-                                    ::core::option::Option::Some(r) => r,
-                                    ::core::option::Option::None => break,
-                                };
-                                if mrec.#detf != self_id {
-                                    errs.push(::std::format!(
-                                        "arrow `{}.{}`: {:?} is in the list of {:?} but its `{}` field says {:?} — membership contradicts the determinant",
-                                        #label, mid, self_id, stringify!(#det_name), mrec.#detf,
-                                    ));
-                                }
-                                if !walk.insert(mid) {
-                                    errs.push(::std::format!(
-                                        "arrow `{}.{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
-                                        #label, self_id, mid,
-                                    ));
-                                    break;
-                                }
-                                seen_by_self.entry(self_id).or_default().insert(mid);
-                                cur = mrec.#next_field;
-                            }
-                        });
-                        let coverage = enum_recs(tc, quote! {
-                            let listed = seen_by_self
-                                .get(&srec.#detf)
-                                .is_some_and(|members| members.contains(&self_id));
-                            if !listed {
-                                errs.push(::std::format!(
-                                    "arrow `{}.{}`: {:?} is missing from the list of its `{}` ({:?})",
-                                    #label, self_id, stringify!(#det_name), srec.#detf,
-                                ));
-                            }
-                        });
-                        validate_checks.push(quote! {
-                            {
-                                let mut seen_by_self: ::std::collections::HashMap<#sid_ty, ::std::collections::HashSet<#tid>> = ::std::collections::HashMap::new();
-                                #per_rec
-                                #coverage
-                            }
-                        });
-                    }
-                }
-                Some("hash_index") => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    let tc = class_index_of(i, ent_index(i, &d.target)?);
-                    let kc = class_index_of(i, ent_index(i, d.key.as_ref().unwrap())?);
-                    let kbad = out_of_range(kc, quote!(k));
-                    let vbad = out_of_range(tc, quote!(v));
-                    let label = arrow_label(&d.name);
-                    if !classes[sc].owns_records {
-                        // Store-level map (unfused-root self): key existence
-                        // and value-in-arena. No host agreement — there is
-                        // no self record to anchor the value's host against.
-                        let map = root_map_of[&(i, d.name.to_string())].clone();
-                        validate_checks.push(quote! {
-                            for (k, v) in self.#map.iter() {
-                                if #kbad {
-                                    errs.push(::std::format!("arrow `{}.{}`: key {:?} does not name a record", #label, k));
-                                }
-                                if #vbad {
-                                    errs.push(::std::format!("arrow `{}.{}`: value {:?} of key {:?} is not a live record", #label, v, k));
-                                }
-                            }
-                        });
-                    } else {
-                        let map = classes[sc]
-                            .maps
-                            .iter()
-                            .find(|(f, _, _)| {
-                                let want = format_ident!("{}_index", d.name);
-                                let prefixed = format_ident!("{}_{}", inst_snake, want);
-                                *f == want || *f == prefixed
-                            })
-                            .map(|(f, _, _)| f.clone())
-                            .expect("hash_index map contributed at collection");
-                        // Value-host agreement: an embedded-target map holds
-                        // host-anchored path ids — the value's host component
-                        // must name the host record anchoring this self
-                        // object (the self record itself when its class is
-                        // the host, its own host component when embedded in
-                        // the same host class). Without this check a value
-                        // parked in a different host's arena passes
-                        // value-in-arena.
-                        let host_agree = match classes[tc].loc {
-                            ClassLoc::Embedded(hc) => match (sc == hc, classes[sc].loc) {
-                                (true, _) => Some(quote!(v.0 != self_id)),
-                                (false, ClassLoc::Embedded(sch)) if sch == hc => {
-                                    Some(quote!(v.0 != self_id.0))
-                                }
-                                _ => None,
-                            },
-                            ClassLoc::Root => None,
-                        }
-                        .map(|cond| quote! {
-                            if #cond {
-                                errs.push(::std::format!(
-                                    "arrow `{}.{}`: value {:?} of key {:?} is anchored at the wrong host (self is {:?})",
-                                    #label, v, k, self_id,
-                                ));
-                            }
-                        })
-                        .unwrap_or_default();
-                        validate_checks.push(enum_recs(sc, quote! {
-                            for (k, v) in srec.#map.iter() {
-                                if #kbad {
-                                    errs.push(::std::format!("arrow `{}.{}`: key {:?} does not name a record", #label, k));
-                                }
-                                if #vbad {
-                                    errs.push(::std::format!("arrow `{}.{}`: value {:?} of key {:?} on {:?} is not a live record", #label, v, k, self_id));
-                                }
-                                #host_agree
-                            }
-                        }));
-                    }
-                }
-                _ => {}
             }
         }
     }
+    let mut validate_methods = TokenStream2::new();
+    let mut validate_calls = TokenStream2::new();
+    for key in &validate_order {
+        let Some((i, info)) = inst_infos
+            .iter()
+            .enumerate()
+            .find_map(|(i, infos)| {
+                infos
+                    .iter()
+                    .find(|x| format!("{}.{}", members[i].0, x.decl.name) == *key)
+                    .map(|x| (i, x))
+            })
+        else {
+            continue;
+        };
+        let Some(d) = info.backing else { continue };
+        let a = info.decl;
+        let sc = class_index_of(i, ent_index(i, &a.source)?);
+        let tc = class_index_of(i, ent_index(i, &a.target)?);
+        let root_self = !classes[sc].owns_records;
+        let label = format!("arrow `{}`", key);
+        let wanted_variant = match card_of_decl(d) {
+            Cardinality::Many => {
+                if a.by.is_some() {
+                    ValidateVariant::By
+                } else {
+                    ValidateVariant::Primitive
+                }
+            }
+            _ => ValidateVariant::Plain,
+        };
+        let Some(vbody) = d
+            .clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == wanted_variant))
+            .map(|c| match c {
+                Clause::Validate { body, .. } => body,
+                _ => unreachable!(),
+            })
+        else {
+            continue; // arena: nothing — existence cannot dangle
+        };
+        let det_label = a.by.as_ref().map(|b| b.to_string()).unwrap_or_default();
+        let det_field = a.by.as_ref().map(|det_name| {
+            field_of_arrow
+                .get(&(i, det_name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| a.name.clone())
+        });
+        let class_of = class_of_arrow(i, a)?;
+        let mut roles = ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+            .at(quote!(self))
+            .with_det(det_field.unwrap_or_else(|| a.name.clone()));
+        if card_of_decl(d) == Cardinality::Keyed {
+            roles = roles.with_map(map_of_arrow[&(i, a.name.to_string())].clone());
+        }
+        if root_self {
+            roles = roles.with_a(quote!(()));
+        }
+        let body_rw = roles::rewrite(vbody, &roles);
+        let scaffolds = scaffold_lets(vbody, &label, Some(&det_label), true);
 
-    // validate() boundary: the canonical inventory, collected above.
+        // The uniform range pre-pass over this binding's contributed
+        // `Option<id>` fields (the (b)-class half — derivable from the
+        // declaration, so authored bodies never hand-roll it).
+        let mut pre_pass = TokenStream2::new();
+        let errs = Ident2::new("errs", Span::mixed_site());
+        let arrow_label_id = Ident2::new("arrow_label", Span::mixed_site());
+        let all_contrib = classes
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.owns_records)
+            .flat_map(|(cj, c)| c.fields.iter().map(move |f| (Some(cj), f)))
+            .chain(store_fields.iter().map(|f| (None, f)));
+        for (owner, fc) in all_contrib {
+            if fc.inst != i || fc.arrow != a.name || !fc.option_id {
+                continue;
+            }
+            let Some(elem) = elem_class_of(fc) else { continue };
+            let f = &fc.field;
+            let what = if fc.side_a { "head" } else { "link" };
+            let bad = out_of_range(elem, quote!(n));
+            match owner {
+                Some(cj) => {
+                    let fmt = format!(
+                        "{{}}: `{{}}` {what} of {{:?}} points at {{:?}}, which is not a live record"
+                    );
+                    pre_pass.extend(enum_recs(cj, quote! {
+                        if let ::core::option::Option::Some(n) = srec.#f {
+                            if #bad {
+                                #errs.push(::std::format!(
+                                    #fmt, #arrow_label_id, stringify!(#f), self_id, n,
+                                ));
+                            }
+                        }
+                    }));
+                }
+                None => {
+                    let fmt = format!(
+                        "{{}}: `{{}}` {what} of the store points at {{:?}}, which is not a live record"
+                    );
+                    pre_pass.extend(quote! {
+                        if let ::core::option::Option::Some(n) = self.#f {
+                            if #bad {
+                                #errs.push(::std::format!(
+                                    #fmt, #arrow_label_id, stringify!(#f), n,
+                                ));
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        let method = format_ident!(
+            "__validate_{}_{}",
+            snake(&members[i].0.to_string()),
+            a.name
+        );
+        validate_methods.extend(quote! {
+            #[doc(hidden)]
+            #[doc = concat!("validate contribution of ", #label, ": the authored body with the uniform range pre-pass.")]
+            fn #method(&self) -> ::core::result::Result<(), ::std::string::String> {
+                #scaffolds
+                #pre_pass
+                if !#errs.is_empty() {
+                    return ::core::result::Result::Err(#errs.join("; "));
+                }
+                #body_rw
+                if #errs.is_empty() {
+                    ::core::result::Result::Ok(())
+                } else {
+                    ::core::result::Result::Err(#errs.join("; "))
+                }
+            }
+        });
+        validate_calls.extend(quote! {
+            if let ::core::result::Result::Err(e) = self.#method() {
+                errs.push(e);
+            }
+        });
+    }
     store_impl.extend(quote! {
-        #[doc = "Structural validation: the canonical runtime inventory. Keyed maps check key existence, value-in-arena, and (for embedded targets) value-host agreement; list backings check endpoint ranges and the intrusive-ownership contract — the partition walk for primitive membership, determinant consistency for `by`-derived membership. M4's flush calls this unconditionally."]
+        #[doc = "Structural validation: the canonical runtime inventory, one authored contribution per bound backing (key existence, value-in-arena, value-host agreement for keyed maps; endpoint ranges and the intrusive-ownership contract for lists — the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
         pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
             let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
-            #(#validate_checks)*
+            #validate_calls
             if errs.is_empty() {
                 ::core::result::Result::Ok(())
             } else {
@@ -1610,6 +1951,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
     out.extend(quote! {
         impl #store {
             #store_impl
+            #validate_methods
         }
     });
 
@@ -1718,6 +2060,51 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
     let mut iter_defs = TokenStream2::new();
     let mut trait_impls = TokenStream2::new();
 
+    // The full path id of the method's `self` handle (an embedded handle
+    // stores host + raw leaf; the roles take whole ids).
+    let self_id_expr = |sc: usize| -> TokenStream2 {
+        if !classes[sc].owns_records {
+            return quote!(());
+        }
+        match classes[sc].loc {
+            ClassLoc::Root => quote!(self.id),
+            ClassLoc::Embedded(_) => {
+                let idt = &classes[sc].id_name;
+                quote!(#idt(self.host, self.id))
+            }
+        }
+    };
+
+    // A bound many-arrow sibling's iterate body, rewritten off a handle
+    // binding `self` — the shared shape of the trait method and a sum's
+    // sibling expressions (inlined so sums never depend on trait imports).
+    let sibling_iterate_expr = |i: usize, sib: &ArrowInfo| -> syn::Result<TokenStream2> {
+        let d = sib.backing.expect("sum siblings are bound many arrows");
+        let a = sib.decl;
+        let body = body_of(d, |c| matches!(c, Clause::Iterate { .. }))
+            .ok_or_else(|| syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("backing `{}` authors no iterate(a) body", d.name),
+            ))?;
+        let sc = class_index_of(i, ent_index(i, &a.source)?);
+        let tc = class_index_of(i, ent_index(i, &a.target)?);
+        let it = iter_name(i, &a.name);
+        let class_of = class_of_arrow(i, a)?;
+        let mut roles = ComposedRoles::new(&classes, d, a, class_of, false, classes[tc].name.clone())
+            .at(quote!(self.store))
+            .with_walk_ty(it);
+        let a_sub = self_id_expr(sc);
+        if !classes[sc].owns_records {
+            roles = roles.with_a(quote!(()));
+        } else {
+            roles = roles.with_a(a_sub.clone());
+        }
+        if matches!(classes[tc].loc, ClassLoc::Embedded(_)) {
+            roles = roles.with_walk_host(a_sub);
+        }
+        Ok(roles::rewrite(body, &roles))
+    };
+
     for (i, infos) in inst_infos.iter().enumerate() {
         let inst_name = &members[i].0;
         for info in infos {
@@ -1738,26 +2125,25 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             let assoc = &meta.assoc;
             let it = iter_name(i, &d.name);
             iter_names_used.push(it.to_string());
-            let tid = classes[tc].id_name.clone();
 
             // Derived (`:= sum`) arrows chain their siblings' iterators.
             if let Some((ua, ub)) = &d.sum {
-                let da = members[i].2.arrows.iter().find(|x| x.name == *ua).ok_or_else(|| {
+                let ia = infos.iter().find(|x| &x.decl.name == ua).ok_or_else(|| {
                     syn::Error::new(
                         proc_macro2::Span::call_site(),
                         format!("sum names unknown sibling `{ua}`"),
                     )
                 })?;
-                let db = members[i].2.arrows.iter().find(|x| x.name == *ub).ok_or_else(|| {
+                let ib = infos.iter().find(|x| &x.decl.name == ub).ok_or_else(|| {
                     syn::Error::new(
                         proc_macro2::Span::call_site(),
                         format!("sum names unknown sibling `{ub}`"),
                     )
                 })?;
-                let ita = iter_name(i, &da.name);
-                let itb = iter_name(i, &db.name);
-                let ea = sum_sibling_expr(i, da, &config.bindings, &members, &classes, &class_index_of, &ent_index, quote!(self))?;
-                let eb = sum_sibling_expr(i, db, &config.bindings, &members, &classes, &class_index_of, &ent_index, quote!(self))?;
+                let ita = iter_name(i, &ia.decl.name);
+                let itb = iter_name(i, &ib.decl.name);
+                let ea = sibling_iterate_expr(i, ia)?;
+                let eb = sibling_iterate_expr(i, ib)?;
                 let gat = meta.gat.as_ref().unwrap();
                 iter_defs.extend(quote! {
                     #[doc = concat!("Iterator of derived arrow `", stringify!(#arrow_doc_name), "` (instance ", stringify!(#inst_name), "): its siblings chained, self-loops twice.")]
@@ -1781,242 +2167,166 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 continue;
             }
 
-            match info.backing.as_deref() {
-                Some("arena") => match classes[tc].loc {
-                    ClassLoc::Root => {
-                        let ta = &classes[tc].arena_fld;
-                        let gat = meta.gat.as_ref().unwrap();
-                        iter_defs.extend(quote! {
-                            #[doc = concat!("Iterator of arena-backed arrow `", stringify!(#arrow_doc_name), "' (instance ", stringify!(#inst_name), "): index range over the target arena.")]
-                            pub struct #it<'g> {
-                                store: &'g #store,
-                                next: u32,
-                                len: u32,
-                            }
-                            impl<'g> ::core::iter::Iterator for #it<'g> {
-                                type Item = #tgt_h<'g>;
-                                fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
-                                    (self.next < self.len).then(|| {
-                                        let n = #tgt_h { store: self.store, id: #tid(self.next) };
-                                        self.next += 1;
-                                        n
-                                    })
-                                }
-                                fn size_hint(&self) -> (usize, ::core::option::Option<usize>) {
-                                    let remaining = (self.len - self.next) as usize;
-                                    (remaining, ::core::option::Option::Some(remaining))
-                                }
-                            }
-                        });
-                        let len_expr = quote!(self.store.#ta.len() as u32);
-                        trait_impls.extend(quote! {
-                            impl<'g> #trait_path<#marker_path> for #self_h<'g> {
-                                type #assoc = #tgt_h<'g>;
-                                type #gat<'a> = #it<'g> where Self: 'a;
-                                fn #m(&self) -> #it<'g> {
-                                    #it { store: self.store, next: 0, len: #len_expr }
-                                }
-                            }
-                        });
-                    }
-                    ClassLoc::Embedded(host) => {
-                        if sc != host {
-                            return Err(syn::Error::new(
-                                proc_macro2::Span::call_site(),
-                                format!(
-                                    "arena arrow `{inst_name}.{}` reads into the embedded class `{}`, which is hosted by another class (frontier: arena arrows into an embedded class hosted by another class)",
-                                    d.name, classes[tc].name
-                                ),
-                            ));
+            let Some(decl) = info.backing else { continue };
+            let root_self = !classes[sc].owns_records;
+            match card_of_decl(decl) {
+                Cardinality::Many => {
+                    let backing_name = &decl.name;
+                    let walk_ty = it.clone();
+                    let class_of = class_of_arrow(i, d)?;
+                    // The Walk struct: authored fields (renamed types,
+                    // mixed-site spans) + the reserved store ref (+ the
+                    // reserved host at embedded targets — r4-advance).
+                    let walk_fields = decl
+                        .clause(|c| matches!(c, Clause::Iter { .. }))
+                        .map(|c| match c {
+                            Clause::Iter { fields, .. } => fields
+                                .iter()
+                                .map(|(n, t)| {
+                                    let ty_roles = ComposedRoles::new(
+                                        &classes,
+                                        decl,
+                                        d,
+                                        class_of,
+                                        false,
+                                        classes[tc].name.clone(),
+                                    );
+                                    let ty = roles::rewrite_ty(&t.to_token_stream(), &ty_roles);
+                                    let field = Ident2::new(&n.to_string(), Span::mixed_site());
+                                    quote!(#field: #ty,)
+                                })
+                                .collect::<Vec<_>>(),
+                            _ => unreachable!(),
+                        })
+                        .unwrap_or_default();
+                    let host_field = match classes[tc].loc {
+                        ClassLoc::Embedded(hc) => {
+                            let hid = &classes[hc].id_name;
+                            Some(quote!(host: #hid,))
                         }
-                        let ha = &classes[host].arena_fld;
-                        let ta = &classes[tc].arena_fld;
-                        let host_id = &classes[host].id_name;
-                        let gat = meta.gat.as_ref().unwrap();
-                        iter_defs.extend(quote! {
-                            #[doc = concat!("Iterator of arena-backed arrow `", stringify!(#arrow_doc_name), "' (instance ", stringify!(#inst_name), "): index range over the host record's embedded arena, yielding nested handles.")]
-                            pub struct #it<'g> {
-                                store: &'g #store,
-                                host: #host_id,
-                                next: u32,
-                                len: u32,
-                            }
-                            impl<'g> ::core::iter::Iterator for #it<'g> {
-                                type Item = #tgt_h<'g>;
-                                fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
-                                    (self.next < self.len).then(|| {
-                                        let n = #tgt_h { store: self.store, host: self.host, id: self.next };
-                                        self.next += 1;
-                                        n
-                                    })
-                                }
-                                fn size_hint(&self) -> (usize, ::core::option::Option<usize>) {
-                                    let remaining = (self.len - self.next) as usize;
-                                    (remaining, ::core::option::Option::Some(remaining))
-                                }
-                            }
-                        });
-                        trait_impls.extend(quote! {
-                            impl<'g> #trait_path<#marker_path> for #self_h<'g> {
-                                type #assoc = #tgt_h<'g>;
-                                type #gat<'a> = #it<'g> where Self: 'a;
-                                fn #m(&self) -> #it<'g> {
-                                    #it {
-                                        store: self.store,
-                                        host: self.id,
-                                        next: 0,
-                                        len: self.store.#ha[self.id.0 as usize].#ta.len() as u32,
-                                    }
-                                }
-                            }
-                        });
-                    }
-                },
-                Some("intrusive_list") => {
-                    let sc_ref = rec_ref_handle(sc, quote!(self));
-                    let head_field = {
-                        let head = format_ident!("first_{}", crate::grammar::link_stem(&d.name));
-                        let inst_snake = snake(&members[i].0.to_string());
-                        classes[sc].fields
-                            .iter()
-                            .find(|fc| fc.field == head || fc.field == format_ident!("{}_{}", inst_snake, head))
-                            .map(|fc| fc.field.clone())
-                            .unwrap_or(head)
+                        ClassLoc::Root => None,
                     };
-                    match classes[tc].loc {
-                        ClassLoc::Root => {
-                            let next_field = {
-                                let next = format_ident!("next_{}", crate::grammar::link_stem(&d.name));
-                                let inst_snake = snake(&members[i].0.to_string());
-                                classes[tc].fields
-                                    .iter()
-                                    .find(|fc| fc.field == next || fc.field == format_ident!("{}_{}", inst_snake, next))
-                                    .map(|fc| fc.field.clone())
-                                    .unwrap_or(next)
-                            };
-                            let ta = &classes[tc].arena_fld;
-                            let gat = meta.gat.as_ref().unwrap();
-                            iter_defs.extend(quote! {
-                                #[doc = concat!("Iterator of intrusive-backed arrow `", stringify!(#arrow_doc_name), "' (instance ", stringify!(#inst_name), "): linked-list walk, reverse insertion order.")]
-                                pub struct #it<'g> {
-                                    store: &'g #store,
-                                    next: ::core::option::Option<#tid>,
-                                }
-                                impl<'g> ::core::iter::Iterator for #it<'g> {
-                                    type Item = #tgt_h<'g>;
-                                    fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
-                                        let id = self.next?;
-                                        let data = &self.store.#ta[id.0 as usize];
-                                        self.next = data.#next_field;
-                                        ::core::option::Option::Some(#tgt_h { store: self.store, id })
-                                    }
-                                }
-                            });
-                            trait_impls.extend(quote! {
-                                impl<'g> #trait_path<#marker_path> for #self_h<'g> {
-                                    type #assoc = #tgt_h<'g>;
-                                    type #gat<'a> = #it<'g> where Self: 'a;
-                                    fn #m(&self) -> #it<'g> {
-                                        #it { store: self.store, next: #sc_ref.#head_field }
-                                    }
-                                }
-                            });
+                    let adv = body_of(decl, |c| matches!(c, Clause::Advance { .. }))
+                        .ok_or_else(|| syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!("backing `{}` authors no advance(w) body", decl.name),
+                        ))?;
+                    let adv_roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self.store))
+                        .with_w(quote!(self))
+                        .with_walk_ty(walk_ty.clone());
+                    let adv_roles = match classes[tc].loc {
+                        ClassLoc::Embedded(_) => adv_roles.with_walk_host(quote!(self.host)),
+                        ClassLoc::Root => adv_roles,
+                    };
+                    let adv_rw = roles::rewrite(adv, &adv_roles);
+                    let iter_doc = match decl
+                        .clause(|c| matches!(c, Clause::IterationOrder { .. }))
+                        .map(|c| match c {
+                            Clause::IterationOrder { value, .. } => value.to_string(),
+                            _ => unreachable!(),
+                        })
+                        .as_deref()
+                    {
+                        Some("forward_insertion") => "forward insertion order",
+                        _ => "reverse insertion order",
+                    };
+                    iter_defs.extend(quote! {
+                        #[doc = concat!("Iterator of `", stringify!(#arrow_doc_name), "' (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`): authored Walk, ", #iter_doc, ".")]
+                        pub struct #it<'g> {
+                            store: &'g #store,
+                            #host_field
+                            #(#walk_fields)*
                         }
-                        ClassLoc::Embedded(host) => {
-                            // The target's link field holds a path id; the
-                            // walk addresses the embedded arena through it.
-                            let next_field = {
-                                let next = format_ident!("next_{}", crate::grammar::link_stem(&d.name));
-                                let inst_snake = snake(&members[i].0.to_string());
-                                classes[tc].fields
-                                    .iter()
-                                    .find(|fc| fc.field == next || fc.field == format_ident!("{}_{}", inst_snake, next))
-                                    .map(|fc| fc.field.clone())
-                                    .unwrap_or(next)
-                            };
-                            let ha = &classes[host].arena_fld;
-                            let ta = &classes[tc].arena_fld;
-                            let gat = meta.gat.as_ref().unwrap();
-                            iter_defs.extend(quote! {
-                                #[doc = concat!("Iterator of intrusive-backed arrow `", stringify!(#arrow_doc_name), "' (instance ", stringify!(#inst_name), ") into the embedded class `", stringify!(#tgt_h), "`: linked-list walk over path-id links.")]
-                                pub struct #it<'g> {
-                                    store: &'g #store,
-                                    next: ::core::option::Option<#tid>,
-                                }
-                                impl<'g> ::core::iter::Iterator for #it<'g> {
-                                    type Item = #tgt_h<'g>;
-                                    fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
-                                        let id = self.next?;
-                                        let data = &self.store.#ha[id.0.0 as usize].#ta[id.1 as usize];
-                                        self.next = data.#next_field;
-                                        ::core::option::Option::Some(#tgt_h { store: self.store, host: id.0, id: id.1 })
-                                    }
-                                }
-                            });
-                            trait_impls.extend(quote! {
-                                impl<'g> #trait_path<#marker_path> for #self_h<'g> {
-                                    type #assoc = #tgt_h<'g>;
-                                    type #gat<'a> = #it<'g> where Self: 'a;
-                                    fn #m(&self) -> #it<'g> {
-                                        #it { store: self.store, next: #sc_ref.#head_field }
-                                    }
-                                }
-                            });
+                        impl<'g> ::core::iter::Iterator for #it<'g> {
+                            type Item = #tgt_h<'g>;
+                            fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
+                                #adv_rw
+                            }
                         }
+                    });
+                    let iterate = body_of(decl, |c| matches!(c, Clause::Iterate { .. }))
+                        .ok_or_else(|| syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!("backing `{}` authors no iterate(a) body", decl.name),
+                        ))?;
+                    let mut roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self.store))
+                        .with_walk_ty(walk_ty);
+                    let a_sub = self_id_expr(sc);
+                    if root_self {
+                        roles = roles.with_a(quote!(()));
+                    } else {
+                        roles = roles.with_a(a_sub.clone());
                     }
+                    if matches!(classes[tc].loc, ClassLoc::Embedded(_)) {
+                        roles = roles.with_walk_host(a_sub);
+                    }
+                    let ie = roles::rewrite(iterate, &roles);
+                    let gat = meta.gat.as_ref().unwrap();
+                    trait_impls.extend(quote! {
+                        impl<'g> #trait_path<#marker_path> for #self_h<'g> {
+                            type #assoc = #tgt_h<'g>;
+                            type #gat<'a> = #it<'g> where Self: 'a;
+                            fn #m(&self) -> #it<'g> {
+                                #ie
+                            }
+                        }
+                    });
                 }
-                Some("field") => {
-                    let field = field_of_arrow
-                        .get(&(i, d.name.to_string()))
-                        .expect("field contributions collected")
-                        .clone();
-                    let src_ref = rec_ref_handle(sc, quote!(self));
+                Cardinality::One => {
+                    let body = body_of(decl, |c| matches!(c, Clause::Read { .. }))
+                        .ok_or_else(|| syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!("backing `{}` authors no read(a) body", decl.name),
+                        ))?;
+                    let class_of = class_of_arrow(i, d)?;
+                    let mut roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self.store));
+                    if root_self {
+                        roles = roles.with_a(quote!(()));
+                    } else {
+                        roles = roles.with_a(self_id_expr(sc));
+                    }
+                    let body_rw = roles::rewrite(body, &roles);
                     trait_impls.extend(quote! {
                         impl<'g> #trait_path<#marker_path> for #self_h<'g> {
                             type #assoc = #tgt_h<'g>;
                             fn #m(&self) -> #tgt_h<'g> {
                                 #tgt_h {
                                     store: self.store,
-                                    id: #src_ref.#field,
+                                    id: #body_rw,
                                 }
                             }
                         }
                     });
                 }
-                // Keyed partial: one hash lookup; the associated-type
+                // Keyed partial: one authored lookup; the associated-type
                 // bindings name the impl lifetime ('g — the E0637-pinned
                 // emission), and a `<->`-closed key is the partner's plain
                 // id (no wrapper newtype).
-                Some("hash_index") => {
+                Cardinality::Keyed => {
                     let kid = id_ty_of(i, ent_index(i, d.key.as_ref().unwrap())?);
                     let key_assoc = meta
                         .key
                         .as_ref()
                         .expect("keyed roots publish the key assoc name");
-                    let lookup = if !classes[sc].owns_records {
-                        let map = root_map_of[&(i, d.name.to_string())].clone();
-                        quote!(self.store.#map.get(&key).copied())
+                    let lookup = body_of(decl, |c| matches!(c, Clause::Lookup { .. }))
+                        .ok_or_else(|| syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!("backing `{}` authors no lookup(a, k) body", decl.name),
+                        ))?;
+                    let class_of = class_of_arrow(i, d)?;
+                    let mut roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self.store))
+                        .with_map(map_of_arrow[&(i, d.name.to_string())].clone())
+                        .with_k(quote!(key));
+                    if root_self {
+                        roles = roles.with_a(quote!(()));
                     } else {
-                        let src_ref = rec_ref_handle(sc, quote!(self));
-                        // The map field on the self record: name matches the
-                        // arrow's `<arrow>_index` (instance-prefixed when it
-                        // collided at collection).
-                        let map = classes[sc]
-                            .maps
-                            .iter()
-                            .find(|(f, _, _)| {
-                                let want = format_ident!("{}_index", d.name);
-                                let prefixed = format_ident!(
-                                    "{}_{}",
-                                    snake(&members[i].0.to_string()),
-                                    want
-                                );
-                                *f == want || *f == prefixed
-                            })
-                            .map(|(f, _, _)| f.clone())
-                            .expect("hash_index map contributed at collection");
-                        quote!(#src_ref.#map.get(&key).copied())
-                    };
+                        roles = roles.with_a(self_id_expr(sc));
+                    }
+                    let body_rw = roles::rewrite(lookup, &roles);
                     let mk_handle = match classes[tc].loc {
                         ClassLoc::Root => quote!(#tgt_h { store: self.store, id }),
                         ClassLoc::Embedded(_) => quote!(#tgt_h { store: self.store, host: id.0, id: id.1 }),
@@ -2026,20 +2336,10 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             type #assoc = #tgt_h<'g>;
                             type #key_assoc = #kid;
                             fn #m(&self, key: #kid) -> ::core::option::Option<#tgt_h<'g>> {
-                                #lookup.map(|id| #mk_handle)
+                                #body_rw.map(|id| #mk_handle)
                             }
                         }
                     });
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        proc_macro2::Span::call_site(),
-                        format!(
-                            "backing `{}` is not implemented for arrow `{inst_name}.{}`",
-                            other.unwrap_or("?"),
-                            d.name
-                        ),
-                    ));
                 }
             }
         }
@@ -2080,127 +2380,4 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
     out.extend(iter_defs);
     out.extend(trait_impls);
     Ok(out)
-}
-
-/// Record-data access inside a hook (a `&mut self` store method), addressed
-/// by an id *value*: `self.<arena>[id.0]` at root level, nested through the
-/// host arena for path ids.
-fn rec_ref_ts(classes: &[ClassData], ci: usize, idv: TokenStream2) -> TokenStream2 {
-    match classes[ci].loc {
-        ClassLoc::Root => {
-            let a = &classes[ci].arena_fld;
-            quote!(self.#a[(#idv).0 as usize])
-        }
-        ClassLoc::Embedded(host) => {
-            let ha = &classes[host].arena_fld;
-            let a = &classes[ci].arena_fld;
-            quote!(self.#ha[(#idv).0.0 as usize].#a[(#idv).1 as usize])
-        }
-    }
-}
-
-/// Iterator-expression for a bound `many`-arrow sibling of a `:= sum` arrow,
-/// read off a handle binding `h` — the shared shape of the arena and
-/// intrusive iterator constructions, inlined so sums never depend on trait
-/// imports.
-#[allow(clippy::too_many_arguments)]
-fn sum_sibling_expr(
-    i: usize,
-    d: &crate::grammar::ArrowDecl,
-    bindings: &[Binding],
-    members: &[(Ident2, String, crate::grammar::SchemaBody)],
-    classes: &[ClassData],
-    class_index_of: &dyn Fn(usize, usize) -> usize,
-    ent_index: &dyn Fn(usize, &Ident2) -> syn::Result<usize>,
-    h: TokenStream2,
-) -> syn::Result<TokenStream2> {
-    let inst_name = &members[i].0;
-    let it = {
-        let base = camel(&d.name.to_string());
-        let users = members
-            .iter()
-            .filter(|(_, _, b)| b.arrows.iter().any(|a| a.name == d.name))
-            .count();
-        if users > 1 {
-            format_ident!("{}{}Iter", camel(&inst_name.to_string()), base)
-        } else {
-            format_ident!("{}Iter", base)
-        }
-    };
-    let backing = bindings
-        .iter()
-        .find(|b| b.instance.as_ref() == Some(inst_name) && b.arrow == d.name)
-        .map(|b| b.backing.to_string());
-    match backing.as_deref() {
-        Some("arena") => {
-            let tc = class_index_of(i, ent_index(i, &d.target)?);
-            match classes[tc].loc {
-                ClassLoc::Root => {
-                    let ta = &classes[tc].arena_fld;
-                    Ok(quote!(#it { store: #h.store, next: 0, len: #h.store.#ta.len() as u32 }))
-                }
-                ClassLoc::Embedded(host) => {
-                    let sc = class_index_of(i, ent_index(i, &d.source)?);
-                    if sc != host {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "sum sibling `{}.{}` reads into an embedded class hosted by another class",
-                                inst_name, d.name
-                            ),
-                        ));
-                    }
-                    let ha = &classes[host].arena_fld;
-                    let ta = &classes[tc].arena_fld;
-                    Ok(quote!(#it {
-                        store: #h.store,
-                        host: (#h).id,
-                        next: 0,
-                        len: #h.store.#ha[(#h).id.0 as usize].#ta.len() as u32,
-                    }))
-                }
-            }
-        }
-        Some("intrusive_list") => {
-            let sc = class_index_of(i, ent_index(i, &d.source)?);
-            if !classes[sc].owns_records {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "sum sibling `{}.{}` is intrusive and sourced at an unfused root",
-                        inst_name, d.name
-                    ),
-                ));
-            }
-            if let ClassLoc::Embedded(_) = classes[sc].loc {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "sum sibling `{}.{}` is intrusive and sourced at an embedded class (frontier limit)",
-                        inst_name, d.name
-                    ),
-                ));
-            }
-            let head = format_ident!("first_{}", crate::grammar::link_stem(&d.name));
-            let inst_snake = snake(&inst_name.to_string());
-            let head_field = classes[sc]
-                .fields
-                .iter()
-                .find(|fc| fc.field == head || fc.field == format_ident!("{}_{}", inst_snake, head))
-                .map(|fc| fc.field.clone())
-                .unwrap_or(head);
-            let a = &classes[sc].arena_fld;
-            Ok(quote!(#it {
-                store: #h.store,
-                next: #h.store.#a[(#h).id.0 as usize].#head_field,
-            }))
-        }
-        _ => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!(
-                "sum sibling `{}.{}` is not a bound `many` arrow",
-                inst_name, d.name
-            ),
-        )),
-    }
 }

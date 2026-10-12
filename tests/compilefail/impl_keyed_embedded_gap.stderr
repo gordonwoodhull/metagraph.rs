@@ -1,0 +1,12 @@
+error: arrow `a.k` keys into the embedded class `SubNode` (hosted by `Node`), but its self `G` is neither that host nor embedded in it — the authored value-host-agreement check has no self-side anchor of the host id type (placement: self `G` at root level, target `SubNode` embedded in `Node`)
+  --> tests/compilefail/impl_keyed_embedded_gap.rs:26:1
+   |
+26 | / implement! {
+27 | |     comp::Gap as GapStore {
+28 | |         b.nodes:     arena,
+29 | |         b.out_edges: intrusive_list,
+...  |
+37 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

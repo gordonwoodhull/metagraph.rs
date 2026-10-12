@@ -87,6 +87,14 @@ pub(crate) trait RoleBinding {
     fn walk_ty(&self) -> Option<Ident> {
         None
     }
+    /// The Walk's reserved `host` field at embedded-target placements: the
+    /// initializer a `Walk { .. }` literal carries, and the anchor a raw
+    /// `handle(x)` mints through (r4-advance: the index mint needs the
+    /// host; the link walk takes it from the path id and leaves the field
+    /// unused). `None` when the Walk carries no host.
+    fn walk_host(&self) -> Option<TokenStream2> {
+        None
+    }
     /// Logical -> emitted field rename for this binding's contributions.
     fn rename_field(&self, logical: &str) -> Option<Ident> {
         let _ = logical;
@@ -191,12 +199,16 @@ fn rw(ts: &TokenStream2, rb: &dyn RoleBinding, scope: &mut Vec<(String, ScopeKin
                         TokenTree::Group(g) => rw_walk_literal(&g.stream(), rb, scope),
                         _ => unreachable!("checked above"),
                     };
-                    match rb.walk_ty() {
-                        Some(w) => {
+                    match (rb.walk_ty(), rb.walk_host()) {
+                        (Some(w), Some(host)) => {
+                            let store = rb.store();
+                            out.extend(quote!(#w { store: #store, host: #host, #fields }));
+                        }
+                        (Some(w), None) => {
                             let store = rb.store();
                             out.extend(quote!(#w { store: #store, #fields }));
                         }
-                        None => out.extend(quote!(Walk { #fields })),
+                        (None, _) => out.extend(quote!(Walk { #fields })),
                     }
                     i += 2;
                     continue;
@@ -380,10 +392,13 @@ fn rw_for(
         && matches!(&src[1], TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis)
     {
         Src::Maps
-    } else if src.len() == 3
-        && matches!(&src[2], TokenTree::Ident(m) if m.to_string() == "iter")
-        && matches!(&src[1], TokenTree::Punct(p) if p.as_char() == '.')
-        && matches!(&src[0], TokenTree::Ident(v)
+    } else if matches!(&src.get(2), Some(TokenTree::Ident(m)) if m.to_string() == "iter")
+        && matches!(&src.get(1), Some(TokenTree::Punct(p)) if p.as_char() == '.')
+        // `iter()` scans as [m, ., iter, ()] — the call's empty parens ride
+        // along as a fourth token.
+        && (src.len() == 3
+            || matches!(&src.get(3), Some(TokenTree::Group(g)) if g.stream().is_empty()))
+        && matches!(&src.first(), Some(TokenTree::Ident(v))
             if scope.iter().any(|(n, k)| *n == v.to_string() && *k == ScopeKind::Map))
     {
         Src::MapIter
@@ -391,13 +406,25 @@ fn rw_for(
         Src::Other
     };
 
-    // Bind pattern variables, then rewrite under the extended scope.
+    // Bind pattern variables, then rewrite under the extended scope. Tuple
+    // patterns keep their elements inside a paren group — flatten one level
+    // so `(k, v)` binds like `v` does (a missed binding would re-emit the
+    // body's role-named elements mixed-site instead of keeping the pattern's
+    // courier spans, and they would stop pairing).
     let pushed = scope.len();
     let pat_idents: Vec<String> = pat
         .iter()
-        .filter_map(|t| match t {
-            TokenTree::Ident(id) => Some(id.to_string()),
-            _ => None,
+        .flat_map(|t| match t {
+            TokenTree::Ident(id) => vec![id.to_string()],
+            TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis => g
+                .stream()
+                .into_iter()
+                .filter_map(|t| match t {
+                    TokenTree::Ident(id) => Some(id.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         })
         .collect();
     match (&src_kind, pat_idents.as_slice()) {

@@ -37,7 +37,7 @@ struct ArrowInfo<'a> {
     backing: Option<&'a BackingDecl>,
 }
 
-fn card_of_decl(d: &BackingDecl) -> Cardinality {
+pub(crate) fn card_of_decl(d: &BackingDecl) -> Cardinality {
     match d.card {
         BackingCard::One => Cardinality::One,
         BackingCard::Many => Cardinality::Many,
@@ -280,7 +280,7 @@ impl RoleBinding for FlatRoles {
 // ---------------------------------------------------------------------------
 
 /// All contributed fields of a declaration, in clause order.
-fn contributed_fields(decl: &BackingDecl) -> impl Iterator<Item = &ContribField> {
+pub(crate) fn contributed_fields(decl: &BackingDecl) -> impl Iterator<Item = &ContribField> {
     decl.clauses.iter().filter_map(|c| match c {
         Clause::On { fields, .. } => Some(fields.iter().map(|f| f)),
         _ => None,
@@ -288,11 +288,11 @@ fn contributed_fields(decl: &BackingDecl) -> impl Iterator<Item = &ContribField>
     .flatten()
 }
 
-fn on_clause<'a>(decl: &'a BackingDecl, target: OnTarget) -> Option<&'a Clause> {
+pub(crate) fn on_clause<'a>(decl: &'a BackingDecl, target: OnTarget) -> Option<&'a Clause> {
     decl.clause(|c| matches!(c, Clause::On { target: t, .. } if *t == target))
 }
 
-fn body_of<'a>(decl: &'a BackingDecl, f: fn(&Clause) -> bool) -> Option<&'a TokenStream2> {
+pub(crate) fn body_of<'a>(decl: &'a BackingDecl, f: fn(&Clause) -> bool) -> Option<&'a TokenStream2> {
     decl.clause(f).map(|c| match c {
         Clause::Read { body, .. }
         | Clause::Lookup { body, .. }
@@ -309,13 +309,13 @@ fn body_of<'a>(decl: &'a BackingDecl, f: fn(&Clause) -> bool) -> Option<&'a Toke
 /// How one contributed field initializes in the record literal: the ctor
 /// arg when its declaration carries `ctor_arg` (and the field rides the
 /// self record), else the uniform init rule.
-enum FieldInit {
+pub(crate) enum FieldInit {
     CtorArg(Ident2),
     None_,
     New,
 }
 
-fn init_of(decl: &BackingDecl, on_self_record: bool, field: &ContribField, arrow: &Ident2) -> syn::Result<FieldInit> {
+pub(crate) fn init_of(decl: &BackingDecl, on_self_record: bool, field: &ContribField, arrow: &Ident2) -> syn::Result<FieldInit> {
     if decl.has(|c| matches!(c, Clause::CtorArg { .. })) && on_self_record {
         return Ok(FieldInit::CtorArg(arrow.clone()));
     }
@@ -335,7 +335,7 @@ fn init_of(decl: &BackingDecl, on_self_record: bool, field: &ContribField, arrow
     }
 }
 
-fn scaffold_lets(
+pub(crate) fn scaffold_lets(
     body: &TokenStream2,
     label: &str,
     det_label: Option<&str>,

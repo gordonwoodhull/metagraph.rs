@@ -92,6 +92,20 @@ pub mod shapes {
             arrows { elems: metagraph_exper::stdlib::OutEdges, Chain -> Elem; }
         }
     }
+
+    // A keyed pattern with no open entities: drivable by a flat `implement!`
+    // (M3 step 5's plain-self keyed placement — `tags` is keyed at an
+    // element self; `marks` rides the root, the store-level placement).
+    pattern! {
+        KeyedPlain {
+            entities: root G, N, M;
+            arrows {
+                nodes: metagraph_exper::stdlib::Nodes, G -> N;
+                tags:  crate::roots::SubNodeOf,        N -> M, key(N);
+                marks: crate::roots::SubNodeOf,        G -> M, key(M);
+            }
+        }
+    }
 }
 
 /// Minimal shapes for the M2 step-13 negative tests: patterns that exist
@@ -154,6 +168,28 @@ pub mod neg {
         Keyless {
             entities: root G, N, M;
             arrows { k: crate::roots::SubNodeOf, G -> N; }
+        }
+    }
+
+    // A keyed arrow whose target is open — closable by `<->` onto another
+    // instance's *embedded* class while the self stays an unfused root: the
+    // value-host-agreement check has no self-side anchor of the host id
+    // type there (M3 commit 3's recorded gap).
+    pattern! {
+        AnchoredKey {
+            entities: root G, E(open), M;
+            arrows { k: crate::roots::SubNodeOf, G -> E, key(M); }
+        }
+    }
+
+    // A `many` arrow sourced at the pattern's own root (unfused under a
+    // composition): the relaxed store-level intrusive placement — the head
+    // lives on the store, the hook is self-less, the read rides the root
+    // handle.
+    pattern! {
+        RootMany {
+            entities: root G, C;
+            arrows { cs: metagraph_exper::stdlib::OutEdges, G -> C; }
         }
     }
 }

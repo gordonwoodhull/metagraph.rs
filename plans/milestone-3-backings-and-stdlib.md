@@ -617,6 +617,17 @@ cardinalities are closed; extending it is a macros-crate change.
   the store, and the predicate is satisfied by any root-level B arena);
   and `direct_records` — both endpoint classes addressable without path
   indirection (satisfied today by root-level placements and the store).
+- keyed value-host agreement's reachable placements (folded at the M3
+  composed port): `host_of(v) != owner` binds only where a self-side
+  anchor of the host id type exists — the self record when it IS the
+  target's host, or the self's own host component when self and target
+  share one. A keyed arrow into an embedded class hosted anywhere else
+  (an unfused-root self included) is an `implement!`-time rejection
+  quoting the placement facts, not a silently skipped check — the
+  fixed-table era emitted no host-agreement arm there and passed
+  value-in-arena; the alternative (special-casing that arm's emission)
+  is exactly the hidden fixed table the premise deletes. Pinned by the
+  `impl_keyed_embedded_gap` trybuild fixture.
 - `exclusive_membership` (intrusive_list): a **declared contract
   annotation, never a bindings-level predicate** — two intrusive
   bindings sharing a target entity are legal (Digraph's `out_edges` +
