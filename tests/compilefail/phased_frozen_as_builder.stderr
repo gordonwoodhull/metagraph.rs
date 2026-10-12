@@ -1,0 +1,22 @@
+error[E0382]: borrow of moved value: `s`
+  --> tests/compilefail/phased_frozen_as_builder.rs:18:5
+   |
+14 |     let mut s = Store::new();
+   |         ----- move occurs because `s` has type `Store<Build>`, which does not implement the `Copy` trait
+...
+17 |     let f = s.freeze();
+   |               -------- `s` moved due to this method call
+18 |     s.add_n(); // E0382: use of moved value `s`
+   |     ^ value borrowed here after move
+   |
+note: `Store::<Build>::freeze` takes ownership of the receiver `self`, which moves `s`
+  --> tests/compilefail/phased_frozen_as_builder.rs:6:1
+   |
+ 6 | / implement! {
+ 7 | |     m2_fixtures::shapes::CsrDigraph as Store {
+ 8 | |         nodes: arena,
+ 9 | |         out:   csr_adjacency,
+10 | |     }
+11 | | }
+   | |_^
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

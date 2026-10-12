@@ -1,0 +1,16 @@
+error[E0599]: no method named `insert_out` found for struct `Store` in the current scope
+  --> tests/compilefail/phased_insert_after_freeze.rs:20:7
+   |
+ 6 | / implement! {
+ 7 | |     m2_fixtures::shapes::CsrDigraph as Store {
+ 8 | |         nodes: arena,
+ 9 | |         out:   csr_adjacency,
+10 | |     }
+11 | | }
+   | |_- method `insert_out` not found for this struct
+...
+20 |       f.insert_out(x, e); // E0599: no method `insert_out` on `Store<Frozen>`
+   |         ^^^^^^^^^^ method not found in `Store`
+   |
+   = note: the method was found for
+           - `Store<Build>`

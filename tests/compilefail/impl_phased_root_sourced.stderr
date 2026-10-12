@@ -1,0 +1,11 @@
+error: backing `csr_adjacency` (arrow `cs`) is phased, but `cs` is sourced at the pattern's root-marked entity `G` — the entity-arrow/unfused-root case: the root owns no record (it *is* the store), so there is no self id for `on_add`/`on_insert`, and an arrow whose B arena is root-level under an unfused root is its target's entity arrow, which a hook-maintained backing cannot declare (bind `arena` — existence is `add_<B>`'s own write path — or source the arrow at an element)
+  --> tests/compilefail/impl_phased_root_sourced.rs:9:1
+   |
+ 9 | / implement! {
+10 | |     m2_fixtures::neg::RootMany as Store {
+11 | |         cs: csr_adjacency,
+12 | |     }
+13 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

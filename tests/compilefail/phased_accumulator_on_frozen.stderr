@@ -1,0 +1,5 @@
+error[E0599]: no method named `push` found for unit type `()` in the current scope
+  --> tests/compilefail/phased_accumulator_on_frozen.rs:22:15
+   |
+22 |     f.buckets.push(Vec::new()); // E0599: no method `push` on `()`
+   |               ^^^^ method not found in `()`
