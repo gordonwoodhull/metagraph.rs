@@ -1,4 +1,4 @@
-error: arrow `kk.k` instantiates the keyed root `crate :: roots :: SubNodeOf` but does not bind a key sort (`key(LocalEntity)`)
+error: arrow `kk.k` instantiates the keyed root `metagraph_exper :: stdlib :: SubNodeOf` but does not bind a key sort (`key(LocalEntity)`)
   --> tests/compilefail/impl_keyless_root.rs:16:1
    |
 16 | / implement! {

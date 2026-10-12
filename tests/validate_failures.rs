@@ -291,7 +291,7 @@ mod corrupt {
     mod hierarchy {
         use metagraph_exper::implement;
         use metagraph_exper::stdlib::Nodes;
-        use m2_fixtures::roots::EdgesOf;
+        use metagraph_exper::stdlib::EdgesOf;
 
         use crate::hier_comp::hierarchy::markers;
 

@@ -11,7 +11,7 @@
 use metagraph_exper::algo::bfs;
 use metagraph_exper::stdlib::{Edges, Nodes, OutEdges, Source, Target};
 use metagraph_exper::implement;
-use m2_fixtures::roots::{EdgesOf, MainEdge as _, MainNode as _};
+use metagraph_exper::stdlib::{EdgesOf, MainEdge as _, MainNode as _};
 
 mod comp {
     use metagraph_exper::compose_pattern;
@@ -198,7 +198,7 @@ fn trait_impls_under_instance_markers() {
 
 #[test]
 fn keyed_lookups_round_trip() {
-    use m2_fixtures::roots::{SubEdgeOf, SubNodeOf};
+    use metagraph_exper::stdlib::{SubEdgeOf, SubNodeOf};
     let s = store();
     let og = s.outer_graph();
     let a = og.nodes().next().unwrap();

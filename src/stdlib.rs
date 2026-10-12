@@ -1,5 +1,6 @@
-//! The standard library arrows: six root single-arrow patterns, each the
-//! permanent owner of its trait, plus the `Digraph` instantiation block.
+//! The standard library arrows: eleven root single-arrow patterns, each
+//! the permanent owner of its trait, plus the `Digraph` instantiation
+//! block.
 //!
 //! A root pattern (no instantiation source) declares a fresh trait and
 //! registers its metadata through its registration courier — user-declared
@@ -7,6 +8,16 @@
 //! Instantiation blocks name roots by path and never restate cardinality
 //! or associated types: `subnodes: stdlib::Nodes` is still called `.nodes()`
 //! and yields `Nodes::Nodes<'a>`.
+//!
+//! The second group below is M2's discovered roots, promoted from the
+//! test fixtures (M3 step 9): the `Subgraph` vocabulary its compositions
+//! kept re-instantiating. Naming follows the resolved rule: a root
+//! pattern takes its arrow's name where the name is free
+//! (`MainNode`/`MainEdge` — their entity namesakes are open and emit
+//! nothing), and the `-Of` suffix where the bare name is taken
+//! (`SubNodeOf`/`SubEdgeOf` beside the entities, `EdgesOf` beside the
+//! stdlib's own `Edges`). The trait is arrow-named regardless, so
+//! `SubNodeOf` owns `subnode<M>`.
 //!
 //! Schema paths are resolved against the *declaring* crate (M2's
 //! declaring-crate resolver): `pattern!` bakes `CARGO_PKG_NAME` into the
@@ -24,6 +35,40 @@ pattern! { InEdges  { entities: root Node, Edge; arrows { in_edges:  Node -> Edg
 pattern! { Edges    { entities: root Node, Edge; arrows { edges:     Node -> Edge, many; } } }
 pattern! { Source   { entities: root Edge, Node; arrows { source:    Edge -> Node, one; } } }
 pattern! { Target   { entities: root Edge, Node; arrows { target:    Edge -> Node, one; } } }
+
+// M2's discovered roots (promoted from the test fixtures, M3 step 9):
+// the single-arrow vocabulary of subgraph refinement — edge membership,
+// the two `one` mains, and the keyed pair.
+pattern! {
+    MainNode {
+        entities: root SubNode, MainNode;
+        arrows { main_node: SubNode -> MainNode, one; }
+    }
+}
+pattern! {
+    MainEdge {
+        entities: root SubEdge, MainEdge;
+        arrows { main_edge: SubEdge -> MainEdge, one; }
+    }
+}
+pattern! {
+    EdgesOf {
+        entities: root Subgraph, SubEdge;
+        arrows { subedges: Subgraph -> SubEdge, many; }
+    }
+}
+pattern! {
+    SubNodeOf {
+        entities: root Subgraph, SubNode, MainNode;
+        arrows { subnode: Subgraph -> SubNode, key(MainNode); }
+    }
+}
+pattern! {
+    SubEdgeOf {
+        entities: root Subgraph, SubEdge, MainEdge;
+        arrows { subedge: Subgraph -> SubEdge, key(MainEdge); }
+    }
+}
 
 pattern! {
     Digraph {
@@ -87,22 +132,15 @@ mod same_crate_tests {
     }
 }
 
-// A keyed root pattern, shape-pinned against the probe
+// The promoted keyed root, shape-pinned against the probe
 // (/tmp/m2-probe-edge-induced): the root cannot name the instantiation's key
 // sort, so the trait carries it as an associated type and the method takes
 // it as an argument, returning an Option. The manual impl below compiles
-// only if the generated trait has exactly that shape. (The flat
+// only if the shipped trait has exactly that shape. (The flat
 // hash_index-backed implement of a keyed arrow is step 8's acceptance.)
 #[cfg(test)]
 mod keyed_root_tests {
-    use metagraph_exper_macros::pattern;
-
-    pattern! {
-        SubNodeOf {
-            entities: root Subgraph, SubNode, MainNode;
-            arrows { subnode: Subgraph -> SubNode, key(MainNode); }
-        }
-    }
+    use crate::stdlib::SubNodeOf;
 
     struct DummyNode;
     struct DummyGraph;

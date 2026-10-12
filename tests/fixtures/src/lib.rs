@@ -1,51 +1,17 @@
-//! M2 test fixtures: the `Subgraph` pattern and the single-arrow roots it
-//! leans on, declared in a crate every integration test can depend on (each
-//! `tests/*.rs` is its own crate, so patterns with local roots cannot live
-//! in a test file — the declaring-crate resolver would resolve `crate::`
-//! against the wrong crate).
+//! M2 test fixtures: the `Subgraph` shapes, declared in a crate every
+//! integration test can depend on (each `tests/*.rs` is its own crate, so
+//! patterns with local entities cannot live in a test file — the
+//! declaring-crate resolver would resolve `crate::` against the wrong
+//! crate).
 //!
-//! Root naming follows the plan: a root pattern takes its arrow's name with
-//! no suffix where the name is free (`MainNode`/`MainEdge` — their entity
-//! namesakes are open and emit nothing), and the `-Of` suffix where the bare
-//! name is taken (`SubNodeOf`, `SubEdgeOf` beside the entities; `EdgesOf`
-//! beside the stdlib root). The trait is arrow-named regardless, so
-//! `SubNodeOf` owns `subnode<M>`.
-
-/// The single-arrow roots `Subgraph` instantiates.
-pub mod roots {
-    use metagraph_exper::pattern;
-
-    pattern! {
-        MainNode {
-            entities: root SubNode, MainNode;
-            arrows { main_node: SubNode -> MainNode, one; }
-        }
-    }
-    pattern! {
-        MainEdge {
-            entities: root SubEdge, MainEdge;
-            arrows { main_edge: SubEdge -> MainEdge, one; }
-        }
-    }
-    pattern! {
-        EdgesOf {
-            entities: root Subgraph, SubEdge;
-            arrows { subedges: Subgraph -> SubEdge, many; }
-        }
-    }
-    pattern! {
-        SubNodeOf {
-            entities: root Subgraph, SubNode, MainNode;
-            arrows { subnode: Subgraph -> SubNode, key(MainNode); }
-        }
-    }
-    pattern! {
-        SubEdgeOf {
-            entities: root Subgraph, SubEdge, MainEdge;
-            arrows { subedge: Subgraph -> SubEdge, key(MainEdge); }
-        }
-    }
-}
+//! The single-arrow roots these shapes instantiate were M2's discoveries
+//! and now live in the runtime stdlib (promoted in M3 step 9):
+//! `metagraph_exper::stdlib::{MainNode, MainEdge, EdgesOf, SubNodeOf,
+//! SubEdgeOf}`. Naming follows the resolved rule there — a root pattern
+//! takes its arrow's name with no suffix where the name is free
+//! (`MainNode`/`MainEdge`), the `-Of` suffix where the bare name is taken
+//! (`SubNodeOf`/`SubEdgeOf`/`EdgesOf`); the trait is arrow-named
+//! regardless, so `SubNodeOf` owns `subnode<M>`.
 
 pub mod shapes {
     use metagraph_exper::pattern;
@@ -57,11 +23,11 @@ pub mod shapes {
             entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open);
             arrows {
                 subnodes:  metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
-                subedges:  crate::roots::EdgesOf,              Subgraph -> SubEdge;
-                main_node: crate::roots::MainNode,             SubNode -> MainNode;
-                main_edge: crate::roots::MainEdge,             SubEdge -> MainEdge;
-                subnode:   crate::roots::SubNodeOf,            Subgraph -> SubNode, key(MainNode);
-                subedge:   crate::roots::SubEdgeOf,            Subgraph -> SubEdge, key(MainEdge);
+                subedges:  metagraph_exper::stdlib::EdgesOf,              Subgraph -> SubEdge;
+                main_node: metagraph_exper::stdlib::MainNode,             SubNode -> MainNode;
+                main_edge: metagraph_exper::stdlib::MainEdge,             SubEdge -> MainEdge;
+                subnode:   metagraph_exper::stdlib::SubNodeOf,            Subgraph -> SubNode, key(MainNode);
+                subedge:   metagraph_exper::stdlib::SubEdgeOf,            Subgraph -> SubEdge, key(MainEdge);
             }
         }
     }
@@ -73,9 +39,9 @@ pub mod shapes {
             entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open);
             arrows {
                 subnodes:  metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
-                subedges:  crate::roots::EdgesOf,            Subgraph -> SubEdge;
-                main_node: crate::roots::MainNode,           SubNode -> MainNode;
-                main_edge: crate::roots::MainEdge,           SubEdge -> MainEdge;
+                subedges:  metagraph_exper::stdlib::EdgesOf,            Subgraph -> SubEdge;
+                main_node: metagraph_exper::stdlib::MainNode,           SubNode -> MainNode;
+                main_edge: metagraph_exper::stdlib::MainEdge,           SubEdge -> MainEdge;
             }
         }
     }
@@ -101,8 +67,8 @@ pub mod shapes {
             entities: root G, N, M;
             arrows {
                 nodes: metagraph_exper::stdlib::Nodes, G -> N;
-                tags:  crate::roots::SubNodeOf,        N -> M, key(N);
-                marks: crate::roots::SubNodeOf,        G -> M, key(M);
+                tags:  metagraph_exper::stdlib::SubNodeOf,        N -> M, key(N);
+                marks: metagraph_exper::stdlib::SubNodeOf,        G -> M, key(M);
             }
         }
     }
@@ -198,7 +164,7 @@ pub mod neg {
     pattern! {
         Keyless {
             entities: root G, N, M;
-            arrows { k: crate::roots::SubNodeOf, G -> N; }
+            arrows { k: metagraph_exper::stdlib::SubNodeOf, G -> N; }
         }
     }
 
@@ -209,7 +175,7 @@ pub mod neg {
     pattern! {
         AnchoredKey {
             entities: root G, E(open), M;
-            arrows { k: crate::roots::SubNodeOf, G -> E, key(M); }
+            arrows { k: metagraph_exper::stdlib::SubNodeOf, G -> E, key(M); }
         }
     }
 
@@ -221,6 +187,32 @@ pub mod neg {
         RootMany {
             entities: root G, C;
             arrows { cs: metagraph_exper::stdlib::OutEdges, G -> C; }
+        }
+    }
+}
+
+/// A fixtures-local root and one shape instantiating it. After the M3
+/// step-9 promotion every root the `shapes` module instantiates lives in
+/// the runtime stdlib — which every implement site already depends on
+/// directly — so those shapes can no longer exercise the declaring-crate
+/// resolver's one rejection. `DocTags` still names its own declaring
+/// crate (`crate::local::Tags`), keeping `downstream-indirect`'s negative
+/// case armed: reaching it only through a re-export must stay a clean
+/// compile error there.
+pub mod local {
+    use metagraph_exper::pattern;
+
+    pattern! {
+        Tags {
+            entities: root Doc, Tag;
+            arrows { tags: Doc -> Tag, many; }
+        }
+    }
+
+    pattern! {
+        DocTags {
+            entities: root Doc, Tag(open);
+            arrows { tags: crate::local::Tags, Doc -> Tag; }
         }
     }
 }

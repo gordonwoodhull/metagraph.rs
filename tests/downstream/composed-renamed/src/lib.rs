@@ -1,9 +1,9 @@
 //! Cross-crate composed implement under renames: the composed pattern is
 //! declared here, its members live in two other crates (the stdlib's
-//! `Digraph` in `metagraph-exper`, `Subgraph` and its local roots in
-//! `m2-fixtures`), and both are renamed dependencies. This is the
-//! declaring-crate resolver's acceptance test: per-member baked packages
-//! must map to local names (`mg`, `fx`) at the implement site.
+//! `Digraph` and the promoted single-arrow roots in `metagraph-exper`,
+//! `Subgraph` in `m2-fixtures`), and both are renamed dependencies. This
+//! is the declaring-crate resolver's acceptance test: per-member baked
+//! packages must map to local names (`mg`, `fx`) at the implement site.
 
 use mg::implement;
 
@@ -51,7 +51,7 @@ impl Store {
 mod tests {
     use super::*;
     use comp::edge_induced::markers;
-    use fx::roots::SubNodeOf;
+    use mg::stdlib::SubNodeOf;
     use mg::stdlib::Nodes;
 
     #[test]
@@ -69,7 +69,7 @@ mod tests {
         assert!(s.validate().is_ok());
 
         let sg = s.sub_subgraph();
-        // The fixture's local root trait resolves under the rename too.
+        // The stdlib's promoted root trait resolves under the rename too.
         let sn = <Subgraph<'_> as SubNodeOf<markers::sub::Subnode>>::subnode(&sg, NodeId(1))
             .expect("n1 induced");
         assert_eq!(sn.id(), SubNodeId(1));

@@ -11,7 +11,7 @@
 
 use metagraph_exper::stdlib::{Nodes, OutEdges, Source, Target};
 use metagraph_exper::implement;
-use m2_fixtures::roots::{EdgesOf, MainEdge as _, MainNode as _, SubEdgeOf, SubNodeOf};
+use metagraph_exper::stdlib::{EdgesOf, MainEdge as _, MainNode as _, SubEdgeOf, SubNodeOf};
 
 mod comp {
     use metagraph_exper::compose_pattern;
