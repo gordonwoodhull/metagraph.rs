@@ -642,6 +642,27 @@ fn validate_inventory(decl: &BackingDecl) -> syn::Result<()> {
     for c in &decl.clauses {
         match c {
             Clause::On { target, label, span, .. } => {
+                // Phase labels key the type-state store; they are legal
+                // only on a phased backing (one carrying `phase:`
+                // annotations), same rule `compact` rides on.
+                if *label == Some(PhaseLabel::Build) && !decl.is_phased() {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "`on store build` is legal only on a phased backing (one carrying `phase:` annotations); backing `{}` is unphased",
+                            decl.name
+                        ),
+                    ));
+                }
+                if *label == Some(PhaseLabel::Frozen) && !decl.is_phased() {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "`on store frozen` is legal only on a phased backing (one carrying `phase:` annotations); backing `{}` is unphased",
+                            decl.name
+                        ),
+                    ));
+                }
                 let key = (*target, *label);
                 if seen_on.contains(&key) {
                     let label_txt = label
@@ -1277,6 +1298,18 @@ mod tests {
         assert_rejected(
             "mine: A -> B, many { iter Walk { cur: u32 } iterate(a) { Walk { cur: 0 } } advance(w) { handle(w.cur) } compact { } }",
             "legal only on a phased backing",
+        );
+    }
+
+    #[test]
+    fn reject_labeled_store_on_unphased() {
+        assert_rejected(
+            "mine: A -> B, many { on store build { buckets: Vec<BId> } iter Walk { cur: u32 } iterate(a) { Walk { cur: 0 } } advance(w) { handle(w.cur) } }",
+            "`on store build` is legal only on a phased backing",
+        );
+        assert_rejected(
+            "mine: A -> B, many { on store frozen { adj: Vec<BId> } iter Walk { cur: u32 } iterate(a) { Walk { cur: 0 } } advance(w) { handle(w.cur) } }",
+            "`on store frozen` is legal only on a phased backing",
         );
     }
 
