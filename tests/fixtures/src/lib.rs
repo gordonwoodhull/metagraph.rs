@@ -106,6 +106,23 @@ pub mod shapes {
             }
         }
     }
+
+    // The CSR driver's primitive shape: `out` is a primitive `many` arrow
+    // sourced at the element `N` (no `by` — inserts ride the public insert
+    // op and `on_add` grows the buckets), unlike the stdlib `Digraph`'s
+    // by-derived `out_edges`. M3 step 8's flat phased suite binds `out` to
+    // `csr_adjacency`.
+    pattern! {
+        CsrDigraph {
+            entities: root G, N, E;
+            arrows {
+                nodes:  metagraph_exper::stdlib::Nodes, G -> N;
+                out:    metagraph_exper::stdlib::OutEdges, N -> E;
+                source: metagraph_exper::stdlib::Source,  E -> N;
+                target: metagraph_exper::stdlib::Target,  E -> N;
+            }
+        }
+    }
 }
 
 /// Minimal shapes for the M2 step-13 negative tests: patterns that exist

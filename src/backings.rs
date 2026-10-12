@@ -223,10 +223,10 @@ backing! {
                freeze_scope: per_store, read_precondition: post_compaction
         requires: direct_records
         validate {
-            if store.offsets.len() != arena_len(A) + 1 {
+            if store.offsets.len() != records(A).count() + 1 {
                 errs.push(format!(
                     "{}: offsets length {} does not match the arena length {}",
-                    arrow_label, store.offsets.len(), arena_len(A)
+                    arrow_label, store.offsets.len(), records(A).count()
                 ));
             }
             if store.offsets.first() != Some(&0) || store.offsets.last() != Some(&(store.adj.len() as u32)) {

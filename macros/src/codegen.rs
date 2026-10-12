@@ -589,14 +589,17 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             ));
         }
         // Validate-variant selection: the arrow's membership facts pick the
-        // body; a declaration that does not author it is rejected here.
+        // body; a declaration that does not author it is rejected here. A
+        // `Plain` body (membership-agnostic — csr's offsets check,
+        // hash_index's map walk) satisfies any membership kind.
         if card_of_decl(d) == Cardinality::Many {
             let wanted = if info.decl.by.is_some() {
                 ValidateVariant::By
             } else {
                 ValidateVariant::Primitive
             };
-            let has_it = d.has(|c| matches!(c, Clause::Validate { variant: v, .. } if *v == wanted));
+            let has_it = d.has(|c| matches!(c, Clause::Validate { variant: v, .. } if *v == wanted))
+                || d.has(|c| matches!(c, Clause::Validate { variant: ValidateVariant::Plain, .. }));
             if !has_it && d.has(|c| matches!(c, Clause::Validate { .. })) {
                 let missing = match wanted {
                     ValidateVariant::By => "`validate by`",
