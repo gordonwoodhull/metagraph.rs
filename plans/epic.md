@@ -132,7 +132,8 @@ until further composition is on the frontier.
 | 2 | Composition, fusion, keyed arrows, subgraph pattern | [partial](milestone-2-composition.md) |
 | 3 | User-facing backings, stdlib refactor | [partial](milestone-3-backings-and-stdlib.md) |
 | 4 | Write-side builders, mutation by rebuild | [preliminary](milestone-4-builders.md) |
-| 5+ | Selection, interop — see below | this file |
+| 5 | Implement-time data — user payloads on records | [preliminary](milestone-5-data.md) |
+| 6+ | Selection, interop — see below | this file |
 
 Cross-cutting implementability validation (twelve throwaway spikes against
 milestones 1–4): [spikes.md](spikes.md) — status, results, and what each
@@ -149,7 +150,19 @@ referential-integrity validation on the way. Removal is rebuild-without;
 no generational arenas. Full sketch:
 [milestone-4-builders.md](milestone-4-builders.md).
 
-## Milestone 5+ (purposely vague)
+## Milestone 5 (summary): implement-time data
+
+User payloads bind at `implement!` as **data on records** — not
+entities, not arrows. Patterns stay type-abstract (invariant 2); the
+same abstract pattern implements with data, without data, or with
+different data. Reads ride a `.data()` gateway (a generated struct with
+pub fields, handed out by reference); writes ride the ordinary ladder —
+constructor argument, builder `data_mut` assignment, staged field-sets
+through M4's flush. The maintenance boundary is the design's one-line
+decider: *arrows are maintained by the toolkit; data is maintained by
+you.* Full sketch: [milestone-5-data.md](milestone-5-data.md).
+
+## Milestone 6+ (purposely vague)
 
 Threads we can see from here but haven't scoped:
 
@@ -161,8 +174,12 @@ Threads we can see from here but haven't scoped:
   closure, composition of arrows (paths as first-class derived relations).
 - **Introspection**: schema reflection at compile time (entity/arrow lists
   as associated types) for codegen of serializers, visualizers, fuzzers.
-- **Payloads**: node/edge weights as `one` arrows into value arenas —
-  expected to fall out of the existing machinery, worth a milestone's test.
+- **Vocabulary payloads** (the reshaped payloads thread): M5 landed
+  payload *data* on records — an implement-time `data` clause, data not
+  entities. What remains a thread is the arrow-shaped half: `one` arrows
+  into value sorts, trait-visible so generic algorithms can read weights
+  across implementations. The per-field decider (structural → arrow,
+  cache/value → data) is pinned in M5's plan.
 
 ## Cross-cutting risks
 
