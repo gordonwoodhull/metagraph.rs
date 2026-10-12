@@ -1146,7 +1146,11 @@ fn expand_implement(imp: &ImplementInput) -> syn::Result<TokenStream2> {
 /// (in first-occurrence order over the schema's arrows, each already
 /// resolved to its absolute path by the declaring-crate resolver — see
 /// [`resolve_schema_path`]); `metas` the tuples collected so far —
-/// `metas[i]` belongs to the i-th root of that order.
+/// `metas[i]` belongs to the i-th root of that order. `backing_queue` is
+/// the same shape for backing couriers (M3): one hop per `implement!`
+/// binding, in binding order; `backing_decls` the declarations collected
+/// so far, keyed by the binding's qualified key — the order `validate()`
+/// summons them in.
 pub(crate) struct ChainConfig {
     pub(crate) schema: grammar::GenSchema,
     /// The pattern path as written in `implement!` (prefix + pattern name).
@@ -1155,6 +1159,17 @@ pub(crate) struct ChainConfig {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) roots: Vec<Path>,
     pub(crate) metas: Vec<RootMeta>,
+    pub(crate) backing_queue: Vec<BackingHop>,
+    pub(crate) backing_decls: Vec<(String, backing::PackagedBacking)>,
+}
+
+/// One queued backing-courier visit: the binding key it answers to, and the
+/// courier's path (bare-ident bindings resolve against the runtime crate's
+/// `backings` module; path bindings name the declaring module verbatim).
+#[derive(Clone)]
+pub(crate) struct BackingHop {
+    pub(crate) key: String,
+    pub(crate) courier: Path,
 }
 
 enum GenInput {
@@ -1166,6 +1181,10 @@ enum GenInput {
     /// `{ meta tuple } ; @config { ... }` — one registration courier hop:
     /// the tuple just arrived; the config carries the remaining queue.
     ChainStep { meta: RootMeta, config: ChainConfig },
+    /// `{ ("pkg", { decl }) } ; @bkey ( "key" ) ; @config { ... }` — one
+    /// backing courier hop (M3): the packaged declaration just arrived
+    /// (declaring crate baked in), the key names the binding it answers to.
+    BackingStep { key: String, packaged: backing::PackagedBacking, config: ChainConfig },
 }
 
 fn parse_schema_group(group: proc_macro2::Group) -> syn::Result<grammar::GenSchema> {
@@ -1197,7 +1216,24 @@ impl Parse for GenInput {
                 let config = parse_chain_config(input)?;
                 Ok(GenInput::ChainStep { meta, config })
             }
-            other => Err(syn::Error::new(kw.span(), format!("expected `@pattern` or `@config`, found `@{other}`"))),
+            "bkey" => {
+                let packaged: backing::PackagedBacking = syn::parse2(first.stream())?;
+                let kcontent;
+                syn::parenthesized!(kcontent in input);
+                let key: syn::LitStr = kcontent.parse()?;
+                input.parse::<Token![;]>()?;
+                input.parse::<Token![@]>()?;
+                let kw2: Ident = input.parse()?;
+                if kw2 != "config" {
+                    return Err(syn::Error::new(
+                        kw2.span(),
+                        "expected `@config` after `@bkey`",
+                    ));
+                }
+                let config = parse_chain_config(input)?;
+                Ok(GenInput::BackingStep { key: key.value(), packaged, config })
+            }
+            other => Err(syn::Error::new(kw.span(), format!("expected `@pattern`, `@config`, or `@bkey`, found `@{other}`"))),
         }
     }
 }
@@ -1250,13 +1286,59 @@ fn parse_chain_config(input: ParseStream) -> syn::Result<ChainConfig> {
             mcontent.parse::<Token![,]>()?;
         }
     }
-    Ok(ChainConfig { schema, pattern_path, store, bindings, roots, metas })
+    // `@backings [ ("key", path),* ]` and `@bdecls [ ("key", ("pkg", {decl})),* ]`
+    // (M3) — always emitted by our own hops; the parse stays tolerant of their
+    // absence so an in-flight payload from an older macro build degrades to
+    // empty rather than erroring opaquely.
+    let mut backing_queue = Vec::new();
+    let mut backing_decls = Vec::new();
+    if content.peek(Token![;]) {
+        content.parse::<Token![;]>()?;
+        content.parse::<Token![@]>()?;
+        let kw: Ident = content.parse()?;
+        if kw != "backings" {
+            return Err(syn::Error::new(kw.span(), "expected `@backings` inside @config"));
+        }
+        let bcontent;
+        bracketed!(bcontent in content);
+        while !bcontent.is_empty() {
+            let econtent;
+            syn::parenthesized!(econtent in bcontent);
+            let key: syn::LitStr = econtent.parse()?;
+            econtent.parse::<Token![,]>()?;
+            let courier: Path = econtent.parse()?;
+            backing_queue.push(BackingHop { key: key.value(), courier });
+            if bcontent.peek(Token![,]) {
+                bcontent.parse::<Token![,]>()?;
+            }
+        }
+        content.parse::<Token![;]>()?;
+        content.parse::<Token![@]>()?;
+        let kw: Ident = content.parse()?;
+        if kw != "bdecls" {
+            return Err(syn::Error::new(kw.span(), "expected `@bdecls` inside @config"));
+        }
+        let dcontent;
+        bracketed!(dcontent in content);
+        while !dcontent.is_empty() {
+            let econtent;
+            syn::parenthesized!(econtent in dcontent);
+            let key: syn::LitStr = econtent.parse()?;
+            econtent.parse::<Token![,]>()?;
+            let packaged: backing::PackagedBacking = econtent.parse()?;
+            backing_decls.push((key.value(), packaged));
+            if dcontent.peek(Token![,]) {
+                dcontent.parse::<Token![,]>()?;
+            }
+        }
+    }
+    Ok(ChainConfig { schema, pattern_path, store, bindings, roots, metas, backing_queue, backing_decls })
 }
 
 /// The chain state's *content*, flat: `{ ("pkg", { schema }) } ; @pattern
-/// { P } ; Store { bindings } ; @roots [ .. ] ; @meta [ .. ]`. Callers wrap
-/// it in the one delimiter group the courier grammar requires
-/// (`@config { .. }`).
+/// { P } ; Store { bindings } ; @roots [ .. ] ; @meta [ .. ] ; @backings
+/// [ .. ] ; @bdecls [ .. ]`. Callers wrap it in the one delimiter group the
+/// courier grammar requires (`@config { .. }`).
 fn chain_config_tokens(config: &ChainConfig) -> TokenStream2 {
     let schema_ts = grammar::gen_schema_tokens(&config.schema);
     let mp = path_tokens(&config.pattern_path);
@@ -1268,8 +1350,17 @@ fn chain_config_tokens(config: &ChainConfig) -> TokenStream2 {
         let t = root_meta_tokens(m);
         quote!({ #t })
     });
+    let backings = config.backing_queue.iter().map(|h| {
+        let k = &h.key;
+        let p = path_tokens(&h.courier);
+        quote!((#k, #p))
+    });
+    let bdecls = config.backing_decls.iter().map(|(k, p)| {
+        let d = backing::packaged_backing_tokens(p);
+        quote!((#k, #d))
+    });
     quote! {
-        { #schema_ts } ; @pattern { #mp } ; #store { #bindings_ts } ; @roots [ #(#roots),* ] ; @meta [ #(#metas),* ]
+        { #schema_ts } ; @pattern { #mp } ; #store { #bindings_ts } ; @roots [ #(#roots),* ] ; @meta [ #(#metas),* ] ; @backings [ #(#backings),* ] ; @bdecls [ #(#bdecls),* ]
     }
 }
 
@@ -1303,6 +1394,17 @@ fn expand_gen(gen: GenInput) -> syn::Result<TokenStream2> {
         }
         GenInput::ChainStep { meta, mut config } => {
             config.metas.push(meta);
+            advance_chain(config)
+        }
+        GenInput::BackingStep { key, packaged, mut config } => {
+            // The direct-dependency rule, enforced the moment the declaring
+            // crate's name is known: a backing whose declaring crate is not a
+            // direct dependency of the implementing crate fails here with the
+            // resolver's clean error (renames honored; re-export routing
+            // rejected — the middle crate is the dependency, the declarer is
+            // not). For the runtime crate's own backings this never fails.
+            declaring_crate_root(&packaged.pkg)?;
+            config.backing_decls.push((key, packaged));
             advance_chain(config)
         }
     }
@@ -1410,6 +1512,9 @@ fn stage1_flat(
     // resolution also fails here, with a clean message, when the implementing
     // crate lacks a direct dependency on every member's declaring crate).
     let roots = resolved_roots(&schema)?;
+    // Backing hops: one per binding, built after the binding checks above so
+    // unknown-arrow/duplicate-binding errors keep their real call-site spans.
+    let backing_queue = backing_hops(&bindings)?;
 
     let config = ChainConfig {
         schema: grammar::GenSchema::Flat(schema),
@@ -1418,6 +1523,8 @@ fn stage1_flat(
         bindings,
         roots,
         metas: Vec::new(),
+        backing_queue,
+        backing_decls: Vec::new(),
     };
     advance_chain(config)
 }
@@ -1501,6 +1608,8 @@ fn stage1_composed(
             }
         }
     }
+    // Backing hops: one per (instance-qualified) binding, after the checks.
+    let backing_queue = backing_hops(&bindings)?;
 
     let config = ChainConfig {
         schema: grammar::GenSchema::Composed(c.clone()),
@@ -1509,17 +1618,24 @@ fn stage1_composed(
         bindings,
         roots,
         metas: Vec::new(),
+        backing_queue,
+        backing_decls: Vec::new(),
     };
     advance_chain(config)
 }
 
-/// Queue state machine: either bounce through the next root's registration
-/// courier, or — queue empty — run codegen with the collected tuples.
-fn advance_chain(config: ChainConfig) -> syn::Result<TokenStream2> {
+/// Queue state machine: bounce through the remaining backing couriers
+/// first (one per binding, in binding order), then the root registration
+/// couriers, or — both queues empty — run codegen with everything
+/// collected.
+fn advance_chain(mut config: ChainConfig) -> syn::Result<TokenStream2> {
+    if let Some(hop) = config.backing_queue.first().cloned() {
+        config.backing_queue.remove(0);
+        return emit_backing_hop(&hop, config);
+    }
     if config.roots.is_empty() {
         return codegen::expand(&config);
     }
-    let mut config = config;
     let next = config.roots.remove(0);
     emit_hop(&next, config)
 }
@@ -1560,6 +1676,72 @@ fn emit_hop(root: &Path, config: ChainConfig) -> syn::Result<TokenStream2> {
 
 fn pattern_name(p: &Path) -> String {
     p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Backing-courier hops (M3: binding resolution in implement!)
+// ---------------------------------------------------------------------------
+
+/// One backing hop: the courier has already baked its packaged declaration
+/// (`("declaring-pkg", { decl })`) as the payload; forward the key it
+/// answers to plus the config to `__implement_gen`, which parses the
+/// declaration, enforces the direct-dependency rule, and advances the
+/// chain. Same single-rule courier grammar as every other hop.
+fn emit_backing_hop(hop: &BackingHop, config: ChainConfig) -> syn::Result<TokenStream2> {
+    let courier = path_tokens(&hop.courier);
+    let rt = runtime_target();
+    let key = &hop.key;
+    let cfg = chain_config_tokens(&config);
+    // Brace-delimited with the payload-matching paren group nested inside —
+    // the spike-pinned invocation shape every courier hop uses (the
+    // invocation sits in item position; the courier's rule matches the paren
+    // group as its first token tree).
+    Ok(quote! {
+        #courier ! {
+            ( #rt::__implement_gen ; @bkey ( #key ) ; @config { #cfg } )
+        }
+    })
+}
+
+/// The backing queue for one `implement!` block: one hop per binding, in
+/// binding order. Bare-ident bindings resolve against the runtime crate's
+/// `backings` module (where the stdlib's declarations live — the bare form
+/// *is* the stdlib spelling); path bindings name the module holding the
+/// `backing!` invocation verbatim, with the courier derived from the last
+/// segment (`p::..::X` -> `p::..::__metagraph_backing_X`), exactly how a
+/// pattern path derives its schema courier.
+fn backing_hops(bindings: &[Binding]) -> syn::Result<Vec<BackingHop>> {
+    bindings
+        .iter()
+        .map(|b| {
+            let courier = match &b.backing_path {
+                Some(p) => {
+                    if p.segments.len() < 2 {
+                        return Err(syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            format!(
+                                "backing path `{}` for arrow `{}` is a bare name; backings are addressed by module-qualified paths (e.g. `my_backings::{}`)",
+                                path_tokens(p),
+                                b.key_str(),
+                                b.backing
+                            ),
+                        ));
+                    }
+                    let mut p = p.clone();
+                    let last = p.segments.last_mut().expect("path nonempty");
+                    last.ident = format_ident!("__metagraph_backing_{}", last.ident);
+                    p
+                }
+                None => {
+                    let rt = runtime_target();
+                    let name = format_ident!("__metagraph_backing_{}", b.backing);
+                    syn::parse2(quote!(#rt::backings::#name))
+                        .expect("runtime backing courier path is parseable")
+                }
+            };
+            Ok(BackingHop { key: b.key_str(), courier })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

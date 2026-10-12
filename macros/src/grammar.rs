@@ -782,12 +782,22 @@ pub fn root_meta_tokens(m: &RootMeta) -> TokenStream {
 /// binding grammar; the flat bare-arrow form stays legal and means what it
 /// meant in M1. The `instance.*` whole-instance sugar some spike tests used
 /// is *not* grammar.
+///
+/// The backing itself is either a bare ident (`arena` — the stdlib spelling,
+/// resolved against the runtime crate's `backings` module) or a path
+/// (`my_backings::my_list`, M3 — the module holding the `backing!`
+/// invocation plus the backing's name, exactly the shape a pattern path
+/// takes).
 #[derive(Clone)]
 pub struct Binding {
     /// `Some(inst)` for the qualified `inst.arrow` key form.
     pub instance: Option<Ident>,
     pub arrow: Ident,
+    /// The backing's name: the path's last segment, or the bare ident.
     pub backing: Ident,
+    /// `Some(p)` for the path form `prefix..::name`; the courier lives at
+    /// `prefix..::__metagraph_backing_name`.
+    pub backing_path: Option<Path>,
 }
 
 impl Binding {
@@ -801,7 +811,10 @@ impl Binding {
 }
 
 /// Parse the braced `{ arrow: backing, ... }` (or `{ inst.arrow: backing,
-/// ... }`) block.
+/// ... }`) block. A backing is a bare ident or a module-qualified path
+/// (`out_edges: stdlib::intrusive_list`); a single-segment path is rejected
+/// the way a bare pattern name is — the courier it would name lives in a
+/// module, not at a crate root.
 pub fn parse_bindings(input: ParseStream) -> syn::Result<Vec<Binding>> {
     let content;
     braced!(content in input);
@@ -815,22 +828,46 @@ pub fn parse_bindings(input: ParseStream) -> syn::Result<Vec<Binding>> {
             (None, first)
         };
         content.parse::<Token![:]>()?;
-        let backing: Ident = content.parse()?;
+        let (backing, path) = if (content.peek(Ident) && content.peek2(Token![::]))
+            || content.peek(Token![::])
+        {
+            let p: Path = content.parse()?;
+            if p.segments.len() < 2 {
+                return Err(syn::Error::new(
+                    p.segments.last().map(|s| s.ident.span()).unwrap_or_else(proc_macro2::Span::call_site),
+                    format!(
+                        "`{}` is a bare backing name written as a path; name the module holding the `backing!` invocation (e.g. `my_backings::{}`), or use the bare stdlib spelling",
+                        path_tokens(&p),
+                        p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
+                    ),
+                ));
+            }
+            let last = p.segments.last().unwrap().ident.clone();
+            (last, Some(p))
+        } else {
+            (content.parse()?, None)
+        };
         if content.peek(Token![,]) {
             content.parse::<Token![,]>()?;
         }
-        bindings.push(Binding { instance, arrow, backing });
+        bindings.push(Binding { instance, arrow, backing, backing_path: path });
     }
     Ok(bindings)
 }
 
 /// Re-emit parsed bindings (canonically `inst.arrow: backing,` /
-/// `arrow: backing,`).
+/// `arrow: backing,`; the path form re-emits verbatim).
 pub fn bindings_tokens(bindings: &[Binding]) -> TokenStream {
     bindings
         .iter()
         .map(|b| {
-            let k = &b.backing;
+            let k = match &b.backing_path {
+                Some(p) => path_tokens(p),
+                None => {
+                    let k = &b.backing;
+                    quote!(#k)
+                }
+            };
             match &b.instance {
                 Some(i) => {
                     let a = &b.arrow;
@@ -1001,6 +1038,78 @@ mod tests {
             emitted.to_string(),
             bindings_tokens(&twice).to_string(),
             "idempotent emission"
+        );
+    }
+
+    #[test]
+    fn bindings_parse_and_roundtrip_paths() {
+        use super::parse_bindings;
+        let parse_all = |src: &str| {
+            syn::parse::Parser::parse2(
+                |input: syn::parse::ParseStream| parse_bindings(input),
+                src.parse::<TokenStream>().expect("bindings parse"),
+            )
+            .expect("bindings")
+        };
+        let once = parse_all(
+            "{ nodes: arena, out_edges: my::intrusive_list, sub.subnode: ::mg::backings::hash_index }",
+        );
+        assert_eq!(once.len(), 3);
+        assert_eq!(once[0].backing, "arena");
+        assert!(once[0].backing_path.is_none());
+        assert_eq!(once[1].backing, "intrusive_list");
+        assert_eq!(
+            once[1].backing_path.as_ref().unwrap().to_token_stream().to_string(),
+            "my :: intrusive_list"
+        );
+        assert_eq!(once[2].key_str(), "sub.subnode");
+        assert_eq!(once[2].backing, "hash_index");
+        assert_eq!(
+            once[2].backing_path.as_ref().unwrap().to_token_stream().to_string(),
+            ":: mg :: backings :: hash_index"
+        );
+        let emitted = bindings_tokens(&once);
+        let emitted_str = format!("{{ {emitted} }}");
+        let twice = parse_all(&emitted_str);
+        assert_eq!(
+            once.iter()
+                .map(|b| (
+                    b.key_str(),
+                    b.backing.to_string(),
+                    b.backing_path
+                        .as_ref()
+                        .map(|p| path_tokens(p).to_string())
+                        .unwrap_or_default()
+                ))
+                .collect::<Vec<_>>(),
+            twice.iter()
+                .map(|b| (
+                    b.key_str(),
+                    b.backing.to_string(),
+                    b.backing_path
+                        .as_ref()
+                        .map(|p| path_tokens(p).to_string())
+                        .unwrap_or_default()
+                ))
+                .collect::<Vec<_>>(),
+            "emitted: {emitted_str}"
+        );
+        assert_eq!(
+            emitted.to_string(),
+            bindings_tokens(&twice).to_string(),
+            "idempotent emission"
+        );
+        // A single-segment path is the bare name misspelled: rejected with
+        // the module hint, exactly as bare pattern names are.
+        let err = syn::parse::Parser::parse2(
+            |input: syn::parse::ParseStream| parse_bindings(input),
+            "{ nodes: ::arena }".parse::<TokenStream>().unwrap(),
+        )
+        .err()
+        .expect("expected rejection");
+        assert!(
+            err.to_string().contains("bare backing name written as a path"),
+            "got: {err}"
         );
     }
 
