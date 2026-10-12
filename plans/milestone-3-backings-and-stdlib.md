@@ -1033,18 +1033,19 @@ Constraints and applicability, the evaluation table.
 
 **Step 8 — `csr_adjacency` + type-state phases.** Contract: CSR and
 phase representation.
-- [ ] `phase:` parsing; the `on store build`/`on store frozen`
+- [x] `phase:` parsing; the `on store build`/`on store frozen`
       partition; the type-state store parameter emitted only when a
       phased backing is bound
-- [ ] `compact` at the single `freeze()`, binding order for multiple
+- [x] `compact` at the single `freeze()`, binding order for multiple
       phased backings
-- [ ] compile-fail proofs: insert-after-freeze, frozen-as-builder, no
+- [x] compile-fail proofs: insert-after-freeze, frozen-as-builder, no
       accumulators on the frozen type
-- [ ] applicability rejections (entity arrow, unfused-root self); the
+- [x] applicability rejections (entity arrow, unfused-root self); the
       fused-root emission attempted against the frontier note — emit
-      it, or record exactly what breaks
+      it, or record exactly what breaks (emitted; HOLDS —
+      tests/composed_csr.rs retires the frontier note)
 - Acceptance:
-- [ ] spike-6's CSR tests and the mixed-phase probe's shape green
+- [x] spike-6's CSR tests and the mixed-phase probe's shape green
 - Depends: 4, 6
 
 **Step 9 — Stdlib promotion + doc pass.** Contract: Stdlib promotion.

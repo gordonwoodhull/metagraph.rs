@@ -139,6 +139,19 @@
 //!   agreement (an embedded-target map holds host-anchored path ids; a
 //!   value in-bounds in its own host's arena but filed under another host
 //!   fails the agreement check alone).
+//! - `csr_adjacency`: the compacted form's invariant — offsets length
+//!   against the self arena, the span [0, adjacency length), monotonicity
+//!   (assuming compaction has run at `freeze()`).
+//!
+//! A store binding a phased backing (`csr_adjacency` today) is a
+//! type-state store: ONE store type parameterized by a phase marker
+//! (`Store<P = Frozen>`), emitted only for such bindings. `add_*`/
+//! `insert_*`, the backing hooks, and the consuming `freeze()` exist on
+//! the build phase only; handles, iteration, and `validate()` exist on
+//! the frozen phase only; `on store build` fields (the CSR accumulators)
+//! are released at the type level — their frozen type is `()`. `finish()`
+//! is freeze then validate, M4's flush ordering. Non-phased stores keep
+//! the single-phase shape: their own builder, no parameter.
 //!
 //! Before each authored body, a uniform range pre-pass walks every
 //! contributed `Option<id>` field of that binding — heads and links, on
