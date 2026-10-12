@@ -317,6 +317,40 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         });
     }
 
+    // Named field-write hooks + `set_<arrow>` builder ops: post-construction
+    // writes of `field`-backed arrows go through the hook, so every storage
+    // mutation is replayable by name (M4's flush replays change sets through
+    // exactly these). Construction initializes the field inline — a Rust
+    // record literal cannot leave it unset — which is construction, not
+    // mutation; the hook is the single *write* path thereafter. Method names
+    // are already shaped as M4's write-trait methods (`set_<one-arrow>`).
+    for info in &infos {
+        if info.backing.as_deref() != Some("field") {
+            continue;
+        }
+        let d = info.decl;
+        let arrow_doc_name = &d.name;
+        let hook = format_ident!("__set_{}", d.name);
+        let set_name = format_ident!("set_{}", d.name);
+        let f = &d.name;
+        let sid = id_ty(&d.source);
+        let tid = id_ty(&d.target);
+        let s_arena = arena_fld(&d.source);
+        hook_impls.extend(quote! {
+            #[doc(hidden)]
+            #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc_name), "`: set `self_id`'s field to `value`")]
+            fn #hook(&mut self, self_id: #sid, value: #tid) {
+                self.#s_arena[self_id.0 as usize].#f = value;
+            }
+        });
+        ctor_impls.extend(quote! {
+            #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc_name), "` to `value` (field-backed `one` arrow).")]
+            pub fn #set_name(&mut self, self_id: #sid, value: #tid) {
+                self.#hook(self_id, value);
+            }
+        });
+    }
+
     // Named insert hooks: the single write path for list maintenance.
     // Push-front (reverse insertion order) is part of the backing's
     // contract — the test suite's traversal orders depend on it.

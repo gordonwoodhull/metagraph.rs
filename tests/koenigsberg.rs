@@ -139,3 +139,22 @@ fn self_loop_appears_in_both_directions() {
     // documented behavior: `edges()` chains the two lists
     assert_eq!(n.edges().count(), 2);
 }
+
+#[test]
+fn set_one_arrow_writes_through_named_hook() {
+    // `set_target` is the field-write builder op (the named `__set_target`
+    // hook under it): it re-points the `one` arrow's field and nothing else —
+    // `by`-derived membership is not re-derived, by design; M4's flush owns
+    // re-derivation.
+    let mut s = GraphStore::new();
+    let a = s.add_node();
+    let b = s.add_node();
+    let e = s.add_edge(a, b);
+    let c = s.add_node();
+    s.set_target(e, c);
+
+    let g = s.graph();
+    let edge = g.nodes().next().unwrap().out_edges().next().unwrap();
+    assert_eq!(edge.source().id(), a);
+    assert_eq!(edge.target().id(), c);
+}
