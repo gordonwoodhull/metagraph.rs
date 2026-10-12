@@ -32,9 +32,7 @@ nested staging, and induction remains uncompiled.
   link well-formedness, membership consistency between an arrow's links
   and its determining fields for `by`-derived arrows, and the
   intrusive-ownership partition check for *primitive* intrusive arrows,
-  which have no determining field to be consistent with). Key uniqueness
-  is structural under `HashMap` and is enforced *here*, not in
-  `validate()`: step 2 detects duplicate staged keys (below). A store with
+  which have no determining field to be consistent with). A store with
   no keyed arrows still validates; keyless backings contribute the
   structural half. M2 callers invoke it explicitly; flush invokes it
   unconditionally.
@@ -124,15 +122,11 @@ continue with the new metagraph. Two entry points support this:
      `add_<entity>`. A violation on a kept record has no op of its own,
      so it is attributed to the removal op that caused it, and violations
      distinguish `Kept(old id)` from `Staged(op index)` elements.
-     **Duplicate-key detection runs here too**: keyed inserts are
-     function semantics, and replaying two inserts with the same
-     (self, key) would silently overwrite (HashMap insertion; the
-     edge-induced probe demonstrates `validate()` still passes
-     afterward — no emitted check can catch it). Flush scans staged
-     keyed inserts for repeated (self, key) pairs, and checks each
-     staged key against the old store's kept maps (a kept record
-     already indexed under that key is a collision); violations join
-     the `FlushError` list by op index.
+     (Duplicate keys never reach this pipeline: a keyed insert onto a
+     live key is rejected at the staging call — checked against the
+     borrowed old store and the already-staged inserts, a staging panic
+     like a foreign ref — so uniqueness holds by construction at flush;
+     M2's keyed section.)
   3. **Compact** kept arenas, assign new ids, build the per-arena old→new
      maps. Each map is an old-id-indexed array of `Option<new id>`, one
      entry per old arena slot, `None` for removed records; new records

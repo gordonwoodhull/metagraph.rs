@@ -220,11 +220,11 @@ an inline instantiation.
 The spike index is the evidence ledger; the probes below are cited by
 the plans at load-bearing points and are recorded here so a reader can
 find the artifacts. All are throwaway hand-written-emission crates under
-`/tmp`, no proc macros.
+`/tmp`, no proc macros. (The edge-induced probe is indexed separately —
+as the addendum to spike 11's entry, above.)
 
 | probe | workspace | result |
 |---|---|---|
-| Edge-induced subgraph (store-level keyed maps, root-marked unfused self) | `/tmp/m2-probe-edge-induced` | 5/5 tests. Keyed maps live on the store; the 2-arg self-less insert op (`insert_subnode_hook(s, key, target)`) is the only emittable form — a root-marked self owns no id. Associated-type keyed trait (`KeyedOf<M> { type Key; }`) — the other side of the trait-shape question from spike 11's concrete parameter. Also documents: duplicate key silently overwrites and `validate()` still passes (why uniqueness enforcement lives at the write boundary, not in validate) |
 | Poly-placement validate (M3 review 2) | `/tmp/m3-probe-poly-validate` | 7/7 tests. One authored hash_index validate body emitted unchanged at store-level and host-embedded placements; only three bound roles differ (the map iterator, key-containment, value-containment). Honest limits: no per-map owner context in error messages; compound path-id containment yields coarse messages |
 | Instance-prefixed merged constructor (M3 review 2) | `/tmp/m3-probe-ctor-merge` | 2/2 tests + E0063 negcheck. The merged constructor of a two-instance colocation class takes the union of both members' `ctor_arg` arguments, instance-prefixed on collision (`outer_source`/`inner_source`), routing by name via field-init shorthand. Spike 1's "silently deduped (keeps first)" is unemittable for required fields |
 | Mixed-binding phased store (M3 review 2) | `/tmp/m3-probe-mixed-phase` | 5/5 tests + E0599 negcheck. CSR (`out_edges`) + intrusive (`in_edges`) coexist on one `GraphStore<P>`: per-record links cross the build/frozen boundary untouched, freeze finalizes only CSR's store-level state, two validate functions summoned in binding order catch their own backing's damage. Hazard pinned: an undifferentiated field list lets a forgetful freeze carry stale accumulators into the frozen store — the motivation for phase-attributed contributions |

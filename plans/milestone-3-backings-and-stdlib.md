@@ -52,7 +52,7 @@ uniform across all backings.
 | placement computation; entity kits (`Id(pub u32)`, compound path ids under embedding); hand-written handle `Eq`/`Hash` by (store pointer, id); the function-per-hook shape; stem-namespacing and collision prefixing of contributed names | (b) — uniform, backing-independent | M2 placement rule; M2 ("`NodeId`'s `pub u32` stays — the tests depend on it"); spike 11 finding 4 |
 | arena bound to an arrow whose target's arena is hosted elsewhere | (a) — arena's declared requirement (`hosts_arena`) | M2 frontier; Hierarchy is the legal shape |
 | intrusive sourced at an embedded class | (b) — uniform restriction: contributed fields locate only on root-level classes or the store in M3. Separately, intrusive_list declares the stronger (a) predicate `direct_records` on its *endpoints* (a different condition with a different extension — hash_index's host-embedded map legally sits on an embedded configuration) | M2 frontier |
-| intrusive sourced at an unfused root | (a) — DSL-legal (store-level head, self-less insert op, the edge-induced probe's shape); (b) — behind the codegen frontier | edge-induced probe |
+| intrusive sourced at an unfused root | (a) — DSL-legal: the unfused root's record is the store, so the head is a store-level field and the insert op drops the self argument; (b) — behind the codegen frontier, and unexercised (the edge-induced probe covered a store-level *map*, never a store-level head) — owed a probe before emission | M2 write-ops rule; M3 placement rules |
 
 The boundary the table draws: the (a) half is what a `backing!`
 declaration *states*; the (b) half is the uniform resolution of `on`
@@ -180,7 +180,11 @@ backing! {
     hash_index: A -> B, key(K) {
         on A { index: HashMap<KId, BId> }   // self record; the store when A
                                             // is root-marked and unfused
-        on_insert(a, k, b) { map_from(a).insert(k, b) }
+        on_insert(a, k, b) {
+            // live keys rejected at the call (M2): the hook checks first
+            assert!(map_from(a).insert(k, b).is_none(),
+                    "duplicate key {k:?}");
+        }
         lookup(a, k) { map_from(a).get(&k).copied() }
         validate {          // every self record's map, wherever placed:
             for m in maps(A) {
@@ -270,6 +274,10 @@ Two mechanical obligations come with user-writable backings:
   roots — embedding its field declarations, hook bodies, and constraint
   annotations; `implement!` resolves a backing binding by invoking its
   courier. No fixed table of backings, same as no fixed table of roots.
+  The courier inherits M1's landed constraints: `#[macro_export]`
+  anchors it at the defining crate's root, so a `backing!` declaration
+  at a crate root E0255-collides with its own courier — declare backings
+  in a named module (M1's documented constraint, same mechanism).
 - **Iterator types.** The generated read traits use GATs, whose
   associated type must name a concrete type (the `iter Walk` clause,
   above).
@@ -312,14 +320,13 @@ clause must reproduce the checks the fixed-table era hard-coded.
 - field: endpoint-in-range over its contributed field.
 - arena: nothing — existence cannot dangle.
 - hash_index: key existence and value-in-arena, naming offending ids in
-  the message (the edge-induced probe's style). Key uniqueness is
-  structural under `HashMap` — not an emitted check, and unfalsifiable
-  by one (a per-self `HashMap` cannot hold two values for one key; the
-  probe demonstrates a duplicate silently overwrites and `validate()`
-  returns `Ok`). Uniqueness is enforced where the writes are: M4's
-  flush detects duplicate staged keys in the change set (M4's
-  `FlushError` surface) — the inventory obligation is documented, and
-  the enforcement lives at the write boundary, not in `validate()`.
+  the message (the edge-induced probe's style). Key uniqueness is not an
+  emitted check — a per-self `HashMap` cannot hold two values for one
+  key, and a plain insert silently overwrites with `validate()` still
+  passing (the edge-induced probe demonstrates both). Uniqueness is
+  enforced where the op is submitted: the insert hook checks the map
+  first, and the builder method / M4's staging call reject a live key
+  (M2's keyed section) — uniqueness holds by construction thereafter.
 - intrusive_list: two bodies, selected by the arrow's instantiation
   facts — `validate by` (membership consistency against the determining
   field; codegen binds the reserved `determining(a)` placeholder to the
@@ -516,17 +523,23 @@ sharing: a second subgraph-like pattern instantiating the promoted
 `main_node` root gets the *same* trait, which is what keeps generic
 algorithms portable.
 
-Names wait on M2's pending review decisions — the root-pattern-vs-entity
-collision (`MainNode` names both an open entity and a root pattern in
-M2's sketch; the spike used `MainNodeOf`), trait-name derivation, and
-the keyed root's trait shape (spike 11 and the edge-induced probe chose
-differently: concrete key parameter vs. associated key type). Flagged
-here, decided there.
+The naming gate is discharged — M2's review decided all three questions
+(6290959 on main): root patterns take the arrow's name with no suffix
+where free (`MainNode`/`MainEdge`; spike 1's `MainNodeOf` was a
+deviation), and `-Of` stays where the bare name is taken (`SubNodeOf`,
+`SubEdgeOf`, `EdgesOf`); the root's trait takes its *arrow's* name
+camel-cased, not the pattern's (M2's keyed sketch trait is `Subnode<M>`);
+and the keyed root's trait shape settled on the associated `Key` type
+(the edge-induced probe's shape; spike 11's concrete parameter was the
+other candidate). Promotion uses these names as-is.
 
 ## Lesser decisions, folded
 
-- **`union` is renamed `sum`** (this fold; plan-text edits only — the
-  repo is still prose plus the reference implementation). The semantics
+- **`union` is renamed `sum`** (this fold; plan-text edits only). The
+  rename predates M1's implementation landing — the landed code still
+  spells the derivation `union` (`macros/src/grammar.rs`,
+  `src/stdlib.rs`); a mechanical code rename rides with whichever
+  milestone next touches the grammar. The semantics
   are unchanged and were always multiset-sum: self-loops appear twice,
   out-edges chained with in-edges. The word `union` suggested dedup;
   `sum` does not.
@@ -541,8 +554,9 @@ here, decided there.
 
 From M2's list, re-expressed under the premise: embedding depth 1;
 contributed fields locating on embedded classes (uniform restriction,
-above); intrusive lists sourced at unfused roots (DSL-legal, store-level
-head, self-less insert op); `<=>` transitivity exercised only on
+above); intrusive lists sourced at unfused roots (DSL-legal — store-level
+head, self-less insert op — but unexercised; owed a probe before
+emission); `<=>` transitivity exercised only on
 two-member classes (M2's frontier, still uncarried); and further
 composition of a composed pattern (the grammar note above). Retired in
 this fold: spike 1's "constructor argument name collisions silently
@@ -553,8 +567,9 @@ limit, not a rule — see the placement rules).
 
 ## Depends on
 
-M2 complete — especially a hook interface that survived keyed indexes —
-and M2's review outcomes for the promotion names. Do not start the
+M2 complete — especially a hook interface that survived keyed indexes.
+M2's review outcomes for the promotion names are in (see Stdlib
+promotion). Do not start the
 `backing!` grammar before the four built-ins exist; that ordering is the
 whole point of the milestone.
 
@@ -570,8 +585,8 @@ whole point of the milestone.
    the DSL; M1 suite green.
 2. `intrusive_list` in the DSL — the hygiene caveats as grammar rules;
    M1 suite green, traversal orders included.
-3. `hash_index` in the DSL (the keyed grammar is M2's — **gated on M2
-   outcomes**); M2 keyed tests green in both placements (host-embedded,
+3. `hash_index` in the DSL (**gated on M2's keyed grammar** landing; the
+   names are settled); M2 keyed tests green in both placements (host-embedded,
    store-level).
 4. `validate` clauses; corruption fixtures per spike 4; the canonical
    inventory as documented contract.
@@ -579,5 +594,5 @@ whole point of the milestone.
    tokens and state placement facts per the evaluation table above.
 6. `csr_adjacency` and type-state phases; CSR tests with compile-fail
    proofs as in the spike.
-7. Stdlib promotion (**gated on M2's naming outcomes**); library
+7. Stdlib promotion (names per M2's resolved outcomes, above); library
    patterns shipped; doc pass.
