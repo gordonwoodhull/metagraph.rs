@@ -977,7 +977,7 @@ Contract: the declarations, the placement rules, the premise table.
 - [ ] `arena`: `membership: existence`, `iter`/`iterate`/`advance`
       with the reserved iterator fields, the `hosts_arena` predicate
       wired
-- [ ] delete the fixed backing table from the macros crate
+- [x] delete the fixed backing table from the macros crate
 - Acceptance:
 - [x] M1 suite green, koenigsberg assertions byte-identical
 - [x] expanded code shows couriers resolved and hook *methods* emitted
@@ -998,15 +998,15 @@ the hygiene caveats.
 
 **Step 5 — `hash_index` in the DSL.** Gated on M2's keyed grammar
 landing; the names are settled (Stdlib promotion).
-- [ ] `key(K)` clauses: check-then-write `on_insert`, `lookup`, and
+- [x] `key(K)` clauses: check-then-write `on_insert`, `lookup`, and
       the three-check validate over `maps(A)`/`host_of`/
       `k_arena_of`/`b_arena_of`
-- [ ] all three self placements emitted: plain, host-embedded,
+- [x] all three self placements emitted: plain, host-embedded,
       store-level
 - Acceptance:
-- [ ] M2 keyed tests green in both M2 placements (host-embedded,
+- [x] M2 keyed tests green in both M2 placements (host-embedded,
       store-level) plus the plain-self placement
-- [ ] the `#[should_panic]` duplicate-key test green
+- [x] the `#[should_panic]` duplicate-key test green
 - Depends: 3, M2's keyed step
 
 **Step 6 — Validate machinery + corruption fixtures.** Contract: the
@@ -1061,7 +1061,7 @@ phase representation.
 - [ ] `field`, `arena`, `intrusive_list`, `hash_index`, and
       `csr_adjacency` are `backing!` declarations shipped in the
       runtime crate
-- [ ] the fixed table of backings is gone from the macros crate, and
+- [x] the fixed table of backings is gone from the macros crate, and
       no hidden fixed table survives (every behavior filed under (a)
       or (b) in the premise table)
 - [ ] M1 and M2 suites green, unchanged
