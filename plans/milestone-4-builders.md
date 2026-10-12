@@ -15,9 +15,11 @@ executed inside a flush in the phased-flush probe below). Flush into a
 Build-phased store (kept-membership carry, replay, freeze, validate)
 and nested staging under provisional hosts are probe-verified
 (/tmp/m4-probe-phased-flush, /tmp/m4-probe-nested-pending — REPORT.md
-in each). Everything specific to write traits as generated code,
-`set_` replay, keyed maps across flush, and induction remains
-uncompiled.
+in each). `set_` re-pointing of a `by`-derived membership — the
+delete-hook growth, effective-endpoint dangler detection, replay
+against the rebuilt skeleton — is likewise probe-verified
+(/tmp/m4-probe-set-unlink). What remains uncompiled: write traits as
+generated code, keyed maps across flush, and induction.
 
 ## Premises (what M1–M3 established)
 
@@ -144,10 +146,17 @@ continue with the new metagraph. Two entry points support this:
      `add_<entity>`. A violation on a kept record has no op of its own,
      so it is attributed to the removal op that caused it, and violations
      distinguish `Kept(old id)` from `Staged(op index)` elements.
-     Detection honors staged corrections: a kept record whose endpoint
-     is removed does not dangle if the same change set re-points
-     (`set_`) or removes the record — the change set is judged as a
-     whole. Every read of an old id in this pass is range-guarded
+     Detection honors staged corrections: a kept record dangles only if
+     its *effective* endpoint — after the whole change set applies,
+     last `set_` wins by submission order — is removed. A staged
+     `set_` re-pointing the endpoint away from a removed node cures
+     that side (a `set_` cannot cure the far side — it never moves the
+     other endpoint); a staged removal of the record cures both. A
+     `set_` naming a removed node as its new endpoint is itself the
+     violation, attributed to the `set_` op (the op that named the
+     removed node), while an endpoint never re-pointed keeps the
+     removal-op attribution. Every read of an old id in this pass is
+     range-guarded
      before use — an out-of-range `Existing` ref is the `unknown old
      id` error, never an index panic (spike 7's crate gets this wrong:
      step 1 flags the id but does not return before step 2 indexes it —
@@ -172,10 +181,23 @@ continue with the new metagraph. Two entry points support this:
      only through the hooks, so replay never reads build-phase CSR
      state, and the pipeline presupposes a frozen old store;
      /tmp/m4-probe-phased-flush) — and intrusive lists rebuilt by
-     walking old chains (order contracts, below). Staged ops then
+     walking old chains (order contracts, below). Copying kept records
+     is not purely mechanical when correction ops exist: a kept record
+     whose determining field is re-pointed by a staged `set_` is born
+     into the new store *unlinked* under its effective endpoint — the
+     walk-rebuild skips its removed old host's chain — and the staged
+     `set_` then links it at replay (the delete hook's absence answer
+     is legitimate; Interactions below). A `Pending` effective
+     endpoint is predicted from kept counts plus preceding adds and
+     *asserted* at replay, never trusted. Staged ops then
      replay against that rebuilt state, in submission order — a `set_`
      un-links and re-links against the *rebuilt* lists, never the old
-     ones. With nested stores, root-level ops replay before nested
+     ones. Replay order is observable: a re-pointed membership takes
+     its replay-time position (push-front for an intrusive list), so
+     the direct-construction equivalent of a flush replays the same
+     verbs in the same order — a "born final" build does not match,
+     and that is not a flush bug (probe-verified,
+     /tmp/m4-probe-set-unlink). With nested stores, root-level ops replay before nested
      ops, submission order preserved within each level, so provisional
      paths resolve top-down (probe-verified,
      /tmp/m4-probe-nested-pending). In the flat case the grouping is
@@ -248,7 +270,9 @@ continue with the new metagraph. Two entry points support this:
   formatting), so error text is stable across runs.
   Distinct from these are **staging-time programming errors, which
   panic at the staging call** rather than joining `FlushError`: a
-  foreign or stale ref stamp, removal of a `Pending` ref, and a keyed
+  foreign or stale ref stamp, removal of a `Pending` ref, `set_` of a
+  `Pending` ref (a staged record's determining fields are fixed by its
+  own `add` op), and a keyed
   insert onto a live key (checked against the borrowed old store and
   the already-staged inserts; M2's builder does the same at its insert,
   and a silent `HashMap` overwrite there is exactly the failure the
@@ -515,7 +539,20 @@ refs already handed out, because nothing is applied until flush.
   per-backing *delete* hooks (un-linking a `by`-derived intrusive
   membership before re-linking) and a field-write hook — M3's clause
   vocabulary has `ctor_arg` and `on_insert` but no write-after-
-  construction clause. Hooks remain the single write path: flush
+  construction clause. The growth is per backing kind and is
+  probe-verified (/tmp/m4-probe-set-unlink): a `by`-derived intrusive
+  list gains `unlink_<list>_hook` (walk-and-splice, O(list length),
+  correct at head and tail; a `by` on both endpoints of a mutable
+  field grows two), and it is *total* — it returns whether the record
+  was found, never panics on absence, because flush can legitimately
+  hold a kept record that is currently in no list (the
+  correction-op case, step 4). The re-point hook (`set_source_field_
+  hook`-shaped) takes only `(record, new value)`: the old host is
+  read from the record's own determining field — that is exactly the
+  `by`-derivation invariant — then un-link, write, re-link. A phased
+  backing needs nothing (membership is derived at freeze); a
+  hash_index needs entry removal only when un-insert lands (non-goal,
+  v1). Hooks remain the single write path: flush
   replay lowers `set_` through the same grown hooks that the
   builder's `set_<one-arrow>` method uses, replaying after the
   kept-skeleton rebuild (pipeline step 4). Backings that require a
