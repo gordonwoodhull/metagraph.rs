@@ -1054,10 +1054,15 @@ impl Parse for ImplementInput {
 /// The pattern is addressed by the path of the module holding its
 /// `pattern!` invocation plus the pattern name (`stdlib::Digraph` for
 /// the stdlib's, `crate::shapes::Labeled` for one of yours). `many`
-/// arrows bind explicitly (`arena` vs `intrusive_list` is a real choice
-/// with no safe default); `one` arrows default to `field`; keyed arrows
-/// bind `hash_index` (a per-self-object `HashMap`, store-level when the
-/// self is the unfused root); derived (`:= sum`) arrows take no binding.
+/// arrows bind explicitly — `arena`, `intrusive_list`, or the phased
+/// `csr_adjacency` (a real choice with no safe default); `one` arrows
+/// default to `field`; keyed arrows bind `hash_index` (a per-self-object
+/// `HashMap`, store-level when the self is the unfused root); derived
+/// (`:= sum`) arrows take no binding. Binding a phased backing
+/// (`csr_adjacency` today) makes the store type-stated: `Store<P =
+/// Frozen>` with the write side on `Store<Build>`, reads and
+/// `validate()` on `Store<Frozen>`, and the compaction at the consuming
+/// `freeze()`.
 ///
 /// For a composition, binding keys are instance-qualified and the
 /// generated names follow the collision rules: entity types take the

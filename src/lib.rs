@@ -24,7 +24,10 @@
 //!
 //! The base directed graph is not built in: [`stdlib`] declares the six
 //! root arrow patterns (`Nodes`, `OutEdges`, `InEdges`, `Edges`,
-//! `Source`, `Target`) and the `Digraph` pattern that instantiates them.
+//! `Source`, `Target`), the `Digraph` pattern that instantiates them,
+//! and the composition roots M2 discovered (`EdgesOf`, `MainNode`,
+//! `MainEdge`, `SubNodeOf`, `SubEdgeOf` — the subgraph-refinement
+//! vocabulary, promoted from the test fixtures).
 //!
 //! ```no_run
 //! use metagraph_exper::algo::bfs;
@@ -60,12 +63,13 @@
 //! | `field` | `one` | one typed field on the self record; total by construction |
 //! | `intrusive_list` | `many` | `Option<<id>>` head on the self record, next link on the target record; push-front, so iteration is reverse insertion order |
 //! | `hash_index` | `keyed` | per-self-object `HashMap` from key id to target id (store-level when the self is an unfused root); inserts onto a live key panic |
+//! | `csr_adjacency` | `many` (phased) | per-self buckets accumulate during build, compact into offset ranges + one adjacency array at the single `freeze()`; forward insertion order |
 //!
-//! `many` arrows bind explicitly (`arena` vs `intrusive_list` is a real
-//! choice with no safe default); `one` arrows default to `field`; keyed
-//! arrows bind `hash_index`. Derived membership (`by <one-arrow>`) fires
-//! an arrow's insert hook from constructors; derived reads
-//! (`:= sum(a, b)`) take no backing at all.
+//! `many` arrows bind explicitly (`arena` vs `intrusive_list` vs
+//! `csr_adjacency` is a real choice with no safe default); `one` arrows
+//! default to `field`; keyed arrows bind `hash_index`. Derived
+//! membership (`by <one-arrow>`) fires an arrow's insert hook from
+//! constructors; derived reads (`:= sum(a, b)`) take no backing at all.
 //!
 //! # Composition (M2)
 //!
