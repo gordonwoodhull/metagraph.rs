@@ -876,30 +876,161 @@ branches add rows at the same Probes anchor, and main's queued
 combined-rule row is retired by /tmp/m3-probe-r3-ctor-share; union the
 rows, keeping the branch's superset.
 
-## Task sequence (sketch)
+## Implementation plan
 
-1. `backing!` courier emission and resolution in `implement!`; delete
-   the fixed table. **Acceptance gate, before the table is deleted:** a
-   ~100-line bounce probe — two distinct backing couriers resolved per
-   one `implement!`-shaped invocation, bodies spliced hygienically —
-   **including the cross-crate arms**: a stdlib backing resolved from a
-   user crate, a user backing declared in a second crate, and a renamed
-   dependency (the declaring-crate resolver's matrix — cross-crate is
-   the default path, since the stdlib's couriers live in the runtime
-   crate). The hygiene half is spike-5-proven and the resolution half is
-   spike-1-proven, but their conjunction has never been bounced (the
-   header's recorded seam). Then re-implement `field` and `arena` in
-   the DSL; M1 suite green.
-2. `intrusive_list` in the DSL — the hygiene caveats as grammar rules;
-   M1 suite green, traversal orders included.
-3. `hash_index` in the DSL (**gated on M2's keyed grammar** landing; the
-   names are settled); M2 keyed tests green in both placements (host-embedded,
-   store-level).
-4. `validate` clauses; corruption fixtures per spike 4; the canonical
-   inventory as documented contract.
-5. Constraint predicates and trybuild error tests — messages quote
-   tokens and state placement facts per the evaluation table above.
-6. `csr_adjacency` and type-state phases; CSR tests with compile-fail
-   proofs as in the spike.
-7. Stdlib promotion (names per M2's resolved outcomes, above); library
-   patterns shipped; doc pass.
+Each step is a handoff unit: an agent (or a pair) can take one step
+with this plan as the whole contract — the cited sections are the spec,
+the work checkboxes are the scope, and the acceptance checkboxes are
+hard gates. Tick boxes in this file as work lands; a step is done when
+its acceptance list is fully ticked and the suites named there are
+green. Steps run in order; `Depends` is binding. The milestone's
+overall gate, stated once: the four built-ins re-implemented as
+`backing!` declarations, the fixed table deleted, and the M1/M2 suites
+green unchanged.
+
+**Step 0 — Preconditions (a gate, not work).**
+- [ ] M2 complete on main and the merge chore discharged: the three M2
+      reconciliations plus the same-instance trybuild fixture
+      (Depends on, above), the epic.md fold, and the spikes.md row
+      union
+- [ ] the `union` → `sum` code rename landed (it rides with M2's
+      step-1 grammar pass)
+- [ ] the round-4 probe reports read, their limits carried or retired:
+      /tmp/m3-probe-r4-advance (advance clause mechanics at the
+      embedded placement), /tmp/m3-probe-r4-bounce (the cross-crate
+      courier bounce)
+
+**Step 1 — `backing!` parser + courier emission.** Contract: the
+clause grammar (the pinned table and its rules) and the token-routing
+paragraph.
+- [ ] parse the header (`name: A -> B, cardinality`) and the clause
+      inventory per the table; grammar-reject unknown clauses, store
+      labels, and annotation values, quoting the closed set in the
+      message
+- [ ] enforce the repetition rule: `on` once per (target, label) pair,
+      the validate family once per variant, everything else once
+- [ ] emit the backing courier: `#[macro_export]`, the M1
+      target-parameterized single-rule shape, payload = the
+      declaration's tokens plus the declaring crate's baked
+      `CARGO_PKG_NAME`
+- [ ] document the E0255 constraint (a crate-root declaration collides
+      with its own courier — declare backings in a named module)
+- Acceptance:
+- [ ] round-trip tests: each stdlib declaration parses and re-emits;
+      one rejection fixture per closed set (unknown clause, bad store
+      label, unknown contract item, unknown phase property, bad
+      iteration_order value, repeated clause)
+- Depends: 0
+
+**Step 2 — Binding resolution in `implement!`.** Contract: the
+token-routing paragraph (declaring-crate resolver).
+- [ ] grow the binding grammar with the path form; the bare-ident form
+      stays legal and resolves against the runtime crate
+- [ ] the resolution hop via `proc-macro-crate`: renames handled,
+      re-export routing rejected, the direct-dependency rule enforced
+      with a clean `compile_error!`
+- [ ] the bounce gate, in-repo and permanent: two distinct backing
+      couriers resolved per one `implement!`-shaped invocation, bodies
+      spliced hygienically, with the cross-crate arms — a stdlib
+      backing resolved from a user crate, a user backing declared in a
+      second crate, a renamed dependency (/tmp/m3-probe-r4-bounce is
+      the throwaway evidence; this is the test that stays). The hygiene
+      half is spike-5-proven and the resolution half spike-1-proven;
+      the conjunction is what this gate bounces
+- Depends: 1
+
+**Step 3 — `field` + `arena` in the DSL; the fixed table deleted.**
+Contract: the declarations, the placement rules, the premise table.
+- [ ] `field`: `on`/`ctor_arg`/`read`/`validate` wired to the existing
+      codegen shapes; the `ctor_arg` unfused-root rejection emitted
+- [ ] `arena`: `membership: existence`, `iter`/`iterate`/`advance`
+      with the reserved iterator fields, the `hosts_arena` predicate
+      wired
+- [ ] delete the fixed backing table from the macros crate
+- Acceptance:
+- [ ] M1 suite green, koenigsberg assertions byte-identical
+- [ ] expanded code shows couriers resolved and hook *methods* emitted
+- Depends: 1, 2
+
+**Step 4 — `intrusive_list` in the DSL.** Contract: the declaration,
+the hygiene caveats.
+- [ ] `on A` + `on B` contributions, the stem formula, the push-front
+      hook as a store method
+- [ ] the hygiene caveats as grammar rules: `Span::mixed_site()`
+      scaffold idents, absolutized container paths, reserved-set
+      shadowing rejected
+- [ ] `validate by` + `validate primitive` authored and selected per
+      binding at `implement!` time
+- Acceptance:
+- [ ] M1 suite green including traversal orders (reverse insertion)
+- Depends: 3
+
+**Step 5 — `hash_index` in the DSL.** Gated on M2's keyed grammar
+landing; the names are settled (Stdlib promotion).
+- [ ] `key(K)` clauses: check-then-write `on_insert`, `lookup`, and
+      the three-check validate over `maps(A)`/`host_of`/
+      `k_arena_of`/`b_arena_of`
+- [ ] all three self placements emitted: plain, host-embedded,
+      store-level
+- Acceptance:
+- [ ] M2 keyed tests green in both M2 placements (host-embedded,
+      store-level) plus the plain-self placement
+- [ ] the `#[should_panic]` duplicate-key test green
+- Depends: 3, M2's keyed step
+
+**Step 6 — Validate machinery + corruption fixtures.** Contract: the
+validate contribution.
+- [ ] doc-hidden `__validate_<arrow>` store methods, summoned from
+      `validate()` in binding order
+- [ ] corruption fixtures per spike 4 for every canonical-inventory
+      check: ghost keys, out-of-range and cross-host values, chain
+      corruption in both partition shapes (shared membership vs cycle,
+      distinguished in the report)
+- [ ] the canonical inventory written out as the documented contract
+      M4's flush runs
+- Depends: 3–5
+
+**Step 7 — Constraint predicates + trybuild error tests.** Contract:
+Constraints and applicability, the evaluation table.
+- [ ] predicate evaluation with the pinned error templates:
+      cardinality, `existence`, `hosts_arena`, `direct_records`
+- [ ] the `ctor_arg`/`on_add` orchestrator-rule rejection
+- [ ] trybuild fixtures for each predicate and for the grammar
+      rejections from step 1; messages quote tokens and state
+      placement facts
+- Depends: 3–5
+
+**Step 8 — `csr_adjacency` + type-state phases.** Contract: CSR and
+phase representation.
+- [ ] `phase:` parsing; the `on store build`/`on store frozen`
+      partition; the type-state store parameter emitted only when a
+      phased backing is bound
+- [ ] `compact` at the single `freeze()`, binding order for multiple
+      phased backings
+- [ ] compile-fail proofs: insert-after-freeze, frozen-as-builder, no
+      accumulators on the frozen type
+- [ ] applicability rejections (entity arrow, unfused-root self); the
+      fused-root emission attempted against the frontier note — emit
+      it, or record exactly what breaks
+- Acceptance:
+- [ ] spike-6's CSR tests and the mixed-phase probe's shape green
+- Depends: 4, 6
+
+**Step 9 — Stdlib promotion + doc pass.** Contract: Stdlib promotion.
+- [ ] M2's discovered roots move into the runtime stdlib;
+      pattern-local declarations re-point by path; names as M2
+      resolved them
+- [ ] doc pass to M1 step-11's standard; generated-code doc comments
+      carry the arrow that produced each item
+- Acceptance:
+- [ ] M2 suites unchanged modulo import paths
+- Depends: 1–8
+
+**Overall gate (the milestone's success criterion, restated):**
+- [ ] `field`, `arena`, `intrusive_list`, `hash_index`, and
+      `csr_adjacency` are `backing!` declarations shipped in the
+      runtime crate
+- [ ] the fixed table of backings is gone from the macros crate, and
+      no hidden fixed table survives (every behavior filed under (a)
+      or (b) in the premise table)
+- [ ] M1 and M2 suites green, unchanged
