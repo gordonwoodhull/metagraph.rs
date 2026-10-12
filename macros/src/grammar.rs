@@ -335,6 +335,71 @@ pub fn schema_body_tokens(body: &SchemaBody) -> TokenStream {
 }
 
 // ---------------------------------------------------------------------------
+// Packaged schema (the declaring-crate resolver's carriage)
+// ---------------------------------------------------------------------------
+
+/// A schema riding with its declaring package: `("pkg-name", { body })`.
+/// `pattern!` reads `CARGO_PKG_NAME` at its expansion site (the declaring
+/// crate's rustc process — the probe at /tmp/m2-probe-root-resolver pinned
+/// that the env var names the crate being compiled, not the eventual
+/// consumer) and bakes it here, so every instantiation-source path inside
+/// the schema can be resolved against the *declaring* crate at the
+/// `implement!`/`compose_pattern!` site: `Itself` → `crate::…`, a rename →
+/// the local dependency name, a missing direct dependency → a clean error.
+/// Spike-pinned constraint: the schema body crosses courier hops as one
+/// group token tree and is never re-tokenized in flight.
+#[derive(Clone)]
+pub struct PackagedSchema {
+    pub pkg: String,
+    pub body: SchemaBody,
+}
+
+impl Parse for PackagedSchema {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let content;
+        syn::parenthesized!(content in input);
+        let pkg: syn::LitStr = content.parse()?;
+        content.parse::<Token![,]>()?;
+        let body;
+        braced!(body in content);
+        Ok(PackagedSchema { pkg: pkg.value(), body: body.parse()? })
+    }
+}
+
+/// Re-emit a packaged schema (round-trips through `PackagedSchema::parse`).
+pub fn packaged_schema_tokens(p: &PackagedSchema) -> TokenStream {
+    let pkg = &p.pkg;
+    let body = schema_body_tokens(&p.body);
+    quote!((#pkg, { #body }))
+}
+
+#[cfg(test)]
+mod packaged_tests {
+    use super::*;
+
+    #[test]
+    fn packaged_schema_roundtrip() {
+        let src = r#"("fixture-crate", { entities: root T, SubNode, MainNode(open); arrows { a: crate::my_roots::MyRoot, SubNode -> MainNode; } })"#;
+        let ts: TokenStream = src.parse().expect("src parses");
+        let once: PackagedSchema = syn::parse2(ts).expect("parse");
+        assert_eq!(once.pkg, "fixture-crate");
+        let emitted = packaged_schema_tokens(&once);
+        let twice: PackagedSchema = syn::parse2(emitted.clone()).expect("reparse");
+        assert_eq!(twice.pkg, "fixture-crate");
+        assert_eq!(
+            once.body.entities.len(),
+            twice.body.entities.len(),
+            "emitted: {emitted}"
+        );
+        assert_eq!(
+            emitted.to_string(),
+            packaged_schema_tokens(&twice).to_string(),
+            "idempotent emission"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Root registration metadata (the metadata tuple)
 // ---------------------------------------------------------------------------
 

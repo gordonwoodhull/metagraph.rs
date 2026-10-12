@@ -23,7 +23,7 @@ use crate::grammar::{
     arena_fld, data_ty, id_ty, iter_ty, link_stem, marker_ty, path_tokens, snake, Binding,
     Cardinality, RootMeta,
 };
-use crate::{resolve_schema_path, ChainConfig};
+use crate::ChainConfig;
 
 /// A resolved arrow: declaration plus its root's metadata and backing.
 struct ArrowInfo<'a> {
@@ -35,11 +35,13 @@ struct ArrowInfo<'a> {
 
 pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     let schema = &config.schema;
+    let body = &schema.body;
     let store = &config.store;
 
     // metas[i] belongs to the i-th unique root (first-occurrence order over
-    // the schema's arrows) — the order the resolution chain queued them in.
-    let unique_roots = crate::unique_roots(schema);
+    // the schema's arrows) — the order the resolution chain queued them in,
+    // keyed by *resolver-absolute* path spelling.
+    let unique_roots = crate::resolved_roots(schema)?;
     if unique_roots.len() != config.metas.len() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
@@ -55,13 +57,13 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         meta_of.insert(path_tokens(p).to_string(), m);
     }
 
-    let root_entity = schema
+    let root_entity = body
         .entities
         .iter()
         .find(|e| e.root)
         .expect("pattern! validated exactly one root-marked entity");
     let elements: Vec<&crate::grammar::EntityDecl> =
-        schema.entities.iter().filter(|e| !e.root).collect();
+        body.entities.iter().filter(|e| !e.root).collect();
     let is_root = |name: &proc_macro2::Ident| root_entity.name == *name;
 
     // ---- resolve arrows: backing bindings against root cardinalities ----
@@ -69,9 +71,9 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         config.bindings.iter().find(|b| b.arrow == name)
     };
     let mut infos: Vec<ArrowInfo> = Vec::new();
-    for decl in &schema.arrows {
+    for decl in &body.arrows {
         let meta = meta_of
-            .get(&path_tokens(decl.inst.as_ref().unwrap()).to_string())
+            .get(&crate::resolve_schema_path(decl.inst.as_ref().unwrap(), &schema.pkg)?.to_string())
             .expect("every arrow's root was queued");
         // The instantiation's key clause must agree with the root's keyed
         // cardinality: the root owns the cardinality, the instantiation only
@@ -411,7 +413,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     });
 
     // ---- handles ----
-    for e in &schema.entities {
+    for e in &body.entities {
         let h = &e.name;
         let (body, id_fn, eq_body, hash_body, dbg_body) = if e.root {
             (
@@ -528,7 +530,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let arrow_doc_name = &d.name;
         let marker = marker_ty(&d.name);
         let marker_path = quote!(#marker_base_ts::#marker_mod::markers::#marker);
-        let trait_path = resolve_schema_path(d.inst.as_ref().unwrap());
+        let trait_path = crate::resolve_schema_path(d.inst.as_ref().unwrap(), &schema.pkg)?;
         let self_h = &d.source;
         let tgt_h = &d.target;
         let m = &meta.method;
@@ -537,10 +539,10 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let tid = id_ty(&d.target);
 
         if let Some((ua, ub)) = &d.sum {
-            let da = schema.arrows.iter().find(|x| x.name == *ua).ok_or_else(|| {
+            let da = body.arrows.iter().find(|x| x.name == *ua).ok_or_else(|| {
                 syn::Error::new(proc_macro2::Span::call_site(), format!("sum names unknown sibling `{ua}`"))
             })?;
-            let db = schema.arrows.iter().find(|x| x.name == *ub).ok_or_else(|| {
+            let db = body.arrows.iter().find(|x| x.name == *ub).ok_or_else(|| {
                 syn::Error::new(proc_macro2::Span::call_site(), format!("sum names unknown sibling `{ub}`"))
             })?;
             let ita = iter_ty(&da.name);

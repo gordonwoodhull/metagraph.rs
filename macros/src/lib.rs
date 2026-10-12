@@ -19,8 +19,7 @@ use syn::parse::{Parse, ParseStream};
 use syn::{braced, bracketed, Ident, Path, Token};
 
 use grammar::{
-    parse_bindings, path_tokens, root_meta_tokens, schema_body_tokens, snake, Binding,
-    Cardinality, RootMeta, SchemaBody,
+    parse_bindings, path_tokens, root_meta_tokens, snake, Binding, Cardinality, RootMeta,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,7 +28,7 @@ use grammar::{
 
 struct PatternInput {
     name: Ident,
-    body: SchemaBody,
+    body: grammar::SchemaBody,
 }
 
 impl Parse for PatternInput {
@@ -422,8 +421,8 @@ fn expand_root_pattern(pat: &PatternInput) -> syn::Result<TokenStream2> {
         #[doc(hidden)]
         #[macro_export]
         macro_rules! #courier {
-            (($fwd:path ; $($rest:tt)*)) => {
-                $fwd ! { { #meta_ts } ; $($rest)* }
+            (($($fwd:tt)::+ ; $($rest:tt)*)) => {
+                $($fwd)::+ ! { { #meta_ts } ; $($rest)* }
             };
         }
         #[doc(hidden)]
@@ -450,7 +449,16 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
         }
     });
 
-    let schema_tokens = schema_body_tokens(&pat.body);
+    let schema_tokens = {
+        // Declaring-crate resolver: bake the declaring crate's package name
+        // into the courier payload. `pattern!` runs in the declaring crate's
+        // rustc process, so `CARGO_PKG_NAME` names the declaring crate — the
+        // eventual consumer's expansion sees the baked string, not its own.
+        let pkg = std::env::var("CARGO_PKG_NAME")
+            .expect("CARGO_PKG_NAME not set during pattern! expansion");
+        let packaged = grammar::PackagedSchema { pkg, body: pat.body.clone() };
+        grammar::packaged_schema_tokens(&packaged)
+    };
 
     Ok(quote! {
         pub mod #mod_name {
@@ -470,8 +478,8 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
         #[doc(hidden)]
         #[macro_export]
         macro_rules! #courier {
-            (($fwd:path ; $($rest:tt)*)) => {
-                $fwd ! { { #schema_tokens } ; $($rest)* }
+            (($($fwd:tt)::+ ; $($rest:tt)*)) => {
+                $($fwd)::+ ! { { #schema_tokens } ; $($rest)* }
             };
         }
         #[doc(hidden)]
@@ -559,7 +567,7 @@ fn expand_implement(imp: &ImplementInput) -> syn::Result<TokenStream2> {
     prefix.segments.pop();
     let prefix_ts = path_tokens(&prefix);
     let full_ts = path_tokens(&imp.pattern_path);
-    let rt = runtime_path();
+    let rt = runtime_target();
     let store = &imp.store;
     let bindings_ts = grammar::bindings_tokens(&imp.bindings);
     let out = quote! {
@@ -579,10 +587,12 @@ fn expand_implement(imp: &ImplementInput) -> syn::Result<TokenStream2> {
 
 /// Full state riding through the resolution chain, inside the courier's
 /// rest tail. `roots` is the queue of registration couriers still to visit
-/// (in first-occurrence order over the schema's arrows); `metas` the tuples
-/// collected so far — `metas[i]` belongs to the i-th root of that order.
+/// (in first-occurrence order over the schema's arrows, each already
+/// resolved to its absolute path by the declaring-crate resolver — see
+/// [`resolve_schema_path`]); `metas` the tuples collected so far —
+/// `metas[i]` belongs to the i-th root of that order.
 pub(crate) struct ChainConfig {
-    pub(crate) schema: SchemaBody,
+    pub(crate) schema: grammar::PackagedSchema,
     /// The pattern path as written in `implement!` (prefix + pattern name).
     pub(crate) pattern_path: Path,
     pub(crate) store: Ident,
@@ -592,12 +602,21 @@ pub(crate) struct ChainConfig {
 }
 
 enum GenInput {
-    /// `{ schema } ; @pattern { P } ; Store { bindings }` — fresh from the
-    /// schema courier: parse, validate, start the resolution chain.
-    Stage1 { schema: SchemaBody, pattern_path: Path, store: Ident, bindings: Vec<Binding> },
+    /// `{ ("pkg", { schema }) } ; @pattern { P } ; Store { bindings }` —
+    /// fresh from the schema courier: parse, validate, start the resolution
+    /// chain. (A composed pattern's courier forwards an `instances:`-headed
+    /// schema; that dispatch arrives with `compose_pattern!` in step 5.)
+    Stage1 { schema: grammar::PackagedSchema, pattern_path: Path, store: Ident, bindings: Vec<Binding> },
     /// `{ meta tuple } ; @config { ... }` — one registration courier hop:
     /// the tuple just arrived; the config carries the remaining queue.
     ChainStep { meta: RootMeta, config: ChainConfig },
+}
+
+/// Parse the schema group riding a courier payload: a flat pattern's rides
+/// packaged as `("pkg", { body })`; peek the first token to tell. (Step 5
+/// extends this to composed schemas, headed `instances:`.)
+fn parse_schema_group(group: proc_macro2::Group) -> syn::Result<grammar::PackagedSchema> {
+    syn::parse2(group.stream())
 }
 
 impl Parse for GenInput {
@@ -611,7 +630,7 @@ impl Parse for GenInput {
         let kw: Ident = input.parse()?;
         match kw.to_string().as_str() {
             "pattern" => {
-                let schema = syn::parse2(first.stream())?;
+                let schema = parse_schema_group(first)?;
                 let pcontent;
                 braced!(pcontent in input);
                 let pattern_path = pcontent.parse()?;
@@ -634,7 +653,7 @@ fn parse_chain_config(input: ParseStream) -> syn::Result<ChainConfig> {
     let content;
     braced!(content in input);
     let schema_group: proc_macro2::Group = content.parse()?;
-    let schema = syn::parse2(schema_group.stream())?;
+    let schema = parse_schema_group(schema_group)?;
     content.parse::<Token![;]>()?;
     content.parse::<Token![@]>()?;
     let kw: Ident = content.parse()?;
@@ -681,11 +700,12 @@ fn parse_chain_config(input: ParseStream) -> syn::Result<ChainConfig> {
     Ok(ChainConfig { schema, pattern_path, store, bindings, roots, metas })
 }
 
-/// The chain state's *content*, flat: `{ schema } ; @pattern { P } ;
-/// Store { bindings } ; @roots [ .. ] ; @meta [ .. ]`. Callers wrap it in
-/// the one delimiter group the courier grammar requires (`@config { .. }`).
+/// The chain state's *content*, flat: `{ ("pkg", { schema }) } ; @pattern
+/// { P } ; Store { bindings } ; @roots [ .. ] ; @meta [ .. ]`. Callers wrap
+/// it in the one delimiter group the courier grammar requires
+/// (`@config { .. }`).
 fn chain_config_tokens(config: &ChainConfig) -> TokenStream2 {
-    let schema_ts = schema_body_tokens(&config.schema);
+    let schema_ts = grammar::packaged_schema_tokens(&config.schema);
     let mp = path_tokens(&config.pattern_path);
     let store = &config.store;
     let bindings_ts = grammar::bindings_tokens(&config.bindings);
@@ -739,23 +759,24 @@ fn expand_gen(gen: GenInput) -> syn::Result<TokenStream2> {
 /// still carry the user's spans here), queue the unique root patterns, and
 /// emit the first registration-courier hop.
 fn expand_stage1(
-    schema: SchemaBody,
+    schema: grammar::PackagedSchema,
     pattern_path: Path,
     store: Ident,
     bindings: Vec<Binding>,
 ) -> syn::Result<TokenStream2> {
-    if let Some(e) = schema.entities.iter().find(|e| e.open) {
+    let body = &schema.body;
+    if let Some(e) = body.entities.iter().find(|e| e.open) {
         // Spans have degraded to the call site by now; quote the tokens.
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             format!(
-                "pattern `{}` declares open entity `{}`; open entities are closed by `compose_pattern!` (M2), not `implement!`",
+                "pattern `{}` declares open entity `{}`; open entities are closed by `compose_pattern!`, not `implement!`",
                 pattern_name(&pattern_path),
                 e.name
             ),
         ));
     }
-    if let Some(a) = schema.arrows.iter().find(|a| a.inst.is_none()) {
+    if let Some(a) = body.arrows.iter().find(|a| a.inst.is_none()) {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             format!(
@@ -789,7 +810,7 @@ fn expand_stage1(
                 ),
             ));
         }
-        match schema.arrows.iter().find(|a| a.name == b.arrow) {
+        match body.arrows.iter().find(|a| a.name == b.arrow) {
             None => {
                 return Err(syn::Error::new(
                     b.arrow.span(),
@@ -814,15 +835,11 @@ fn expand_stage1(
         }
     }
 
-    // Queue the unique instantiation roots, in first-occurrence order.
-    let mut roots: Vec<Path> = Vec::new();
-    for a in &schema.arrows {
-        let p = a.inst.as_ref().unwrap();
-        let key = path_tokens(p).to_string();
-        if !roots.iter().any(|r| path_tokens(r).to_string() == key) {
-            roots.push(p.clone());
-        }
-    }
+    // Queue the unique instantiation roots, in first-occurrence order,
+    // resolved to their absolute paths by the declaring-crate resolver (the
+    // resolution also fails here, with a clean message, when the implementing
+    // crate lacks a direct dependency on every member's declaring crate).
+    let roots = resolved_roots(&schema)?;
 
     let config = ChainConfig { schema, pattern_path, store, bindings, roots, metas: Vec::new() };
     advance_chain(config)
@@ -841,6 +858,9 @@ fn advance_chain(mut config: ChainConfig) -> syn::Result<TokenStream2> {
 }
 
 fn emit_hop(root: &Path, config: ChainConfig) -> syn::Result<TokenStream2> {
+    // `root` is already resolver-absolute (stage1 resolved the queue), so the
+    // registration courier's `pub use` prefix needs no further resolution —
+    // it is the module holding the root `pattern!` invocation.
     let last = root.segments.last().unwrap();
     if !matches!(last.arguments, syn::PathArguments::None) {
         return Err(syn::Error::new(
@@ -848,9 +868,6 @@ fn emit_hop(root: &Path, config: ChainConfig) -> syn::Result<TokenStream2> {
             format!("root path `{}` must end in a plain ident", path_tokens(root)),
         ));
     }
-    // The registration courier's `pub use` landed in the module holding the
-    // root `pattern!` invocation: the root path's prefix, without the root
-    // pattern's own name. (The trait itself lives at the full path.)
     let mut prefix = root.clone();
     prefix.segments.pop();
     if prefix.segments.is_empty() {
@@ -864,8 +881,8 @@ fn emit_hop(root: &Path, config: ChainConfig) -> syn::Result<TokenStream2> {
         ));
     }
     let courier = format_ident!("__metagraph_pattern_{}", last.ident);
-    let prefixed = resolve_schema_path(&prefix);
-    let rt = runtime_path();
+    let prefixed = path_tokens(&prefix);
+    let rt = runtime_target();
     let cfg = chain_config_tokens(&config);
     Ok(quote! {
         #prefixed::#courier ! {
@@ -897,37 +914,102 @@ pub(crate) fn runtime_path() -> TokenStream2 {
     }
 }
 
-/// Resolve an instantiation source path from the schema DSL against the
-/// `implement!` invocation site: `crate`-rooted and leading-`::` paths pass
-/// through verbatim (declaring-crate-local and explicit-absolute spellings);
-/// anything else (`stdlib::Nodes`) is prefixed with the runtime crate root.
-pub(crate) fn resolve_schema_path(p: &Path) -> TokenStream2 {
-    let crate_rooted = p
-        .segments
-        .first()
-        .map(|s| s.ident == "crate" || s.ident == "self")
-        .unwrap_or(false);
-    if crate_rooted || p.leading_colon.is_some() {
-        return path_tokens(p);
+/// The runtime path as a *courier forwarding target*: same as
+/// [`runtime_path`] minus the leading `::`. Courier transcribers match the
+/// target as `$($fwd:tt)::+` (the spike-pinned form — a `path` fragment
+/// cannot be followed by `!`), and a leading colon is not a token that
+/// matcher accepts. Macro paths need the colons less than item paths do.
+pub(crate) fn runtime_target() -> TokenStream2 {
+    let tts: Vec<_> = runtime_path().into_iter().collect();
+    let starts_colons = matches!(
+        tts.first(),
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ':'
+    );
+    if starts_colons {
+        tts.into_iter().skip(2).collect()
+    } else {
+        tts.into_iter().collect()
     }
-    let rt = runtime_path();
-    let pt = path_tokens(p);
-    quote!(#rt::#pt)
 }
 
-/// Unique instantiation roots of a schema, in first-occurrence order — the
-/// order `metas[i]` is keyed by.
-pub(crate) fn unique_roots(schema: &SchemaBody) -> Vec<Path> {
+// ---------------------------------------------------------------------------
+// The declaring-crate resolver (plans/milestone-2, Open entities)
+// ---------------------------------------------------------------------------
+
+/// Absolute root of the crate that declared a schema, as seen from the crate
+/// being compiled right now (the implement/compose site). `Itself` →
+/// `crate`; a renamed dependency → its local name; no direct dependency → a
+/// clean error naming the declaring package — the resolver's one constraint.
+pub(crate) fn declaring_crate_root(pkg: &str) -> syn::Result<TokenStream2> {
+    // The one package whose `Itself` must NOT spell `crate` is the runtime
+    // crate itself: its doctests are separate crates where `crate::stdlib`
+    // misses, while `::metagraph_exper` resolves everywhere the guaranteed
+    // `extern crate self` alias does (in-crate, doctests, and — via
+    // [`runtime_path`] — through a rename).
+    if pkg == "metagraph-exper" {
+        return Ok(runtime_path());
+    }
+    match proc_macro_crate::crate_name(pkg) {
+        Ok(proc_macro_crate::FoundCrate::Itself) => Ok(quote!(crate)),
+        Ok(proc_macro_crate::FoundCrate::Name(n)) => {
+            let n = Ident::new(&n, proc_macro2::Span::call_site());
+            Ok(quote!(::#n))
+        }
+        Err(e) => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "this pattern was declared by crate `{pkg}`, which the implementing crate does not depend on directly ({e}); add the dependency (a rename is fine) to implement it here"
+            ),
+        )),
+    }
+}
+
+/// Resolve an instantiation-source path from the schema DSL *against the
+/// declaring crate* (whose package name rides beside the schema): the path
+/// was written there, so it means what it means there. Leading-`::` paths
+/// pass verbatim; `crate::`/`self::`-rooted paths swap their head for the
+/// declaring crate's local root; anything else (`stdlib::Nodes`) is prefixed
+/// with it. A bare single-segment path is rejected — the courier it would
+/// name lives in a module, not at the declaring crate's root.
+pub(crate) fn resolve_schema_path(p: &Path, pkg: &str) -> syn::Result<TokenStream2> {
+    if p.leading_colon.is_some() {
+        return Ok(path_tokens(p));
+    }
+    let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+    let root = declaring_crate_root(pkg)?;
+    if first == "crate" || first == "self" {
+        let rest: Vec<&Ident> = p.segments.iter().skip(1).map(|s| &s.ident).collect();
+        return Ok(quote!(#root:: #(#rest)::*));
+    }
+    if p.segments.len() < 2 {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "instantiation source `{}` (in a pattern declared by crate `{pkg}`) is a bare name; roots are addressed by module-qualified paths (e.g. `crate::roots::{}`)",
+                path_tokens(p),
+                p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
+            ),
+        ));
+    }
+    let segs: Vec<&Ident> = p.segments.iter().map(|s| &s.ident).collect();
+    Ok(quote!(#root:: #(#segs)::*))
+}
+
+/// Unique instantiation roots of a packaged schema, in first-occurrence
+/// order over its arrows — the order `metas[i]` is keyed by — each resolved
+/// to its absolute path (dedup is by *resolved* spelling, so `stdlib::Nodes`
+/// and `::metagraph_exper::stdlib::Nodes` in one schema visit one hop).
+pub(crate) fn resolved_roots(schema: &grammar::PackagedSchema) -> syn::Result<Vec<Path>> {
     let mut roots: Vec<Path> = Vec::new();
-    for a in &schema.arrows {
-        if let Some(p) = &a.inst {
-            let key = path_tokens(p).to_string();
-            if !roots.iter().any(|r| path_tokens(r).to_string() == key) {
-                roots.push(p.clone());
-            }
+    for a in &schema.body.arrows {
+        let p = a.inst.as_ref().unwrap();
+        let ts = resolve_schema_path(p, &schema.pkg)?;
+        let key = ts.to_string();
+        if !roots.iter().any(|r| path_tokens(r).to_string() == key) {
+            roots.push(syn::parse2(ts).expect("resolver emits a parseable path"));
         }
     }
-    roots
+    Ok(roots)
 }
 
 

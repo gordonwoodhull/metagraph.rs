@@ -8,10 +8,13 @@
 //! or associated types: `subnodes: stdlib::Nodes` is still called `.nodes()`
 //! and yields `Nodes::Nodes<'a>`.
 //!
-//! Schema paths are resolved at the `implement!` invocation site:
-//! `crate`-rooted and leading-`::` paths pass through verbatim, anything
-//! else (like these `stdlib::…` paths) is prefixed with the runtime crate
-//! root.
+//! Schema paths are resolved against the *declaring* crate (M2's
+//! declaring-crate resolver): `pattern!` bakes `CARGO_PKG_NAME` into the
+//! courier, and the implement/compose site maps it to a local dependency
+//! name — so these `stdlib::…` paths mean `metagraph_exper::stdlib::…`
+//! wherever the pattern travels. Leading-`::` paths pass verbatim;
+//! `crate`-rooted spellings name the declaring crate, not the implement
+//! site.
 
 use metagraph_exper_macros::pattern;
 
