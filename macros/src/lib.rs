@@ -57,6 +57,16 @@ impl Parse for PatternInput {
 /// path and never restates cardinality or associated types — the local
 /// arrow name is an alias; read-side identity comes from the root.
 ///
+/// A **keyed** root declares `key(KeyEntity)` in place of a cardinality:
+/// its trait carries `type Key` and its method takes the key and returns
+/// an `Option` (a keyed arrow is a partial function self×key → target).
+/// An instantiation binds the key sort with the same syntax —
+/// `subnode: SubNodeOf, Subgraph -> SubNode, key(MainNode)` — naming a
+/// local entity whose id type plays the key role. At `implement!` time
+/// a keyed arrow binds `hash_index` (the only keyed-legal backing);
+/// inserting onto a live key panics at the call site, and `validate()`
+/// checks key existence and value liveness afterwards.
+///
 /// ```ignore
 /// pattern! { Nodes { entities: root Graph, Node; arrows { nodes: Graph -> Node, many; } } }
 /// pattern! {
@@ -568,23 +578,62 @@ impl Parse for ComposeInput {
 ///
 /// ```ignore
 /// compose_pattern! {
+///     Nested {
+///         instances:
+///             outer: metagraph_exper::stdlib::Digraph,
+///             inner: metagraph_exper::stdlib::Digraph;
+///         // every outer node is-also an inner graph: inner's arenas
+///         // embed inside each outer-node record (path ids, per-host counts)
+///         inner.Graph <=> outer.Node;
+///     }
+/// }
+///
+/// // Reference fusion closes a member's open entities onto another
+/// // instance's entities (id types unify, records stay separate):
+/// compose_pattern! {
 ///     EdgeInduced {
-///         instances: main: metagraph_exper::stdlib::Digraph, sub: m2_fixtures::shapes::Subgraph;
+///         instances:
+///             main: metagraph_exper::stdlib::Digraph,
+///             sub:  m2_fixtures::shapes::Subgraph;
 ///         sub.MainNode <-> main.Node;
 ///         sub.MainEdge <-> main.Edge;
 ///     }
 /// }
 /// ```
 ///
-/// `<=>` is colocation fusion (one record, summed capabilities);
-/// `<->` is reference fusion (closes an open entity, unifying id types
-/// only). A proc macro cannot read its member patterns' tokens, so this
-/// emits an invocation of the first member's schema courier with the
-/// doc-hidden `__compose_step!` as the forwarding target; each hop appends
-/// one member schema and forwards, and the final hop validates the
-/// composition, mints per-instance markers, and emits the composed
-/// pattern's own courier — after which it is indistinguishable from a
-/// hand-written pattern.
+/// `<=>` is **colocation** fusion — is-also: one record, one arena,
+/// summed capabilities; the instance whose root is colocated into a host
+/// element is *embedded* (its classes live inside the host's records,
+/// addressed by host-anchored path ids; embedding depth is one, a
+/// frontier limit). `<->` is **reference** fusion — it pairs exactly one
+/// *open* entity with one closed entity, unifying their id types without
+/// merging records, so runtime multiplicity is unconstrained and arrows
+/// targeting the pair store ordinary ids. A composition leaves no open
+/// entities: each is closed exactly once.
+///
+/// The result is indistinguishable from a hand-written pattern:
+/// `implement! { comp::Nested as Store { ... } }` with instance-qualified
+/// binding keys. Markers are minted per instance at
+/// `<composition module>::<snake(name)>::markers::<instance>::<Arrow>`
+/// and qualified at call sites where two instances put the same root on
+/// one handle:
+///
+/// ```ignore
+/// <OuterNode<'_> as OutEdges<markers::outer::OutEdges>>::out_edges(&n)
+/// <OuterNode<'_> as OutEdges<markers::chain::Elems>>::out_edges(&e)
+/// ```
+///
+/// A proc macro cannot read its member patterns' tokens, so this emits
+/// an invocation of the first member's schema courier with the doc-hidden
+/// `__compose_step!` as the forwarding target; each hop appends one
+/// member schema (with its declaring crate's package name baked in) and
+/// forwards, and the final hop validates the composition — fusion
+/// endpoints exist, shapes are legal, open entities close exactly once,
+/// colocation classes have one arena placement — then mints markers and
+/// emits the composed pattern's own courier. At `implement!` time each
+/// member's schema paths resolve against its *declaring* crate, so the
+/// implementing crate must depend directly on every member's declaring
+/// crate (renames honored; re-exported patterns are rejected cleanly).
 ///
 /// Note: like `pattern!`, declare compositions in a named module. One
 /// declared at a crate root collides with its courier's `#[macro_export]`
@@ -935,8 +984,23 @@ impl Parse for ImplementInput {
 /// `pattern!` invocation plus the pattern name (`stdlib::Digraph` for
 /// the stdlib's, `crate::shapes::Labeled` for one of yours). `many`
 /// arrows bind explicitly (`arena` vs `intrusive_list` is a real choice
-/// with no safe default); `one` arrows default to `field`; derived
-/// (`:= sum`) arrows take no binding.
+/// with no safe default); `one` arrows default to `field`; keyed arrows
+/// bind `hash_index` (a per-self-object `HashMap`, store-level when the
+/// self is the unfused root); derived (`:= sum`) arrows take no binding.
+///
+/// For a composition, binding keys are instance-qualified and the
+/// generated names follow the collision rules: entity types take the
+/// instance prefix only on collision (`OuterNodeId` beside `NodeId`),
+/// write ops and iterators prefix on cross-instance arrow-name
+/// collisions, and every trait impl is marker-qualified — the markers
+/// live at `<composition module>::<snake(name)>::markers::<instance>`
+/// (e.g. `comp::hierarchy::markers::outer::OutEdges`), spelled with a
+/// turbofish where two instances put the same root on one handle.
+///
+/// The implementing crate must depend directly on the declaring crate of
+/// every member pattern (a renamed dependency is fine); a pattern whose
+/// courier is reached only through a re-export is rejected with a clean
+/// error.
 ///
 /// ```ignore
 /// implement! {
@@ -944,6 +1008,19 @@ impl Parse for ImplementInput {
 ///         nodes:     arena,
 ///         out_edges: intrusive_list,
 ///         in_edges:  intrusive_list,
+///     }
+/// }
+///
+/// // Composed: instance-qualified binding keys.
+/// implement! {
+///     comp::Refinement as RefinementStore {
+///         outer.nodes:     arena,
+///         outer.out_edges: intrusive_list,
+///         outer.in_edges:  intrusive_list,
+///         inner.nodes:     arena,
+///         inner.out_edges: intrusive_list,
+///         inner.in_edges:  intrusive_list,
+///         chain.elems:     intrusive_list,
 ///     }
 /// }
 /// ```
@@ -1522,7 +1599,12 @@ pub(crate) fn resolve_schema_path(p: &Path, pkg: &str) -> syn::Result<TokenStrea
             let rest: Vec<&Ident> = p.segments.iter().skip(1).map(|s| &s.ident).collect();
             let root = match found {
                 // The path names the *current* crate: `crate::` resolves
-                // here regardless of further context.
+                // here regardless of further context — except in a doctest,
+                // where the asking crate is synthetic and only the runtime
+                // package's self-alias spelling reaches the real crate.
+                proc_macro_crate::FoundCrate::Itself if candidate == "metagraph-exper" => {
+                    runtime_path()
+                }
                 proc_macro_crate::FoundCrate::Itself => quote!(crate),
                 proc_macro_crate::FoundCrate::Name(n) => {
                     let n = Ident::new(&n, proc_macro2::Span::call_site());

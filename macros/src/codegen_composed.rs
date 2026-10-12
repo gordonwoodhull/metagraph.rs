@@ -1003,7 +1003,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         };
                         op_names.push(op.to_string());
                         store_impl.extend(quote! {
-                            #[doc = concat!("Insert `member` into `self_id`'s `", stringify!(#arrow_doc), "` list (primitive membership; push-front).")]
+                            #[doc = concat!("Insert `member` into `self_id`'s `", stringify!(#arrow_doc), "` list (instance ", stringify!(#inst_name), "; primitive membership; push-front).")]
                             pub fn #op(&mut self, self_id: #sid, member: #tid) {
                                 self.#hook(self_id, member);
                             }
@@ -1035,7 +1035,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     };
                     op_names.push(op.to_string());
                     store_impl.extend(quote! {
-                        #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc), "` to `value` (field-backed `one` arrow).")]
+                        #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc), "` to `value` (instance ", stringify!(#inst_name), "; field-backed `one` arrow).")]
                         pub fn #op(&mut self, self_id: #sid, value: #tid) {
                             self.#hook(self_id, value);
                         }
@@ -1073,7 +1073,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                                 }
                                 self.#map.insert(key, target);
                             }
-                            #[doc = concat!("Map `key` to `target` in the `", stringify!(#arrow_doc), "` index (root-sourced keyed arrow; no self id).")]
+                            #[doc = concat!("Map `key` to `target` in the `", stringify!(#arrow_doc), "` index (instance ", stringify!(#inst_name), "; root-sourced keyed arrow; no self id).")]
                             pub fn #op(&mut self, key: #kid, target: #vt) {
                                 self.#hook(key, target);
                             }
@@ -1108,7 +1108,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                                 }
                                 #sref.#map.insert(key, target);
                             }
-                            #[doc = concat!("Map `key` to `target` in `self_id`'s `", stringify!(#arrow_doc), "` index.")]
+                            #[doc = concat!("Map `key` to `target` in `self_id`'s `", stringify!(#arrow_doc), "` index (instance ", stringify!(#inst_name), ").")]
                             pub fn #op(&mut self, self_id: #sid, key: #kid, target: #vt) {
                                 self.#hook(self_id, key, target);
                             }
@@ -1170,7 +1170,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     if !classes[sc].owns_records {
                         let map = root_map_of[&(i, d.name.to_string())].clone();
                         store_impl.extend(quote! {
-                            #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (root-sourced; no self id).")]
+                            #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (instance ", stringify!(#inst_name), "; root-sourced; no self id).")]
                             pub fn #getter(&self, key: #kid) -> ::core::option::Option<#vt> {
                                 self.#map.get(&key).copied()
                             }
@@ -1190,7 +1190,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             .expect("hash_index map contributed at collection");
                         let sref = rec_ref_ts(&classes, sc, quote!(self_id));
                         store_impl.extend(quote! {
-                            #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object.")]
+                            #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object (instance ", stringify!(#inst_name), ").")]
                             pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#vt> {
                                 #sref.#map.get(&key).copied()
                             }
@@ -1255,8 +1255,10 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 let sref = rec_ref_ts(&classes, sc, quote!(self_id));
                 let through = &xa.name;
                 let read = &yb.name;
+                let xinst = &members[xi].0;
+                let yinst = &members[yi].0;
                 store_impl.extend(quote! {
-                    #[doc = concat!("Builder read view: the `", stringify!(#read), "` field, where the id arrived through the `", stringify!(#through), "` reference closure.")]
+                    #[doc = concat!("Builder read view: the `", stringify!(#read), "` field (instance ", stringify!(#yinst), "), where the id arrived through the `", stringify!(#through), "` reference closure (instance ", stringify!(#xinst), ").")]
                     pub fn #getter(&self, self_id: #sid) -> #tid {
                         #sref.#field
                     }
