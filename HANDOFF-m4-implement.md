@@ -21,7 +21,7 @@ Done and committed:
   enum (Add/Remove per entity), `add_*`/`remove_*` staging
   (Pending-removal panics), `edit()`, `old()`.
   Tests: tests/tx_stage1.rs (3), compilefail/read_on_ref.rs (E0599).
-- **Step 2** (this commit): tests/tx_staging_panics.rs — 4 should_panic
+- **Step 2** (5bdebc1): tests/tx_staging_panics.rs — 4 should_panic
   tests (foreign stamp, stale stamp, Pending removal, foreign handle).
   Suite green at every commit.
 
@@ -31,7 +31,26 @@ keyed-insert-on-live-key with keyed staging (steps 8/11); a panic can't
 be exercised before its staging call exists. Recorded here per the plan's
 "note it in the step notes".
 
-Not started: steps 3–14.
+- **Step 3** (this commit): `flush(self) -> Result<FlushOutcome,
+  FlushError>` emitted by macros/src/tx.rs from the grown TxModel —
+  per-entity record fields + store fields + intrusive-carry arrows.
+  Pipeline: step 1 removals + range-checked Existing (UnknownOldId /
+  DoubleRemoval), step 2 danglers (kept records per ctor-arg field,
+  attributed to the removal op; staged adds naming removed endpoints,
+  attributed to the naming op; range-guarded — the oob-repro bug),
+  step 3 compaction maps, step 4a skeleton (raw record literals,
+  ctor-arg ids remapped, Option None, containers Default, on_add fired
+  per kept record), 4b intrusive rebuild-by-walk (head at record or
+  store), 4c submission-order replay through the real ctors with
+  per-entity pending tables, step 7 validate (ValidateFailed).
+  Carry classification in codegen.rs: `one`+field shape, `many`+
+  existence, `many`+intrusive head/link shape (exactly two stem
+  `Option<BId>` fields + on_insert — counting_list qualifies);
+  anything else gates the Tx off (no edit()) beside phased/keyed.
+  Violation/FlushError/RecordDesc/FlushReport{per-arena _map}/
+  FlushOutcome emitted per store.
+
+Not started: steps 4–14.
 
 ## Architecture decisions (settled in the survey, keep unless forced)
 
@@ -257,3 +276,26 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 - Step 1 DONE 14a19f1; step 2 DONE (this commit).
 - Handed off after step 2 per Gordon: rest of the plan continues from
   the guide above.
+- Step 3 DONE (this commit): flush emitted from TxModel — the model grew
+  per-entity record fields (ctor-arg/None/Default init), store fields,
+  and intrusive-carry arrows (host record vs store head); codegen
+  classifies each bound arrow's carry and gates the Tx off for an
+  unclassifiable `many` backing (a custom non-list carry) beside the
+  existing phased/keyed gates. Tests: tests/tx_flush.rs (22 — spike 7's
+  tx_koenigsberg 11 + tx_removal minus its 4 staging panics, already
+  step 2's file, plus the oob-repro regression) and
+  tests/tx_flush_shapes.rs (3 smokes: primitive list carry, field
+  danglers, root-headed single chain — the other emitted shapes were
+  compile-only). Suite green incl. trybuild + downstream.
+  Step-3 notes: (a) RecordDesc::Kept carries `{arena, id}` not the
+  decision-7 `Kept(u32)` — a bare u32 is ambiguous in a multi-arena
+  store; the arena rides the desc, not a sixth field. (b) into_edit
+  entry points and their tests land with step 5 (all ports go through
+  edit()); spike 7's 7 direct-build koenigsberg tests are already the
+  M1 suite, unported. (c) honor semantics read from the set-unlink
+  probe but vacuous here — no Set op exists until step 7; the pipeline
+  shape (step-1 eff slot, step-2 honor pass) grows into it.
+  (d) A staged Add for an entity with a primitive-membership list is
+  born UNLISTED in the flush (insertion is not a ctor arg) — asserted
+  in prim_list_carry_and_field_remap; step 6's insert_ staging verbs
+  are where primitive membership is staged.

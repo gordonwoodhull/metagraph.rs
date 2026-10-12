@@ -700,7 +700,7 @@ the probe crate under `/tmp` as the reference implementation.
       ref, `set_` of a `Pending` ref, keyed insert onto a live key
       (two arms: existing entry or staged insert, same host).
       Acceptance: one `should_panic` test each.
-- [ ] 3. Flush against the M1 builder shape (steps 1–5+7; step 6
+- [x] 3. Flush against the M1 builder shape (steps 1–5+7; step 6
       vacuous): range-guarded step 2 over effective endpoints, honor
       semantics, attribution (removal op vs naming op), compact +
       per-arena maps, skeleton sub-order with rebuild-by-walk,

@@ -1826,15 +1826,111 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     out.extend(trait_impls);
 
     // ---- M4: the transaction (write side) ----
-    // Stage-1 gate: flat, non-phased, no keyed bindings (keyed carry and
-    // the phased flush pipeline land with their steps). Unsupported
-    // shapes emit no `Tx` — their `edit()` arrives with the step that
-    // implements their carry.
+    // Stage-3 gate: flat, non-phased, no keyed bindings, and every bound
+    // arrow's carry classifiable (existence, field-one, or the intrusive
+    // head/link shape). Unsupported shapes emit no `Tx` — their `edit()`
+    // arrives with the step that implements their carry.
     if !phased {
         let has_keyed = infos
             .iter()
             .any(|i| i.backing.map(|d| card_of_decl(d) == Cardinality::Keyed).unwrap_or(false));
-        if !has_keyed {
+        // Carry classification, per bound arrow. Existence and field-one
+        // carries ride the entity data (nothing / the ctor-arg fields);
+        // the intrusive carry collects its walk shape. A `many` binding
+        // that is neither existence- nor intrusive-shaped leaves the
+        // store's Tx unemitted (a custom backing whose flush carry this
+        // milestone has not defined).
+        let ty_str = |f: &ContribField| f.ty.to_token_stream().to_string().replace(' ', "");
+        let mut intrusive: Vec<crate::tx::TxIntrusive> = Vec::new();
+        let mut carry_ok = true;
+        for info in &infos {
+            let Some(d) = info.backing else {
+                continue; // `:= sum` arrows are derived reads, never bound
+            };
+            let a = info.decl;
+            match card_of_decl(d) {
+                Cardinality::One => {
+                    // The field backing's shape: exactly one contributed
+                    // field, arrow-formula, plain `BId` (the ctor-arg field
+                    // the ctor loop and the dangler pass read).
+                    let fields: Vec<&ContribField> = contributed_fields(d).collect();
+                    let ok = fields.len() == 1
+                        && fields[0].formula == NameFormula::Arrow
+                        && ty_str(fields[0]) == "BId";
+                    if !ok {
+                        carry_ok = false;
+                        break;
+                    }
+                }
+                Cardinality::Many => {
+                    if d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+                        // Existence: the arena itself is the membership; a
+                        // field-contributing existence backing is not a
+                        // shape the carry knows.
+                        if contributed_fields(d).next().is_some() {
+                            carry_ok = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    // The intrusive shape: a stem-named `Option<BId>` head
+                    // on A (folding to the store at an unfused-root self)
+                    // and a stem-named `Option<BId>` link on B, an insert
+                    // hook, and nothing else contributed.
+                    let a_fields: Vec<&ContribField> = on_clauses(d, OnTarget::A)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let b_fields: Vec<&ContribField> = on_clauses(d, OnTarget::B)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let store_fields_of: Vec<&ContribField> = on_clauses(d, OnTarget::Store)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let ok = a_fields.len() == 1
+                        && b_fields.len() == 1
+                        && store_fields_of.is_empty()
+                        && a_fields[0].formula == NameFormula::Stem
+                        && b_fields[0].formula == NameFormula::Stem
+                        && ty_str(a_fields[0]) == "Option<BId>"
+                        && ty_str(b_fields[0]) == "Option<BId>"
+                        && d.has(|c| matches!(c, Clause::OnInsert { .. }));
+                    if !ok {
+                        carry_ok = false;
+                        break;
+                    }
+                    let root_self = is_root(&a.source);
+                    let stem = link_stem(&a.name);
+                    let head_field = store_overrides
+                        .get(&(a.name.to_string(), a_fields[0].logical.to_string()))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            formula_name(a_fields[0], NameFormula::Stem, &a.name, &stem)
+                        });
+                    let member_link = formula_name(b_fields[0], NameFormula::Stem, &a.name, &stem);
+                    intrusive.push(crate::tx::TxIntrusive {
+                        host: (!root_self).then(|| a.source.clone()),
+                        head_field,
+                        member: a.target.clone(),
+                        member_link,
+                    });
+                }
+                Cardinality::Keyed => {
+                    carry_ok = false; // keyed carry lands with its step
+                    break;
+                }
+            }
+        }
+        if !has_keyed && carry_ok {
+            let arrow_target_of = |arrow: &Ident2| -> Ident2 {
+                infos
+                    .iter()
+                    .find(|i| &i.decl.name == arrow)
+                    .map(|i| i.decl.target.clone())
+                    .expect("a ctor-arg field traces to its arrow")
+            };
             let entities: Vec<crate::tx::TxEntity> = elements
                 .iter()
                 .map(|e| {
@@ -1848,6 +1944,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                         })
                         .map(|i| crate::tx::TxCtorArg {
                             arg: i.decl.name.clone(),
+                            target_entity: i.decl.target.clone(),
                             target_ref_alias: format_ident!("{}Ref", i.decl.target),
                             target_into_trait: format_ident!("Into{}Arg", i.decl.target),
                             target_into_fn: format_ident!(
@@ -1866,18 +1963,56 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                         })
                         .map(|i| format_ident!("__onadd_{}", i.decl.name))
                         .collect();
+                    let fields: Vec<crate::tx::TxField> = rec_fields
+                        [&e.name.to_string()]
+                        .iter()
+                        .map(|cf| {
+                            let init = match &cf.init {
+                                FieldInit::CtorArg(a) => crate::tx::TxFieldInit::CtorArg {
+                                    target: arrow_target_of(a),
+                                },
+                                FieldInit::None_ => crate::tx::TxFieldInit::None_,
+                                FieldInit::New => crate::tx::TxFieldInit::New,
+                            };
+                            crate::tx::TxField { emitted: cf.emitted.clone(), init }
+                        })
+                        .collect();
                     crate::tx::TxEntity {
                         name: e.name.clone(),
                         arena: arena_fld(&e.name),
                         ctor_args,
                         onadd_hooks,
+                        fields,
                     }
                 })
                 .collect();
+            let tx_store_fields: Vec<crate::tx::TxField> = store_fields
+                .iter()
+                .map(|cf| {
+                    let init = match &cf.init {
+                        // A store-level field can never be ctor-fed: the
+                        // ctor-arg clause needs a field on the self record,
+                        // and applicability rejected that at an unfused
+                        // root. The defensive arm names the invariant.
+                        FieldInit::CtorArg(_) => {
+                            return Err(syn::Error::new(
+                                Span::call_site(),
+                                "internal: a store-level field was classified ctor-arg \
+                                 (ctor_arg requires a record self, rejected at an unfused root)",
+                            ));
+                        }
+                        FieldInit::None_ => crate::tx::TxFieldInit::None_,
+                        FieldInit::New => crate::tx::TxFieldInit::New,
+                    };
+                    Ok(crate::tx::TxField { emitted: cf.emitted.clone(), init })
+                })
+                .collect::<syn::Result<_>>()?;
             let model = crate::tx::TxModel {
                 store: store.clone(),
                 rt: crate::runtime_path(),
                 entities,
+                store_fields: tx_store_fields,
+                intrusive,
             };
             out.extend(crate::tx::emit(&model));
         }
