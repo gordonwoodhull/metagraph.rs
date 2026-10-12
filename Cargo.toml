@@ -9,6 +9,8 @@ members = [
     "tests/downstream/composed-renamed",
     "tests/downstream/reexporter",
     "tests/downstream/indirect",
+    "tests/downstream/backing-provider",
+    "tests/downstream/backing-user",
 ]
 
 [package]
