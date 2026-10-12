@@ -1,0 +1,12 @@
+error: arrow `pinned.pin` is `field`-backed into the embedded class `P`; an embedded id needs a host path the constructor argument cannot supply
+  --> tests/compilefail/impl_field_into_embedded.rs:19:1
+   |
+19 | / implement! {
+20 | |     comp::PinnedComp as PinnedStore {
+21 | |         outer.nodes:     arena,
+22 | |         outer.out_edges: intrusive_list,
+...  |
+28 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

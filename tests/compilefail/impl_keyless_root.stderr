@@ -1,0 +1,11 @@
+error: arrow `kk.k` instantiates the keyed root `crate :: roots :: SubNodeOf` but does not bind a key sort (`key(LocalEntity)`)
+  --> tests/compilefail/impl_keyless_root.rs:16:1
+   |
+16 | / implement! {
+17 | |     comp::K as KStore {
+18 | |         kk.k: hash_index,
+19 | |     }
+20 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

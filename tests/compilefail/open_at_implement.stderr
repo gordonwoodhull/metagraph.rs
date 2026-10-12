@@ -1,0 +1,12 @@
+error: pattern `Subgraph` declares open entity `MainNode`; open entities are closed by `compose_pattern!`, not `implement!`
+  --> tests/compilefail/open_at_implement.rs:5:1
+   |
+ 5 | / implement! {
+ 6 | |     m2_fixtures::shapes::Subgraph as SubgraphStore {
+ 7 | |         subnodes:  arena,
+ 8 | |         subedges:  arena,
+...  |
+14 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

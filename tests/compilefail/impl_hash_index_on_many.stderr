@@ -1,0 +1,12 @@
+error: backing `hash_index` has wrong cardinality for arrow `outer.nodes` (a `many` arrow)
+  --> tests/compilefail/impl_hash_index_on_many.rs:21:1
+   |
+21 | / implement! {
+22 | |     comp::H as HStore {
+23 | |         outer.nodes:     hash_index,
+24 | |         outer.out_edges: intrusive_list,
+...  |
+34 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

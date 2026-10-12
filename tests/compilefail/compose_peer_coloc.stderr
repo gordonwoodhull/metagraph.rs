@@ -1,0 +1,12 @@
+error: compose_pattern! `Bad`: colocation class { outer.Node, inner.Node } fuses elements of multiple instances (outer, inner); one id type would index several instances' arenas — the legal cross-instance form is one instance's element hosting another instance's *root*
+  --> tests/compilefail/compose_peer_coloc.rs:8:5
+   |
+ 8 | /     compose_pattern! {
+ 9 | |         Bad {
+10 | |             instances:
+11 | |                 outer: metagraph_exper::stdlib::Digraph,
+...  |
+15 | |     }
+   | |_____^
+   |
+   = note: this error originates in the macro `metagraph_exper::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

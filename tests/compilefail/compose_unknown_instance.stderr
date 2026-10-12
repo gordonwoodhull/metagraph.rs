@@ -1,0 +1,5 @@
+error: compose_pattern! `Bad`: fusion names unknown instance `ghost` (this composition instantiates: main)
+ --> tests/compilefail/compose_unknown_instance.rs:9:27
+  |
+9 |             main.Node <=> ghost.Node;
+  |                           ^^^^^

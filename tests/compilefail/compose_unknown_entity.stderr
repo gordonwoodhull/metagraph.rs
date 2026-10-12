@@ -1,0 +1,5 @@
+error: compose_pattern! `Bad`: fusion names unknown entity `main.Vertex`
+ --> tests/compilefail/compose_unknown_entity.rs:9:32
+  |
+9 |             main.Node <=> main.Vertex;
+  |                                ^^^^^^

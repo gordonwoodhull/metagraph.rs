@@ -1,0 +1,12 @@
+error: compose_pattern! `Bad`: open entity `sub.MainNode` is closed by 2 `<->` fusions (sub.MainNode <-> outer.Node, sub.MainNode <-> inner.Node); exactly one is allowed — double closure would unify two closed id types through one open entity
+  --> tests/compilefail/compose_double_closure.rs:6:5
+   |
+ 6 | /     compose_pattern! {
+ 7 | |         Bad {
+ 8 | |             instances:
+ 9 | |                 outer: metagraph_exper::stdlib::Digraph,
+...  |
+15 | |     }
+   | |_____^
+   |
+   = note: this error originates in the macro `m2_fixtures::shapes::__metagraph_pattern_Subgraph` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

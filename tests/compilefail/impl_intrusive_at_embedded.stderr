@@ -1,0 +1,12 @@
+error: arrow `chained.cs` is `intrusive_list`-backed and sourced at the embedded class `N` (frontier limit: intrusive arrows sourced at embedded classes)
+  --> tests/compilefail/impl_intrusive_at_embedded.rs:19:1
+   |
+19 | / implement! {
+20 | |     comp::ChainedComp as ChainedStore {
+21 | |         outer.nodes:     arena,
+22 | |         outer.out_edges: intrusive_list,
+...  |
+27 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

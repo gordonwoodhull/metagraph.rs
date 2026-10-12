@@ -1,0 +1,5 @@
+error: compose_pattern! `Bad`: `outer.Graph <-> inner.Node`: a root-marked entity owns no id type to unify
+  --> tests/compilefail/compose_ref_on_root.rs:11:19
+   |
+11 |             outer.Graph <-> inner.Node;
+   |                   ^^^^^

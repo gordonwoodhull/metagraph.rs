@@ -1,0 +1,12 @@
+error: backing `arena` has wrong cardinality for arrow `sub.subnode` (a `keyed` arrow)
+  --> tests/compilefail/impl_keyed_wrong_backing.rs:21:1
+   |
+21 | / implement! {
+22 | |     comp::H as HStore {
+23 | |         outer.nodes:     arena,
+24 | |         outer.out_edges: intrusive_list,
+...  |
+33 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

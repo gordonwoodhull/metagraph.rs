@@ -1,0 +1,5 @@
+error: compose_pattern! `Bad`: `outer.Node <-> inner.Node`: reference fusion pairs exactly one open entity with one closed entity
+  --> tests/compilefail/compose_ref_two_closed.rs:12:19
+   |
+12 |             outer.Node <-> inner.Node;
+   |                   ^^^^

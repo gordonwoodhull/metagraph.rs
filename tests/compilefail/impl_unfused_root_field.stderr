@@ -1,0 +1,10 @@
+error: arrow `rs.r` is sourced at the root-marked entity `G`, which is unfused; the `field` backing needs a self record, and an unfused root owns none (it *is* the store)
+  --> tests/compilefail/impl_unfused_root_field.rs:15:1
+   |
+15 | / implement! {
+16 | |     comp::RootComp as RootStore {
+...  |
+19 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

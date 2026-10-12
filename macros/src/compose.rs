@@ -153,10 +153,7 @@ fn open_entities_closed_once(c: &ComposedSchema) -> syn::Result<()> {
                             || (f.rhs.0 == *inst && f.rhs.1 == e.name))
                 })
                 .map(|f| {
-                    format!(
-                        "{}.{:?} <-> {}.{:?}",
-                        f.lhs.0, f.lhs.1, f.rhs.0, f.rhs.1
-                    )
+                    format!("{}.{} <-> {}.{}", f.lhs.0, f.lhs.1, f.rhs.0, f.rhs.1)
                 })
                 .collect();
             match closures.len() {

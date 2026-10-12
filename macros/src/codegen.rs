@@ -583,14 +583,14 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     });
                 } else {
                     // `by`-derived membership: consistency against the
-                    // determining field covers exclusivity (a determinant is
-                    // single-valued, so consistent membership cannot repeat),
-                    // plus coverage — every record must sit in the list its
-                    // determinant names.
+                    // determining field plus exactly-once coverage — every
+                    // record must appear in the list its determinant names
+                    // (membership anywhere else already contradicts the
+                    // determinant, so a per-determinant seen set suffices).
                     let detf = d.by.as_ref().unwrap();
                     checks.push(quote! {
                         {
-                            let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                            let mut seen_by_self: ::std::collections::HashMap<#sid, ::std::collections::HashSet<#tid>> = ::std::collections::HashMap::new();
                             for (si, srec) in self.#s_arena.iter().enumerate() {
                                 let self_id = #sid(si as u32);
                                 let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
@@ -613,19 +613,16 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                                         ));
                                         break;
                                     }
-                                    if !seen.insert(mid) {
-                                        errs.push(::std::format!(
-                                            "arrow `{}`: {:?} appears in more than one list — shared membership",
-                                            stringify!(#arrow_doc_name), mid,
-                                        ));
-                                        break;
-                                    }
+                                    seen_by_self.entry(self_id).or_default().insert(mid);
                                     cur = mrec.#next;
                                 }
                             }
                             for (ti, trec) in self.#t_arena.iter().enumerate() {
                                 let mid = #tid(ti as u32);
-                                if !seen.contains(&mid) {
+                                let listed = seen_by_self
+                                    .get(&trec.#detf)
+                                    .is_some_and(|members| members.contains(&mid));
+                                if !listed {
                                     errs.push(::std::format!(
                                         "arrow `{}`: {:?} is missing from the list of its `{}` ({:?})",
                                         stringify!(#arrow_doc_name), mid, stringify!(#detf), trec.#detf,

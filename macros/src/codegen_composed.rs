@@ -1460,12 +1460,14 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         });
                     } else {
                         // `by`-derived membership: consistency against the
-                        // determining field covers exclusivity (a determinant
-                        // is single-valued, so consistent membership cannot
-                        // repeat), plus coverage — every record must sit in
-                        // the list its determinant names.
+                        // determining field plus exactly-once coverage —
+                        // every record must appear in the list its
+                        // determinant names (membership anywhere else
+                        // already contradicts the determinant, so a
+                        // per-determinant seen set suffices).
                         let det_name = d.by.as_ref().unwrap();
                         let detf = field_of_arrow[&(i, det_name.to_string())].clone();
+                        let sid_ty = classes[sc].id_name.clone();
                         let per_rec = enum_recs(sc, quote! {
                             let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
                             let mut cur = srec.#head_field;
@@ -1487,18 +1489,15 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                                     ));
                                     break;
                                 }
-                                if !seen.insert(mid) {
-                                    errs.push(::std::format!(
-                                        "arrow `{}.{}`: {:?} appears in more than one list — shared membership",
-                                        #label, mid,
-                                    ));
-                                    break;
-                                }
+                                seen_by_self.entry(self_id).or_default().insert(mid);
                                 cur = mrec.#next_field;
                             }
                         });
                         let coverage = enum_recs(tc, quote! {
-                            if !seen.contains(&self_id) {
+                            let listed = seen_by_self
+                                .get(&srec.#detf)
+                                .is_some_and(|members| members.contains(&self_id));
+                            if !listed {
                                 errs.push(::std::format!(
                                     "arrow `{}.{}`: {:?} is missing from the list of its `{}` ({:?})",
                                     #label, self_id, stringify!(#det_name), srec.#detf,
@@ -1507,7 +1506,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         });
                         validate_checks.push(quote! {
                             {
-                                let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                                let mut seen_by_self: ::std::collections::HashMap<#sid_ty, ::std::collections::HashSet<#tid>> = ::std::collections::HashMap::new();
                                 #per_rec
                                 #coverage
                             }

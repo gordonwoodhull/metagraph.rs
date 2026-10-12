@@ -1,0 +1,12 @@
+error: compose_pattern! `Bad`: open entity `sub.MainNode` is not closed by any `<->` fusion — composition leaves no open entities
+  --> tests/compilefail/compose_unclosed_open.rs:6:5
+   |
+ 6 | /     compose_pattern! {
+ 7 | |         Bad {
+ 8 | |             instances:
+ 9 | |                 main: metagraph_exper::stdlib::Digraph,
+...  |
+13 | |     }
+   | |_____^
+   |
+   = note: this error originates in the macro `m2_fixtures::shapes::__metagraph_pattern_Subgraph` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

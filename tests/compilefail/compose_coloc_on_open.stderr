@@ -1,0 +1,5 @@
+error: compose_pattern! `Bad`: `sub.MainNode <=> main.Node`: open entities are closed by `<->` only, never `<=>`
+  --> tests/compilefail/compose_coloc_on_open.rs:12:17
+   |
+12 |             sub.MainNode <=> main.Node;
+   |                 ^^^^^^^^

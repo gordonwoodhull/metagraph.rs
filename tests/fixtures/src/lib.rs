@@ -93,3 +93,67 @@ pub mod shapes {
         }
     }
 }
+
+/// Minimal shapes for the M2 step-13 negative tests: patterns that exist
+/// so implement!-time checks have small legal compositions to reject.
+pub mod neg {
+    use metagraph_exper::pattern;
+
+    // `pin` is a `one` arrow into the closed element `P`: under
+    // `outer.Node <=> pinned.G` its field would have to hold an embedded
+    // (host-anchored) id, which a constructor argument cannot supply.
+    pattern! {
+        Pinned {
+            entities: root G, N, P;
+            arrows {
+                g:   metagraph_exper::stdlib::Nodes,  G -> N;
+                pin: metagraph_exper::stdlib::Source, N -> P;
+            }
+        }
+    }
+
+    // `cs` is a `many` arrow sourced at the closed element `N`: under
+    // `outer.Node <=> chained.G` its intrusive head would live on an
+    // embedded record (the frontier limit).
+    pattern! {
+        Chained {
+            entities: root G, N, C;
+            arrows {
+                g:  metagraph_exper::stdlib::Nodes,    G -> N;
+                cs: metagraph_exper::stdlib::OutEdges, N -> C;
+            }
+        }
+    }
+
+    // `r` is a `one` arrow sourced at the pattern's root: unfused, the
+    // field backing has no self record to live on.
+    pattern! {
+        RootSourced {
+            entities: root G, P;
+            arrows { r: metagraph_exper::stdlib::Source, G -> P; }
+        }
+    }
+
+    // Instantiated under names `p` and `p_q`, its two element-sourced
+    // arrows make the store method `insert_p_q_r` ambiguous (instance p's
+    // arrow `q_r` vs instance p_q's arrow `r`) — the generated-name
+    // collision check.
+    pattern! {
+        Collide {
+            entities: root G, A, B, X;
+            arrows {
+                m:   metagraph_exper::stdlib::Nodes,  G -> X;
+                q_r: metagraph_exper::stdlib::OutEdges, A -> B;
+                r:   metagraph_exper::stdlib::Edges,    A -> X;
+            }
+        }
+    }
+
+    // Instantiates the keyed root `SubNodeOf` without binding a key sort.
+    pattern! {
+        Keyless {
+            entities: root G, N, M;
+            arrows { k: crate::roots::SubNodeOf, G -> N; }
+        }
+    }
+}

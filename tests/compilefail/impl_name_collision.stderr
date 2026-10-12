@@ -1,0 +1,12 @@
+error: generated name `insert_p_q_r` (store method) collides with `insert_p_q_r` (store method); rename an entity, arrow, or instance
+  --> tests/compilefail/impl_name_collision.rs:18:1
+   |
+18 | / implement! {
+19 | |     comp::Two as TwoStore {
+20 | |         p.m:     arena,
+21 | |         p.q_r:   intrusive_list,
+...  |
+27 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)
