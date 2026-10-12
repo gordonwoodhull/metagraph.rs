@@ -560,9 +560,11 @@ refs already handed out, because nothing is applied until flush.
 - **Backings (M1–M3)**: the backings are unchanged, but the hook
   interface grows what M2's round-3 caveat predicted: `set_` requires
   per-backing *delete* hooks (un-linking a `by`-derived intrusive
-  membership before re-linking) and a field-write hook — M3's clause
-  vocabulary has `ctor_arg` and `on_insert` but no write-after-
-  construction clause. The growth is per backing kind and is
+  membership before re-linking). The field-write half is M2's
+  deliverable (M2's builder shape moves field writes behind named
+  hooks; M3's field declaration notes "set_-time re-pointing is M4
+  vocabulary") — M4's growth beyond it is the delete verb and the
+  re-point orchestration. The growth is per backing kind and is
   probe-verified (/tmp/m4-probe-set-unlink): a `by`-derived intrusive
   list gains `unlink_<list>_hook` (walk-and-splice, O(list length),
   correct at head and tail; a `by` on both endpoints of a mutable
