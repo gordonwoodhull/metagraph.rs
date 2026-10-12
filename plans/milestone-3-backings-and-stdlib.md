@@ -48,7 +48,7 @@ uniform across all backings.
 | field's field-on-self-record, constructor arg, direct read | (a) — the `ctor_arg` clause | M1 backings table |
 | arena: no fields, no hooks, existence membership, iterator over the target arena | (a), including the declared requirement `hosts_arena` | M1 backings table |
 | hash_index map placement: root-level self record, host-embedded record, or store | (a) — contributions target the self record, per the three-case self taxonomy (placement rules below) | M1 naming rule; spike 11 (host record); edge-induced probe (store-level) |
-| per-backing validate checks (key existence, value-in-arena, link well-formedness, membership consistency, partition, CSR offsets) | (a) — the validate clause (below) | M2 canonical inventory; spike 4; edge-induced probe; spike 6 |
+| per-backing validate checks (key existence, value-in-arena, value-host agreement, link well-formedness, membership consistency, partition, CSR offsets) | (a) — the validate clause (below) | M2 canonical inventory; spike 4; edge-induced probe; spike 6 |
 | placement computation; entity kits (`Id(pub u32)`, compound path ids under embedding); hand-written handle `Eq`/`Hash` by (store pointer, id); the function-per-hook shape; stem-namespacing and collision prefixing of contributed names | (b) — uniform, backing-independent | M2 placement rule; M2 ("`NodeId`'s `pub u32` stays — the tests depend on it"); spike 11 finding 4 |
 | arena bound to an arrow whose target's arena is hosted elsewhere | (a) — arena's declared requirement (`hosts_arena`) | M2 frontier; Hierarchy is the legal shape |
 | intrusive sourced at an embedded class | (b) — uniform restriction: contributed fields locate only on root-level classes or the store in M3. Separately, intrusive_list declares the stronger (a) predicate `direct_records` on its *endpoints* (a different condition with a different extension — hash_index's host-embedded map legally sits on an embedded configuration) | M2 frontier |
@@ -188,8 +188,10 @@ backing! {
         lookup(a, k) { map_from(a).get(&k).copied() }
         validate {          // every self record's map, wherever placed:
             for m in maps(A) {
-                /* per entry (k, v): key existence (idx(k) < arena_len(K))
-                   and value-in-arena (placement-correct containment of v),
+                /* per entry (k, v): key existence (idx(k) < arena_len(K)),
+                   value-in-arena (placement-correct containment of v), and
+                   value-host agreement (v's host component names the host
+                   whose map this is),
                    naming offending ids in the message */
             }
         }
@@ -322,7 +324,12 @@ clause must reproduce the checks the fixed-table era hard-coded.
 
 - field: endpoint-in-range over its contributed field.
 - arena: nothing — existence cannot dangle.
-- hash_index: key existence and value-in-arena, naming offending ids in
+- hash_index: key existence, value-in-arena, and value-host agreement
+  (an embedded-target map holds host-anchored path ids; a value whose
+  host component names a *different* host record is in-bounds in its
+  own host's arena, so value-in-arena alone passes it — spike 11's
+  `validate` needed this third check, and M4's flush runs exactly this
+  inventory), naming offending ids in
   the message (the edge-induced probe's style). Key uniqueness is not an
   emitted check — a per-self `HashMap` cannot hold two values for one
   key, and a plain insert silently overwrites with `validate()` still

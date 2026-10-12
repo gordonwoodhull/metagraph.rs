@@ -24,7 +24,8 @@ nested staging, and induction remains uncompiled.
   hook function over `&mut` store state, and the `add_*` constructors are
   thin orchestration (M1 commits to both names and shape).
 - Validation has a named boundary (`validate()`), with M2's canonical
-  inventory: key existence and value-in-arena (key uniqueness per self
+  inventory: key existence, value-in-arena, and value-host agreement
+  (key uniqueness per self
   object is not a runtime check — it is enforced where the op is
   submitted: the builder and the staging call reject a live key, M2's
   keyed section) — and, per backing, **structural checks** (endpoint
@@ -146,7 +147,8 @@ continue with the new metagraph. Two entry points support this:
      M3 constraint annotations (`requires_compaction_at_boundary`,
      `freeze_scope: per_store`, `read_precondition: post_compaction`)
      state this per backing.
-  7. **`validate()`**: key existence, value-in-arena, and each backing's
+  7. **`validate()`**: key existence, value-in-arena, value-host
+     agreement, and each backing's
      structural checks — M2's canonical inventory (premises, above; key
      uniqueness is enforced at staging, not here).
   Order contracts: kept elements keep their relative iteration order; new
@@ -328,7 +330,7 @@ Loading a metagraph from external data is not a separate path: a loader
 drives the builder. Referential integrity is enforced by construction —
 constructor arguments are typed ids, so a dangling endpoint is
 inexpressible rather than rejected — and by the flush validation boundary
-(key existence and value-in-arena) for what types can't see. Data formats and
+(key existence, value-in-arena, value-host agreement) for what types can't see. Data formats and
 their codegen are M5+ introspection territory; all M4 needs is that the
 loader and the hand builder share one funnel.
 
