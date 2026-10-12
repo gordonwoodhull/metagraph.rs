@@ -76,6 +76,33 @@ backing! {
             rec(b).next = rec(a).first;
             rec(a).first = Some(b);
         }
+        // The total delete verb (M4's `set_` re-pointing lowers through
+        // it): walk-and-splice, O(list length), correct at head and
+        // tail. `a` is an explicit argument, never read from a field —
+        // the point is to remove membership from the list named
+        // independently of any determinant. Zeroes `b`'s link on
+        // success so the unlinked record carries no stale pointer, and
+        // returns whether `b` was found — absence is a legitimate
+        // answer (flush can hold a kept record currently in no list),
+        // never a panic (probe-verified, /tmp/m4-probe-set-unlink).
+        on_unlink(a, b) {
+            let mut prev: Option<BId> = None;
+            let mut cur = rec(a).first;
+            while let Some(c) = cur {
+                let next = rec(c).next;
+                if c == b {
+                    match prev {
+                        None => rec(a).first = next,
+                        Some(p) => rec(p).next = next,
+                    }
+                    rec(b).next = None;
+                    return true;
+                }
+                prev = Some(c);
+                cur = next;
+            }
+            false
+        }
         iterate(a) { Walk { cur: rec(a).first } }
         advance(w) {
             let id = w.cur?;

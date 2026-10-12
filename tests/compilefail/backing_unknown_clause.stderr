@@ -1,4 +1,4 @@
-error: unknown clause `frobnicate` in backing declaration (expected one of: `on A`/`on B`/`on store`, `ctor_arg`, `read(a)`, `lookup(a, k)`, `iter Walk`, `iterate(a)`, `advance(w)`, `on_insert(..)`, `on_add(a)`, `compact`, `validate [by|primitive]`, `membership: existence`, `requires: ..`, `contract: ..`, `iteration_order: ..`, `phase: ..`)
+error: unknown clause `frobnicate` in backing declaration (expected one of: `on A`/`on B`/`on store`, `ctor_arg`, `read(a)`, `lookup(a, k)`, `iter Walk`, `iterate(a)`, `advance(w)`, `on_insert(..)`, `on_unlink(a, b)`, `on_add(a)`, `compact`, `validate [by|primitive]`, `membership: existence`, `requires: ..`, `contract: ..`, `iteration_order: ..`, `phase: ..`)
   --> tests/compilefail/backing_unknown_clause.rs:12:13
    |
 12 |             frobnicate

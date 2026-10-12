@@ -323,6 +323,7 @@ pub(crate) fn body_of<'a>(decl: &'a BackingDecl, f: fn(&Clause) -> bool) -> Opti
         | Clause::Iterate { body, .. }
         | Clause::Advance { body, .. }
         | Clause::OnInsert { body, .. }
+        | Clause::OnUnlink { body, .. }
         | Clause::OnAdd { body, .. }
         | Clause::Compact { body, .. }
         | Clause::Validate { body, .. } => body,
@@ -955,6 +956,38 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     }
                 });
             }
+        }
+
+        // on_unlink hook: the total delete verb (M4's `set_` re-pointing
+        // lowers through it). Signature mirrors on_insert minus the key;
+        // the body's tail is the bool.
+        if let Some(body) = body_of(d, |c| matches!(c, Clause::OnUnlink { .. })) {
+            let d_name = &d.name;
+            let hook = format_ident!("__unlink_{}", a.name);
+            let ida = id_ty(&a.source);
+            let idb = id_ty(&a.target);
+            let mut roles = FlatRoles::new(d, a, root_self, a.target.clone(), &store_overrides);
+            if root_self {
+                roles = roles.with_a(quote!(()));
+            }
+            let body_rw = roles::rewrite(body, &roles);
+            let scaffolds = scaffold_lets(body, &label, None, false);
+            let sig = if root_self {
+                let b = Ident2::new("b", Span::mixed_site());
+                quote!(#b: #idb)
+            } else {
+                let a = Ident2::new("a", Span::mixed_site());
+                let b = Ident2::new("b", Span::mixed_site());
+                quote!(#a: #ida, #b: #idb)
+            };
+            hook_impls.extend(quote! {
+                #[doc(hidden)]
+                #[doc = concat!("unlink hook of arrow `", stringify!(#arrow_doc_name), "` (backing `", stringify!(#d_name), "`): total — removes `b` from `a`'s list and returns whether it was there")]
+                fn #hook(&mut self, #sig) -> bool {
+                    #scaffolds
+                    #body_rw
+                }
+            });
         }
 
         // Field-write hook + `set_` op: the single write path after

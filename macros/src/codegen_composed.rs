@@ -1847,6 +1847,41 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 }
             }
 
+            // on_unlink hook: the total delete verb (M4's `set_`
+            // re-pointing lowers through it), always instance-qualified.
+            // Signature mirrors on_insert minus the key; the body's tail
+            // is the bool.
+            if let Some(body) = body_of(d, |c| matches!(c, Clause::OnUnlink { .. })) {
+                let backing_name = &d.name;
+                let hook = format_ident!("__unlink_{}_{}", inst_snake, a.name);
+                let class_of = class_of_arrow(i, a)?;
+                let mut roles =
+                    ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, root_self, classes[tc].name.clone())
+                        .at(quote!(self));
+                if root_self {
+                    roles = roles.with_a(quote!(()));
+                }
+                let body_rw = roles::rewrite(body, &roles);
+                let label = format!("arrow `{inst_name}.{}`", a.name);
+                let scaffolds = scaffold_lets(body, &label, None, false);
+                let sig = if root_self {
+                    let b = Ident2::new("b", Span::mixed_site());
+                    quote!(#b: #tid)
+                } else {
+                    let aa = Ident2::new("a", Span::mixed_site());
+                    let b = Ident2::new("b", Span::mixed_site());
+                    quote!(#aa: #sid, #b: #tid)
+                };
+                store_impl_build.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("unlink hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`): total — removes `b` from `a`'s list and returns whether it was there")]
+                    fn #hook(&mut self, #sig) -> bool {
+                        #scaffolds
+                        #body_rw
+                    }
+                });
+            }
+
             // Field-write hook + `set_` op: the single write path after
             // construction for a `ctor_arg`-fed field (M4's flush replays
             // through it).

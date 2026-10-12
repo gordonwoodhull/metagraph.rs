@@ -146,6 +146,9 @@ pub enum Clause {
     Advance { body: TokenStream2, span: proc_macro2::Span },
     /// `on_insert(a, b) { .. }` (many) / `on_insert(a, k, b) { .. }` (keyed).
     OnInsert { keyed: bool, body: TokenStream2, span: proc_macro2::Span },
+    /// `on_unlink(a, b) { .. }` — the total delete hook; the body returns
+    /// whether the record was found (absence is legitimate, never a panic).
+    OnUnlink { body: TokenStream2, span: proc_macro2::Span },
     /// `on_add(a) { .. }` — per-add growth of store-level per-self state.
     OnAdd { body: TokenStream2, span: proc_macro2::Span },
     /// `compact { .. }` — the compaction body, legal only on phased backings.
@@ -177,6 +180,7 @@ impl Clause {
             Clause::Iterate { .. } => "iterate",
             Clause::Advance { .. } => "advance",
             Clause::OnInsert { .. } => "on_insert",
+            Clause::OnUnlink { .. } => "on_unlink",
             Clause::OnAdd { .. } => "on_add",
             Clause::Compact { .. } => "compact",
             Clause::Validate { variant, .. } => match variant {
@@ -520,6 +524,31 @@ impl Parse for Clause {
                 };
                 Ok(Clause::OnInsert { keyed, body, span })
             }
+            "on_unlink" => {
+                let content;
+                syn::parenthesized!(content in input);
+                let p: Ident = content.parse()?;
+                if p != "a" {
+                    return Err(syn::Error::new(
+                        p.span(),
+                        "`on_unlink`'s first parameter is the self id `a` (write `on_unlink(a, b)`)",
+                    ));
+                }
+                content.parse::<Token![,]>()?;
+                let b_param: Ident = content.parse()?;
+                if b_param != "b" {
+                    return Err(syn::Error::new(
+                        b_param.span(),
+                        "`on_unlink`'s second parameter is the target id `b` (write `on_unlink(a, b)`)",
+                    ));
+                }
+                let body: TokenStream2 = {
+                    let content;
+                    braced!(content in input);
+                    content.parse()?
+                };
+                Ok(Clause::OnUnlink { body, span })
+            }
             "on_add" => {
                 let content;
                 syn::parenthesized!(content in input);
@@ -617,7 +646,7 @@ impl Parse for Clause {
             other => Err(syn::Error::new(
                 span,
                 format!(
-                    "unknown clause `{other}` in backing declaration (expected one of: `on A`/`on B`/`on store`, `ctor_arg`, `read(a)`, `lookup(a, k)`, `iter Walk`, `iterate(a)`, `advance(w)`, `on_insert(..)`, `on_add(a)`, `compact`, `validate [by|primitive]`, `membership: existence`, `requires: ..`, `contract: ..`, `iteration_order: ..`, `phase: ..`)"
+                    "unknown clause `{other}` in backing declaration (expected one of: `on A`/`on B`/`on store`, `ctor_arg`, `read(a)`, `lookup(a, k)`, `iter Walk`, `iterate(a)`, `advance(w)`, `on_insert(..)`, `on_unlink(a, b)`, `on_add(a)`, `compact`, `validate [by|primitive]`, `membership: existence`, `requires: ..`, `contract: ..`, `iteration_order: ..`, `phase: ..`)"
                 ),
             )),
         }
@@ -744,6 +773,11 @@ fn validate_inventory(decl: &BackingDecl) -> syn::Result<()> {
                     return reject(*span, c.kind_name());
                 }
             }
+            Clause::OnUnlink { span, .. } => {
+                if decl.card == BackingCard::One {
+                    return reject(*span, "on_unlink");
+                }
+            }
             Clause::OnInsert { keyed, span, .. } => {
                 if decl.card == BackingCard::One {
                     return reject(*span, "on_insert");
@@ -794,6 +828,7 @@ fn validate_inventory(decl: &BackingDecl) -> syn::Result<()> {
             | Clause::Iterate { body, .. }
             | Clause::Advance { body, .. }
             | Clause::OnInsert { body, .. }
+            | Clause::OnUnlink { body, .. }
             | Clause::OnAdd { body, .. }
             | Clause::Compact { body, .. }
             | Clause::Validate { body, .. } => Some(body),
@@ -942,6 +977,7 @@ fn c_span(c: &Clause) -> proc_macro2::Span {
         | Clause::Iterate { span, .. }
         | Clause::Advance { span, .. }
         | Clause::OnInsert { span, .. }
+        | Clause::OnUnlink { span, .. }
         | Clause::OnAdd { span, .. }
         | Clause::Compact { span, .. }
         | Clause::Validate { span, .. }
@@ -1029,6 +1065,10 @@ pub fn backing_decl_tokens(decl: &BackingDecl) -> TokenStream2 {
             } else {
                 quote!(on_insert(a, b) #b)
             }
+        }
+        Clause::OnUnlink { body, .. } => {
+            let b = tokens_or_empty(body);
+            quote!(on_unlink(a, b) #b)
         }
         Clause::OnAdd { body, .. } => {
             let b = tokens_or_empty(body);
@@ -1195,6 +1235,29 @@ mod tests {
     fn roundtrip_intrusive() {
         assert_roundtrip(
             "intrusive_list: A -> B, many { on A { first: Option<BId> = stem } on B { next: Option<BId> = stem } iter Walk { cur: Option<BId> } on_insert(a, b) { rec(b).next = rec(a).first; rec(a).first = Some(b); } iterate(a) { Walk { cur: rec(a).first } } advance(w) { let id = w.cur?; w.cur = rec(id).next; handle(id) } iteration_order: reverse_insertion contract: exclusive_membership requires: direct_records validate by { for ra in records(A) { } } validate primitive { for ra in records(A) { } } }",
+        );
+    }
+
+    #[test]
+    fn roundtrip_on_unlink() {
+        assert_roundtrip(
+            "links: A -> B, many { on A { first: Option<BId> = stem } on B { next: Option<BId> = stem } iter Walk { cur: Option<BId> } iterate(a) { Walk { cur: rec(a).first } } advance(w) { let id = w.cur?; handle(id) } on_insert(a, b) { } on_unlink(a, b) { let mut prev: Option<BId> = None; let mut cur = rec(a).first; while let Some(c) = cur { let next = rec(c).next; if c == b { return true; } prev = Some(c); cur = next; } false } }",
+        );
+    }
+
+    #[test]
+    fn on_unlink_rejected_on_one() {
+        assert_rejected(
+            "fieldish: A -> B, one { on_unlink(a, b) { false } }",
+            "on_unlink",
+        );
+    }
+
+    #[test]
+    fn on_unlink_params_are_pinned() {
+        assert_rejected(
+            "links: A -> B, many { on_unlink(b, a) { false } }",
+            "`on_unlink`'s first parameter is the self id `a`",
         );
     }
 

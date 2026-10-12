@@ -256,6 +256,11 @@ backing! {
             rec(b).next = rec(a).first;
             rec(a).first = Some(b);
         }
+        on_unlink(a, b) {                // walk-and-splice, O(list length),
+            /* correct at head and tail; TOTAL — returns whether the
+               record was found, never panics on absence (M4's set_
+               re-pointing; probe-verified, /tmp/m4-probe-set-unlink) */
+        }
         iterate(a) { Walk { cur: rec(a).first } }
         advance(w) { /* let id = w.cur?; w.cur = rec(id).next; handle(id) */ }
         iteration_order: reverse_insertion
@@ -348,6 +353,7 @@ rules. The inventory, per cardinality (`req` mandatory, `opt` optional,
 | `iterate(a)` | — | req | — | — |
 | `advance(w)` | — | req | — | — (the body is the whole `next()` body, returning `Option<`target handle`>`) |
 | `on_insert(a[, k], b)` | — | opt | opt | no insert-hook maintenance; `one`'s write path is `ctor_arg` (M4's `set_` grows the re-pointing) |
+| `on_unlink(a, b)` | — | opt | opt | no delete hook; the delete verb M4's `set_` re-pointing lowers through — emitted as `__unlink_<arrow>`, total (returns whether the record was found; absence is legitimate — M4's correction-op case) |
 | `on_add(a)` | opt | opt | opt | no per-add growth of store-level per-self state; requires an `add_<A>`-orchestrated self |
 | `compact { .. }` | — | opt | — | legal only on a phased backing; phased backings are `many` in M3 (csr is the only one) |
 | `validate` | opt | opt | opt | no validate body summoned for this backing (arena writes none) |
@@ -431,7 +437,18 @@ What each clause is load-bearing for:
   but unemitted: spike 6 built flat `Digraph` only, and the inference —
   `a` is the host id, `on_add` fires from the host class's constructor,
   buckets stay store-level — while coherent is carried as frontier
-  until emission (Frontier, below).
+  until emission (Frontier, below — RETIRED at step 8: the composed
+  fused-root emission landed and holds, tests/composed_csr.rs).
+- **`on_unlink(a, b)` (intrusive_list).** The delete verb M4's `set_`
+  re-pointing lowers through: un-link a `by`-derived membership before
+  re-linking. The body is walk-and-splice, O(list length), correct at
+  head and tail (a `by` on both endpoints of a mutable field grows two
+  delete hooks), and *total* — it returns whether the record was found
+  and never panics on absence, because flush can legitimately hold a
+  kept record that is currently in no list (M4's correction-op case;
+  probe-verified, /tmp/m4-probe-set-unlink). A phased backing declares
+  none (membership is derived at freeze); the keyed arm exists for the
+  day un-insert lands (an M4 non-goal, v1).
 - **Phase attribution on contributions (`on store build` / `on store
   frozen`).** The type-state store needs to know which fields exist in
   which phase; the spike split them by comment, which two legal
@@ -869,7 +886,9 @@ machinery executed). One admission ahead of emission, alongside the
 on_add applicability note: csr at a fused root-marked self is admitted
 but unemitted — spike 6 built flat `Digraph` only, and the inference
 (`a` is the host id, `on_add` fires from the host class's constructor,
-buckets stay store-level) holds on paper until something emits it.
+buckets stay store-level) held on paper until something emitted it —
+retired at step 8: the composed fused-root emission landed and holds
+(tests/composed_csr.rs).
 
 ## Depends on
 
@@ -990,6 +1009,13 @@ Contract: the declarations, the placement rules, the premise table.
 the hygiene caveats.
 - [x] `on A` + `on B` contributions, the stem formula, the push-front
       hook as a store method
+- [x] the `on_unlink(a, b)` clause parsed and emitted as
+      `__unlink_<arrow>` (the delete verb M4's `set_` lowers through —
+      the clause is in the inventory from this step, so M4 step 7
+      replays rather than amends; folded from the M4 implementability
+      review after steps 4–9 had landed, emitted in the completion
+      pass with tests/unlink.rs driving all three flat placements and
+      the composed instance-qualified form)
 - [x] the hygiene caveats as grammar rules: `Span::mixed_site()`
       scaffold idents, absolutized container paths, reserved-set
       shadowing rejected
