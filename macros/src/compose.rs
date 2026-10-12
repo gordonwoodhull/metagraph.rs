@@ -304,6 +304,41 @@ fn classes_legal(c: &ComposedSchema) -> syn::Result<()> {
                 ),
             ));
         }
+        // Same-instance element-element fusion: sort-sharing within one
+        // instance — admitted by the at-most-one-instance reading alone
+        // and defined by nothing (a flat schema over shared sorts is
+        // reachable only inside one `pattern!` block). The round-4
+        // merge pinned the arm; the code landed with M3.
+        if roots.is_empty() && distinct.len() == 1 {
+            return Err(err(
+                Span::call_site(),
+                format!(
+                    "colocation class {{ {} }} fuses elements of one instance ({}); sort-sharing within an instance is not composition — a flat schema over shared sorts is reachable only inside one `pattern!` block",
+                    members.iter().map(|&at| name_of(at)).collect::<Vec<_>>().join(", "),
+                    c.members[distinct[0]].0
+                ),
+            ));
+        }
+        // Self-hosting: the class's root and its element member belong
+        // to one instance — the instance's arenas would embed into
+        // their own records. The legal host shape is cross-instance.
+        if roots.len() == 1 && distinct.len() == 1 {
+            let root_inst = members
+                .iter()
+                .find(|&&(mi, me)| root_of[mi] == Some(me))
+                .map(|&(mi, _)| mi)
+                .expect("roots.len() == 1");
+            if root_inst == distinct[0] {
+                return Err(err(
+                    Span::call_site(),
+                    format!(
+                        "colocation class {{ {} }} fuses instance {}'s root with its own element (self-hosting): its arenas would embed into their own records — the legal host shape is one instance's element hosting *another* instance's root",
+                        members.iter().map(|&at| name_of(at)).collect::<Vec<_>>().join(", "),
+                        c.members[root_inst].0
+                    ),
+                ));
+            }
+        }
         // Placement agreement among element members (a class's element
         // members all place together; disagreement is a cross-multiplicity
         // colocation reached transitively).

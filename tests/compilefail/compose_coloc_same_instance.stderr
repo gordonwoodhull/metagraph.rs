@@ -1,0 +1,12 @@
+error: compose_pattern! `Same`: colocation class { d.Node, d.Edge } fuses elements of one instance (d); sort-sharing within an instance is not composition — a flat schema over shared sorts is reachable only inside one `pattern!` block
+  --> tests/compilefail/compose_coloc_same_instance.rs:9:5
+   |
+ 9 | /     compose_pattern! {
+10 | |         Same {
+11 | |             instances: d: metagraph_exper::stdlib::Digraph;
+12 | |             d.Node <=> d.Edge;
+13 | |         }
+14 | |     }
+   | |_____^
+   |
+   = note: this error originates in the macro `metagraph_exper::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

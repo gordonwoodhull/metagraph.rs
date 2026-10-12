@@ -48,9 +48,8 @@ subgraphs are all the same machinery applied to bigger piles of arrows.
    dereference. Colocation classes are therefore *hostings*: exactly one
    member instance's root-marked entity plus element entities of exactly
    one other instance (M2's docking check — same-instance element-element
-   fusions and the self-hosting regress rejected by the arms the M3
-   review added, carried in that branch's M2 and pending fold to main;
-   spike 12). Composition
+   fusions and the self-hosting regress rejected; the arms landed with
+   M3's implementation; spike 12). Composition
    juxtaposes whole patterns, nests them inside host records, and closes
    open entities by reference — it never shares one sort across instances.
    Sort-sharing over one flat arena is what inline instantiation within a

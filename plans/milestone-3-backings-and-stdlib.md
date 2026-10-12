@@ -761,7 +761,9 @@ same-instance fusion, `outer.Node <=> outer.Edge`, is rejected at
 compose time; M2's docking check carries the same-instance
 element-element and self-hosting arms as of the round-4 merge, with
 their trybuild fixtures owed as a code follow-up in M2's
-negative-tests list). Composition nests whole patterns
+negative-tests list — the arms and fixtures landed with M3's
+implementation: `classes_legal` rejects both,
+`compose_coloc_same_instance` / `compose_coloc_self_hosting`). Composition nests whole patterns
 inside others and juxtaposes them; sharing a population is expressible
 only target-side, by `<->` id unification. A flat multi-arrow schema
 over shared sorts is reachable only inside one `pattern!` block —
@@ -909,7 +911,8 @@ green unchanged.
 - [x] M2 complete on main and the merge chore discharged at the
       round-4 merge (the three M2 reconciliations, the epic.md fold,
       and the spikes.md row union — Depends on, above; the docking
-      arms' code + fixtures are the one named code follow-up)
+      arms' code + fixtures are the one named code follow-up —
+      discharged with the implementation)
 - [x] the `union` → `sum` code rename landed (it rode with M2's
       step-1 grammar pass — verified in `macros/src/grammar.rs`)
 - [x] /tmp/m3-probe-r4-advance read, its limits carried (the

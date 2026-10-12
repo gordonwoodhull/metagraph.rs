@@ -619,9 +619,10 @@ classes-closed check:
   element pair by the peer-shaped and same-instance arms together,
   which is what makes "exactly one element member" follow rather than
   merely "elements from one instance"). (The docking re-anchoring and
-  its two arms landed with the M3 round-4 merge; the landed check
-  implements the at-most-one-instance reading, so the arms' code and
-  their trybuild fixtures are a named follow-up — Tests.) `<=>`
+  its two arms landed with the M3 round-4 merge as plan text; the arms'
+  code and trybuild fixtures — DISCHARGED with M3's implementation:
+  `classes_legal` rejects both shapes, fixtures `compose_coloc_same_instance`
+  and `compose_coloc_self_hosting`.) `<=>`
   transitivity is therefore vacuous in practice, and one host element
   can host exactly *one* instance's arenas: two Subgraph instances
   both fused to `outer.Node` over the same inner graph is rejected.
@@ -851,8 +852,9 @@ impossible by construction.
   the generated-name-uniqueness check, the implement!-time home and
   addressability rejections, and the new keyed-cardinality mismatches;
   the M3 round-4 merge's docking arms — same-instance element-element
-  and self-hosting rejections — join this list, their fixtures owed
-  with the arms' implementation);
+  and self-hosting rejections — joined this list and LANDED with M3's
+  implementation: `compose_coloc_same_instance` /
+  `compose_coloc_self_hosting`);
   a `#[should_panic]` test for duplicate-key rejection at the insert
   call; and `validate()` failure tests driving the canonical inventory —
   ghost keys, out-of-range and cross-host path-id values, corrupted
