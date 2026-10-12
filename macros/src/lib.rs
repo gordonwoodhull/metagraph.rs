@@ -9,6 +9,7 @@
 //! the target's delimiter group. All grammar lives in the proc macros'
 //! parsers (shared module [`grammar`]), where errors get real spans.
 
+mod backing;
 mod codegen;
 mod codegen_composed;
 mod compose;
@@ -492,6 +493,75 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
         macro_rules! #courier {
             (($($fwd:tt)::+ ; $($rest:tt)*)) => {
                 $($fwd)::+ ! { { #schema_tokens } ; $($rest)* }
+            };
+        }
+        #[doc(hidden)]
+        #[allow(unused_imports)]
+        pub use #courier;
+    })
+}
+
+// ---------------------------------------------------------------------------
+// backing!
+// ---------------------------------------------------------------------------
+
+/// Declare a user-facing *backing*: a storage strategy (contributed fields,
+/// mutation hooks, an access protocol, and optional validate clauses)
+/// authored over the closed role vocabulary (`a`, `b`, `k`, `rec(x)`,
+/// `b_arena_of(x)`, `map_from(x)`, `records(E)`, `maps(A)`, `host_of(v)`,
+/// `store`, `AId`/`BId`/`KId`, `arena_len(E)`, `idx(id)`, plus the reserved
+/// placeholders `determining(a)` and `handle(x)`). Bodies are ordinary Rust;
+/// codegen binds the roles per placement (plans/milestone-3, `backing!`
+/// grammar).
+///
+/// The declaration travels to `implement!` sites through a *backing
+/// courier* — the same target-parameterized single-rule courier as
+/// patterns: `implement!` resolves every backing (stdlib or user) through
+/// its courier, exactly as it resolves root arrows through registration
+/// couriers. Binding paths name the module holding the `backing!`
+/// invocation (`out_edges: stdlib::intrusive_list`); the bare-ident form
+/// (`arena`) resolves against the runtime crate, where the stdlib's
+/// backings live.
+///
+/// ```ignore
+/// backing! {
+///     field: A -> B, one {
+///         on A { value: BId = arrow }
+///         ctor_arg
+///         read(a) { rec(a).value }
+///         validate { for ra in records(A) { .. } }
+///     }
+/// }
+/// ```
+///
+/// Note: declare backings in a named module. A backing declared at a crate
+/// root collides with its courier's `#[macro_export]` crate-root anchor
+/// (E0255) — the same constraint `pattern!` carries.
+#[proc_macro]
+pub fn backing(input: TokenStream) -> TokenStream {
+    let decl = syn::parse_macro_input!(input as backing::BackingDecl);
+    match expand_backing(&decl) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_backing(decl: &backing::BackingDecl) -> syn::Result<TokenStream2> {
+    let courier = format_ident!("__metagraph_backing_{}", decl.name);
+    // Declaring-crate resolver carriage, same as schemas: `backing!` runs in
+    // the declaring crate's rustc process, so the env var names the
+    // declaring crate — the eventual implement site's expansion sees the
+    // baked string, not its own.
+    let pkg =
+        std::env::var("CARGO_PKG_NAME").expect("CARGO_PKG_NAME not set during backing! expansion");
+    let packaged = backing::PackagedBacking { pkg, decl: decl.clone() };
+    let payload = backing::packaged_backing_tokens(&packaged);
+    Ok(quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        macro_rules! #courier {
+            (($($fwd:tt)::+ ; $($rest:tt)*)) => {
+                $($fwd)::+ ! { { #payload } ; $($rest)* }
             };
         }
         #[doc(hidden)]

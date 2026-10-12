@@ -910,24 +910,35 @@ green unchanged.
 **Step 1 — `backing!` parser + courier emission.** Contract: the
 clause grammar (the pinned table and its rules) and the token-routing
 paragraph.
-- [ ] parse the header (`name: A -> B, cardinality`) and the clause
+- [x] parse the header (`name: A -> B, cardinality`) and the clause
       inventory per the table; grammar-reject unknown clauses, store
       labels, and annotation values, quoting the closed set in the
       message
-- [ ] enforce the repetition rule: `on` once per (target, label) pair,
+- [x] enforce the repetition rule: `on` once per (target, label) pair,
       the validate family once per variant, everything else once
-- [ ] emit the backing courier: `#[macro_export]`, the M1
+- [x] emit the backing courier: `#[macro_export]`, the M1
       target-parameterized single-rule shape, payload = the
       declaration's tokens plus the declaring crate's baked
       `CARGO_PKG_NAME`
-- [ ] document the E0255 constraint (a crate-root declaration collides
+- [x] document the E0255 constraint (a crate-root declaration collides
       with its own courier — declare backings in a named module)
 - Acceptance:
-- [ ] round-trip tests: each stdlib declaration parses and re-emits;
+- [x] round-trip tests: each stdlib declaration parses and re-emits;
       one rejection fixture per closed set (unknown clause, bad store
       label, unknown contract item, unknown phase property, bad
       iteration_order value, repeated clause)
 - Depends: 0
+
+*(Implementation note, step 1: one deliberate extension, flagged for
+the record. The plan pins a per-site naming formula per contributed
+field and states there is no single mechanical rule, but shows no
+syntax for stating it. The parser therefore accepts an optional
+per-field naming formula — `on A { value: BId = arrow }`, closed values
+`arrow` / `stem` / `suffix`, default bare — and authored bodies
+reference the logical field name while codegen renames to the emitted
+one per binding. The five stdlib declarations carry exactly the
+formulas the plan's table pins: field `= arrow`, intrusive `= stem`,
+hash_index `= suffix`, csr bare.)*
 
 **Step 2 — Binding resolution in `implement!`.** Contract: the
 token-routing paragraph (declaring-crate resolver).
