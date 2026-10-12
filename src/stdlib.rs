@@ -86,3 +86,45 @@ mod same_crate_tests {
         let _ = EdgeId(0); // generated ids are nameable at the implement! site
     }
 }
+
+// A keyed root pattern, shape-pinned against the probe
+// (/tmp/m2-probe-edge-induced): the root cannot name the instantiation's key
+// sort, so the trait carries it as an associated type and the method takes
+// it as an argument, returning an Option. The manual impl below compiles
+// only if the generated trait has exactly that shape. (The flat
+// hash_index-backed implement of a keyed arrow is step 8's acceptance.)
+#[cfg(test)]
+mod keyed_root_tests {
+    use metagraph_exper_macros::pattern;
+
+    pattern! {
+        SubNodeOf {
+            entities: root Subgraph, SubNode, MainNode;
+            arrows { subnode: Subgraph -> SubNode, key(MainNode); }
+        }
+    }
+
+    struct DummyNode;
+    struct DummyGraph;
+
+    impl SubNodeOf<()> for DummyGraph {
+        type SubNode = DummyNode;
+        type Key = u32;
+        fn subnode(&self, key: u32) -> Option<DummyNode> {
+            (key == 0).then_some(DummyNode)
+        }
+    }
+
+    #[test]
+    fn keyed_root_trait_shape_and_dispatch() {
+        let g = DummyGraph;
+        assert!(g.subnode(0).is_some());
+        assert!(g.subnode(1).is_none());
+        // The key sort is an associated type: the same trait dispatches at
+        // different key sorts under different markers.
+        fn lookup<K, T: SubNodeOf<()>>(t: &T, key: T::Key) -> Option<()> {
+            t.subnode(key).map(|_| ())
+        }
+        assert!(lookup::<u32, _>(&g, 0).is_some());
+    }
+}
