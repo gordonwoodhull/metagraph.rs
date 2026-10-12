@@ -300,7 +300,7 @@ pub(crate) fn contributed_fields(decl: &BackingDecl) -> impl Iterator<Item = &Co
 
 /// Every `on <target>` clause of a declaration as (label, fields) pairs —
 /// `on store` may repeat per label, so collection sees them all.
-fn on_clauses<'a>(decl: &'a BackingDecl, target: OnTarget) -> Vec<(Option<PhaseLabel>, &'a [ContribField])> {
+pub(crate) fn on_clauses<'a>(decl: &'a BackingDecl, target: OnTarget) -> Vec<(Option<PhaseLabel>, &'a [ContribField])> {
     decl.clauses
         .iter()
         .filter_map(|c| match c {

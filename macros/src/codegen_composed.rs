@@ -37,7 +37,7 @@ use proc_macro2::{Ident as Ident2, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
 
 use crate::backing::{formula_name, BackingDecl, Clause, OnTarget, ValidateVariant};
-use crate::codegen::{body_of, card_of_decl, init_of, on_clause, scaffold_lets, FieldInit};
+use crate::codegen::{body_of, card_of_decl, init_of, on_clause, on_clauses, scaffold_lets, FieldInit};
 use crate::grammar::{
     camel, marker_ty, path_tokens, snake, Cardinality, ComposedSchema, RootMeta,
 };
@@ -103,6 +103,10 @@ struct FieldContribution {
     side_a: bool,
     /// The type is `Option<id>` — the validate pre-pass range-walks it.
     option_id: bool,
+    /// Phase attribution for store-level contributions: `on store build`
+    /// fields are typed per phase (released at the type level on Frozen);
+    /// `on store frozen` and unlabeled fields exist in all phases.
+    phase: Option<crate::backing::PhaseLabel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +141,8 @@ impl<'a> ComposedRoles<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         classes: &'a [ClassData],
+        i: usize,
+        store_field_names: &'a HashMap<(usize, String), HashMap<String, Ident2>>,
         decl: &BackingDecl,
         arrow: &crate::grammar::ArrowDecl,
         class_of: [usize; 3],
@@ -144,8 +150,22 @@ impl<'a> ComposedRoles<'a> {
         tgt_handle: Ident2,
     ) -> Self {
         let stem = crate::grammar::link_stem(&arrow.name);
+        // Store-level fields keep the formula name bare when unambiguous;
+        // colliding store fields were instance-prefixed at collection, and
+        // the body renames must follow (the same override the flat codegen
+        // threads).
+        let store_overrides = store_field_names
+            .get(&(i, arrow.name.to_string()))
+            .cloned()
+            .unwrap_or_default();
         let renames = crate::codegen::contributed_fields(decl)
-            .map(|f| (f.logical.to_string(), formula_name(f, f.formula, &arrow.name, &stem)))
+            .map(|f| {
+                let emitted = store_overrides
+                    .get(&f.logical.to_string())
+                    .cloned()
+                    .unwrap_or_else(|| formula_name(f, f.formula, &arrow.name, &stem));
+                (f.logical.to_string(), emitted)
+            })
             .collect();
         let walk_fields = decl
             .clause(|c| matches!(c, Clause::Iter { .. }))
@@ -441,7 +461,9 @@ fn push_contribution(
     let inst_snake = snake(&members[i].0.to_string());
     let ty = {
         let class_of = class_of_arrow(i, a)?;
-        let roles = ComposedRoles::new(classes, d, a, class_of, false, a.target.clone());
+        // Types never reference field names; the empty override map.
+        let no_store_names: HashMap<(usize, String), HashMap<String, Ident2>> = HashMap::new();
+        let roles = ComposedRoles::new(classes, i, &no_store_names, d, a, class_of, false, a.target.clone());
         roles::rewrite_ty(&f.ty.to_token_stream(), &roles)
     };
     let option_id = f
@@ -475,6 +497,7 @@ fn push_contribution(
                 arrow: a.name.clone(),
                 side_a,
                 option_id,
+                phase: None,
             });
             return Ok(());
         }
@@ -488,6 +511,7 @@ fn push_contribution(
             arrow: a.name.clone(),
             side_a,
             option_id,
+            phase: None,
         });
         if card_of_decl(d) == Cardinality::Keyed {
             map_of_arrow.insert((i, a.name.to_string()), bucket.last().unwrap().field.clone());
@@ -512,6 +536,7 @@ fn push_contribution(
         arrow: a.name.clone(),
         side_a,
         option_id,
+        phase: None,
     });
     Ok(())
 }
@@ -936,18 +961,30 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             let named = format!("{}.{}", members[i].0, a.name);
             let sc = class_index_of(i, ent_index(i, &a.source)?);
             let tc = class_index_of(i, ent_index(i, &a.target)?);
-            // Phased backings and the type-state store land with M3 step 8.
-            if d.is_phased()
-                || d.has(|c| matches!(c, Clause::Compact { .. }))
-                || d.clauses.iter().any(|c| matches!(c, Clause::On { label: Some(_), .. }))
-            {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "backing `{}` (arrow `{named}`) is phased (`phase:`/`compact`/labeled `on store` clauses); phased backings and the type-state store land with M3 step 8",
-                        d.name
-                    ),
-                ));
+            // Phased backings (csr): the entity-arrow / unfused-root
+            // rejection. A phased backing maintains membership by insert
+            // hooks, so it cannot bind its target's entity arrow —
+            // mechanically, `hosts_arena(self, B)` must not hold: neither
+            // the unfused-root self arm (no self record, no `a`) nor the
+            // embedded-target-in-self-class arm (B's arena embeds in the
+            // self record — the entity-arrow shape).
+            if d.is_phased() {
+                let hosts_arena_shape = match classes[tc].loc {
+                    ClassLoc::Root => !classes[sc].owns_records,
+                    ClassLoc::Embedded(h) => h == sc,
+                };
+                if hosts_arena_shape {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "backing `{d_name}` (arrow `{named}`) is phased, but B's arena is hosted by the self record — the entity-arrow shape (self case: {self_case}; placement: target `{tc_name}` {target_loc}); a hook-maintained backing cannot declare existence (bind `arena` for the entity arrow, or bind the phased backing at a relation arrow whose B arena is root-level)",
+                            d_name = d.name,
+                            self_case = self_case_desc(sc),
+                            tc_name = classes[tc].name,
+                            target_loc = loc_desc(tc),
+                        ),
+                    ));
+                }
             }
             // Constructor-orchestrated clauses need an `add_<A>`-orchestrated
             // self: an unfused root owns no constructor and no self id.
@@ -1177,6 +1214,57 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             }
         }
     }
+    // Pre-pass: assign every store-level field's final name, mirroring
+    // push_contribution's collision rule (first keeps the formula name,
+    // colliders get the instance prefix). Two passes contribute at store
+    // level, in this order: `on A` at an unfused-root self, then explicit
+    // `on store` clauses. The per-(instance, arrow) maps ride into
+    // ComposedRoles so authored bodies' field renames follow the assigned
+    // names ("bare when unambiguous", the plan's csr naming pin).
+    let mut store_field_names: HashMap<(usize, String), HashMap<String, Ident2>> = HashMap::new();
+    {
+        let mut assigned: Vec<Ident2> = Vec::new();
+        let mut assign = |assigned: &mut Vec<Ident2>, i: usize, a: &crate::grammar::ArrowDecl, f: &crate::backing::ContribField| {
+            let want = formula_name(f, f.formula, &a.name, &crate::grammar::link_stem(&a.name));
+            let emitted = if assigned.iter().any(|e| *e == want) {
+                format_ident!("{}_{}", snake(&members[i].0.to_string()), want)
+            } else {
+                Ident2::new(&want.to_string(), f.logical.span())
+            };
+            assigned.push(emitted.clone());
+            store_field_names
+                .entry((i, a.name.to_string()))
+                .or_default()
+                .insert(f.logical.to_string(), emitted);
+        };
+        for (i, infos) in inst_infos.iter().enumerate() {
+            for info in infos {
+                let Some(d) = info.backing else { continue };
+                let a = info.decl;
+                let sc = class_index_of(i, ent_index(i, &a.source)?);
+                if classes[sc].owns_records {
+                    continue;
+                }
+                for (_label, fields) in on_clauses(d, OnTarget::A) {
+                    for f in fields {
+                        assign(&mut assigned, i, a, f);
+                    }
+                }
+            }
+        }
+        for (i, infos) in inst_infos.iter().enumerate() {
+            for info in infos {
+                let Some(d) = info.backing else { continue };
+                let a = info.decl;
+                for (_label, fields) in on_clauses(d, OnTarget::Store) {
+                    for f in fields {
+                        assign(&mut assigned, i, a, f);
+                    }
+                }
+            }
+        }
+    }
+
     // Store-level pass: `on A` at an unfused-root self (the relaxed
     // intrusive head; a keyed map; anything else the declarations state).
     for (i, infos) in inst_infos.iter().enumerate() {
@@ -1187,9 +1275,45 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             if classes[sc].owns_records {
                 continue;
             }
-            if let Some(Clause::On { fields, .. }) = on_clause(d, OnTarget::A) {
+            for (_label, fields) in on_clauses(d, OnTarget::A) {
                 for f in fields {
                     push_contribution(&mut classes, &mut store_fields, None, &mut field_of_arrow, &mut map_of_arrow, members, i, a, d, f, true, &class_of_arrow)?;
+                }
+            }
+        }
+    }
+
+    // Explicit `on store` contributions (the phased csr fields; any
+    // unlabeled store-level contribution). Named by the pre-pass; the
+    // label is the phase attribution. These bypass push_contribution's
+    // naming (the pre-pass decided it) but reuse its init rule.
+    for (i, infos) in inst_infos.iter().enumerate() {
+        for info in infos {
+            let Some(d) = info.backing else { continue };
+            let a = info.decl;
+            for (label, fields) in on_clauses(d, OnTarget::Store) {
+                for f in fields {
+                    let field = store_field_names[&(i, a.name.to_string())][&f.logical.to_string()].clone();
+                    let class_of = class_of_arrow(i, a)?;
+                    let roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, false, a.target.clone());
+                    let ty = roles::rewrite_ty(&f.ty.to_token_stream(), &roles);
+                    let option_id = f
+                        .ty
+                        .to_token_stream()
+                        .to_string()
+                        .replace(' ', "")
+                        .starts_with("Option<");
+                    let init = init_of(d, false, f, &a.name)?;
+                    store_fields.push(FieldContribution {
+                        field,
+                        ty,
+                        init,
+                        inst: i,
+                        arrow: a.name.clone(),
+                        side_a: true,
+                        option_id,
+                        phase: label,
+                    });
                 }
             }
         }
@@ -1268,14 +1392,39 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             quote!(#a: ::std::vec::Vec<#dat>,)
         })
         .collect();
+    // The store binds a phased backing (csr) when any bound declaration
+    // carries `phase:` — the type-state emission keys on this.
+    let phased = inst_infos
+        .iter()
+        .flatten()
+        .any(|info| info.backing.map(|d| d.is_phased()).unwrap_or(false));
+
+    // The phase trait: one associated type per `on store build` field; the
+    // Build impl types them naturally, Frozen types them `()`. `pub`
+    // because the store's parameter is bounded by it (edition 2024 denies
+    // private bounds); doc-hidden — not user API.
+    let phase_trait = format_ident!("__{}Phases", store);
     let store_contrib = store_fields.iter().map(|fc| {
         let n = &fc.field;
         let ty = &fc.ty;
         let inst_name = &members[fc.inst].0;
         let arrow = &fc.arrow;
-        quote! {
-            #[doc = concat!("store-level contribution of arrow `", stringify!(#inst_name), ".", stringify!(#arrow), "`.")]
-            #n: #ty,
+        // Phase attribution: `on store build` fields are typed through the
+        // phase trait — `()` on Frozen — so the accumulators are released
+        // at the type level; `on store frozen` and unlabeled fields exist
+        // in all phases with their natural type.
+        match fc.phase {
+            Some(crate::backing::PhaseLabel::Build) => {
+                let assoc = format_ident!("__build_{}", fc.field);
+                quote! {
+                    #[doc = concat!("store-level contribution of arrow `", stringify!(#inst_name), ".", stringify!(#arrow), "`.")]
+                    #n: <P as #phase_trait>::#assoc,
+                }
+            }
+            _ => quote! {
+                #[doc = concat!("store-level contribution of arrow `", stringify!(#inst_name), ".", stringify!(#arrow), "`.")]
+                #n: #ty,
+            },
         }
     });
     let store_pattern_name = config
@@ -1284,24 +1433,132 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         .last()
         .map(|s| s.ident.to_string())
         .unwrap_or_default();
-    out.extend(quote! {
-        #[doc = concat!("Store generated by `implement!` for the composed pattern `", #store_pattern_name, "`.")]
-        #[derive(Default, Debug)]
-        pub struct #store {
-            #(#root_arenas)*
-            #(#store_contrib)*
+    let phase_assocs: Vec<(Ident2, TokenStream2)> = store_fields
+        .iter()
+        .filter(|fc| fc.phase == Some(crate::backing::PhaseLabel::Build))
+        .map(|fc| (format_ident!("__build_{}", fc.field), fc.ty.clone()))
+        .collect();
+    let assoc_names: Vec<&Ident2> = phase_assocs.iter().map(|(n, _)| n).collect();
+    let assoc_tys: Vec<&TokenStream2> = phase_assocs.iter().map(|(_, t)| t).collect();
+    let phase_trait_def = quote! {
+        #[doc(hidden)]
+        pub trait #phase_trait {
+            #(type #assoc_names;)*
         }
-
-        impl #store {
-            #[doc = "Empty store."]
-            pub fn new() -> Self {
-                Self::default()
+        impl #phase_trait for Build {
+            #(type #assoc_names = #assoc_tys;)*
+        }
+        impl #phase_trait for Frozen {
+            #(type #assoc_names = ();)*
+        }
+    };
+    if phased {
+        // Type-state store (spike 6 / the mixed-phase probe): ONE store
+        // type parameterized by a phase marker. Non-phased composed stores
+        // keep the M2 shape exactly.
+        let default_init = {
+            let field_inits = classes
+                .iter()
+                .filter(|cl| cl.owns_records && cl.loc == ClassLoc::Root)
+                .map(|cl| {
+                    let a = &cl.arena_fld;
+                    quote!(#a: ::std::default::Default::default(),)
+                })
+                .chain(store_fields.iter().map(|fc| {
+                    let n = &fc.field;
+                    quote!(#n: ::std::default::Default::default(),)
+                }))
+                .chain(::core::iter::once(quote!(_phase: ::core::marker::PhantomData,)))
+                .collect::<Vec<_>>();
+            quote! {
+                Self {
+                    #(#field_inits)*
+                }
             }
-        }
-    });
+        };
+        let debug_names: Vec<Ident2> = classes
+            .iter()
+            .filter(|cl| cl.owns_records && cl.loc == ClassLoc::Root)
+            .map(|cl| cl.arena_fld.clone())
+            .chain(store_fields.iter().map(|fc| fc.field.clone()))
+            .collect();
+        let debug_fields = &debug_names;
+        let debug_fmt = quote! {
+            f.debug_struct(stringify!(#store))
+                #(.field(stringify!(#debug_names), &self.#debug_fields))*
+                .finish()
+        };
+        out.extend(quote! {
+            /// Build phase: the store is owned mutably; `add_*`/`insert_*`,
+            /// the backing hooks, and `freeze` exist only here.
+            pub struct Build(());
+            /// Frozen phase: compaction has run at the single `freeze()`;
+            /// reads, handles, and `validate` exist only here.
+            pub struct Frozen(());
+            #phase_trait_def
+
+            #[doc = concat!("Store generated by `implement!` for the composed pattern `", #store_pattern_name, "`.")]
+            pub struct #store<P: #phase_trait = Frozen> {
+                #(#root_arenas)*
+                #(#store_contrib)*
+                _phase: ::core::marker::PhantomData<P>,
+            }
+
+            impl ::core::default::Default for #store<Build> {
+                fn default() -> Self {
+                    #default_init
+                }
+            }
+            impl ::core::default::Default for #store<Frozen> {
+                fn default() -> Self {
+                    #default_init
+                }
+            }
+            impl ::core::fmt::Debug for #store<Build> {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    #debug_fmt
+                }
+            }
+            impl ::core::fmt::Debug for #store<Frozen> {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    #debug_fmt
+                }
+            }
+
+            impl #store<Build> {
+                #[doc = "Empty store (build phase)."]
+                pub fn new() -> Self {
+                    Self::default()
+                }
+            }
+        });
+    } else {
+        out.extend(quote! {
+            #[doc = concat!("Store generated by `implement!` for the composed pattern `", #store_pattern_name, "`.")]
+            #[derive(Default, Debug)]
+            pub struct #store {
+                #(#root_arenas)*
+                #(#store_contrib)*
+            }
+
+            impl #store {
+                #[doc = "Empty store."]
+                pub fn new() -> Self {
+                    Self::default()
+                }
+            }
+        });
+    }
 
     // ---- constructors, hooks, write ops, counts, root accessors ----
-    let mut store_impl = TokenStream2::new();
+    // Write-side accumulates into `store_impl_build` (constructors, hooks,
+    // ops; on a phased store these land in `impl Store<Build>`); read-side
+    // into `store_impl_frozen` (counts, the read view, root accessors,
+    // validate; `impl Store<Frozen>`). Unphased stores emit one impl block
+    // holding both — impl-item order is semantically irrelevant, and the
+    // suites are the criterion.
+    let mut store_impl_build = TokenStream2::new();
+    let mut store_impl_frozen = TokenStream2::new();
     let mut op_names: Vec<String> = Vec::new(); // generated-name uniqueness
     let mut iter_names_used: Vec<String> = Vec::new();
 
@@ -1378,6 +1635,26 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 }
             }
         }
+        // `on_add` hooks firing at construction of this class: a backing's
+        // per-add growth of store-level per-self state (csr's bucket push).
+        // Runs before the insert hooks below, so an insert hook that reads
+        // the grown state for the new record sees it.
+        let mut onadd_calls = TokenStream2::new();
+        for &(i, e) in &cl.members {
+            for info in &inst_infos[i] {
+                let Some(bd) = info.backing else { continue };
+                if !bd.has(|c| matches!(c, Clause::OnAdd { .. })) {
+                    continue;
+                }
+                let a = info.decl;
+                if class_index_of(i, ent_index(i, &a.source)?) != ci {
+                    continue;
+                }
+                let _ = e;
+                let hook = format_ident!("__onadd_{}_{}", snake(&members[i].0.to_string()), a.name);
+                onadd_calls.extend(quote!(self.#hook(id);));
+            }
+        }
         // `by`-derived hooks firing at construction of this class: every
         // member arrow with an authored on_insert whose determinant `one`
         // arrow originates at a member entity.
@@ -1428,11 +1705,12 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             "Constructor for `{}`: the host record (when embedded), then one argument per total `one` arrow of its fusion class, then backing insert hooks.",
             cl.name
         );
-        store_impl.extend(quote! {
+        store_impl_build.extend(quote! {
             #[doc = #ctor_doc]
             pub fn #add_name(&mut self, #host_arg_def #(#arg_defs)*) -> #idt {
                 #id_bind
                 #push
+                #onadd_calls
                 #hook_calls
                 id
             }
@@ -1442,7 +1720,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         let count_name = format_ident!("{}_count", snake(&cl.name.to_string()));
         op_names.push(count_name.to_string());
         match cl.loc {
-            ClassLoc::Root => store_impl.extend(quote! {
+            ClassLoc::Root => store_impl_frozen.extend(quote! {
                 #[doc = concat!("Number of `", stringify!(#idt), " records.")]
                 pub fn #count_name(&self) -> usize {
                     self.#arena.len()
@@ -1451,7 +1729,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             ClassLoc::Embedded(host) => {
                 let hid = &classes[host].id_name;
                 let ha = &classes[host].arena_fld;
-                store_impl.extend(quote! {
+                store_impl_frozen.extend(quote! {
                     #[doc = concat!("Number of `", stringify!(#idt), "` records embedded in `host`'s record.")]
                     pub fn #count_name(&self, host: #hid) -> usize {
                         self.#ha[host.0 as usize].#arena.len()
@@ -1492,7 +1770,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 let hook = format_ident!("__insert_{}_{}", inst_snake, a.name);
                 let class_of = class_of_arrow(i, a)?;
                 let mut roles =
-                    ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+                    ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self));
                 if keyed {
                     roles = roles.with_map(
@@ -1544,7 +1822,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     ),
                     (true, None, _) => unreachable!("keyed arrows bind a key sort"),
                 };
-                store_impl.extend(quote! {
+                store_impl_build.extend(quote! {
                     #[doc(hidden)]
                     #[doc = concat!("insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`)")]
                     fn #hook(&mut self, #sig) {
@@ -1560,7 +1838,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         format_ident!("insert_{}", a.name)
                     };
                     op_names.push(op.to_string());
-                    store_impl.extend(quote! {
+                    store_impl_build.extend(quote! {
                         #[doc = concat!("Insert through the `", stringify!(#arrow_doc), "` insert hook (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`).")]
                         pub fn #op(&mut self, #op_sig) {
                             self.#hook(#op_args);
@@ -1579,7 +1857,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     .clone();
                 let hook = format_ident!("__set_{}_{}", inst_snake, a.name);
                 let sref = rec_ref(&classes, quote!(self), sc, quote!(self_id));
-                store_impl.extend(quote! {
+                store_impl_build.extend(quote! {
                     #[doc(hidden)]
                     #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "): set `self_id`'s field to `value`")]
                     fn #hook(&mut self, self_id: #sid, value: #tid) {
@@ -1592,7 +1870,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     format_ident!("set_{}", a.name)
                 };
                 op_names.push(op.to_string());
-                store_impl.extend(quote! {
+                store_impl_build.extend(quote! {
                     #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc), "` to `value` (instance ", stringify!(#inst_name), "; field-backed `one` arrow).")]
                     pub fn #op(&mut self, self_id: #sid, value: #tid) {
                         self.#hook(self_id, value);
@@ -1612,7 +1890,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     ))?;
                 let class_of = class_of_arrow(i, a)?;
                 let mut roles =
-                    ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+                    ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self))
                         .with_map(map_of_arrow[&(i, a.name.to_string())].clone())
                         .with_k(quote!(key));
@@ -1624,7 +1902,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 let lb = roles::rewrite(lookup, &roles);
                 let pred = format_ident!("__{}_{}_key_live", inst_snake, a.name);
                 if root_self {
-                    store_impl.extend(quote! {
+                    store_impl_build.extend(quote! {
                         #[doc(hidden)]
                         #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; store-level map)")]
                         fn #pred(&self, key: #kid) -> bool {
@@ -1632,7 +1910,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         }
                     });
                 } else {
-                    store_impl.extend(quote! {
+                    store_impl_build.extend(quote! {
                         #[doc(hidden)]
                         #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ") on one self object")]
                         fn #pred(&self, self_id: #sid, key: #kid) -> bool {
@@ -1640,6 +1918,54 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         }
                     });
                 }
+            }
+
+            // `on_add` hook: per-add growth of store-level per-self state
+            // (csr's bucket push). Fired from `add_<A>` orchestration (the
+            // ctor loop above); applicability guaranteed an
+            // `add_<A>`-orchestrated self (an unfused root was rejected for
+            // phased bindings).
+            if let Some(body) = body_of(d, |c| matches!(c, Clause::OnAdd { .. })) {
+                let d_name = &d.name;
+                let label = format!("arrow `{inst_name}.{}`", a.name);
+                let hook = format_ident!("__onadd_{}_{}", inst_snake, a.name);
+                let a_mixed = Ident2::new("a", Span::mixed_site());
+                let mut roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of_arrow(i, a)?, root_self, classes[tc].name.clone())
+                    .at(quote!(self));
+                if root_self {
+                    roles = roles.with_a(quote!(()));
+                }
+                let body_rw = roles::rewrite(body, &roles);
+                let scaffolds = scaffold_lets(body, &label, None, false);
+                store_impl_build.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("on-add hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; backing `", stringify!(#d_name), "`): per-add growth of store-level per-self state.")]
+                    fn #hook(&mut self, #a_mixed: #sid) {
+                        #scaffolds
+                        #body_rw
+                    }
+                });
+            }
+
+            // `compact` hook (phased backings only): the compaction body
+            // runs on the build-phase store at the single `freeze()`, in
+            // binding order.
+            if let Some(body) = body_of(d, |c| matches!(c, Clause::Compact { .. })) {
+                let d_name = &d.name;
+                let label = format!("arrow `{inst_name}.{}`", a.name);
+                let hook = format_ident!("__compact_{}_{}", inst_snake, a.name);
+                let roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of_arrow(i, a)?, root_self, classes[tc].name.clone())
+                    .at(quote!(self));
+                let body_rw = roles::rewrite(body, &roles);
+                let scaffolds = scaffold_lets(body, &label, None, false);
+                store_impl_build.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("compact contribution of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; backing `", stringify!(#d_name), "`): runs at the single `freeze()`.")]
+                    fn #hook(&mut self) {
+                        #scaffolds
+                        #body_rw
+                    }
+                });
             }
         }
     }
@@ -1673,16 +1999,20 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     };
                     op_names.push(getter.to_string());
                     let class_of = class_of_arrow(i, a)?;
-                    let roles = ComposedRoles::new(&classes, d, a, class_of, false, classes[tc].name.clone())
+                    let roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, false, classes[tc].name.clone())
                         .at(quote!(self))
                         .with_a(quote!(self_id));
                     let body_rw = roles::rewrite(body, &roles);
-                    store_impl.extend(quote! {
+                    let view = quote! {
                         #[doc = concat!("Builder read view: the `", stringify!(#arrow_doc), "` field of `self_id` (instance ", stringify!(#inst_name), ").")]
                         pub fn #getter(&self, self_id: #sid) -> #tid {
                             #body_rw
                         }
-                    });
+                    };
+                    store_impl_frozen.extend(view.clone());
+                    if phased && !d.is_phased() {
+                        store_impl_build.extend(view);
+                    }
                 }
                 Cardinality::Keyed => {
                     let Some(body) = body_of(d, |c| matches!(c, Clause::Lookup { .. })) else { continue };
@@ -1695,7 +2025,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     };
                     op_names.push(getter.to_string());
                     let class_of = class_of_arrow(i, a)?;
-                    let mut roles = ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+                    let mut roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self))
                         .with_map(map_of_arrow[&(i, a.name.to_string())].clone())
                         .with_k(quote!(key));
@@ -1706,20 +2036,28 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     }
                     let body_rw = roles::rewrite(body, &roles);
                     if root_self {
-                        store_impl.extend(quote! {
+                        let view = quote! {
                             #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (instance ", stringify!(#inst_name), "; root-sourced; no self id).")]
                             pub fn #getter(&self, key: #kid) -> ::core::option::Option<#vt> {
                                 #body_rw
                             }
-                        });
+                        };
+                        store_impl_frozen.extend(view.clone());
+                        if phased && !d.is_phased() {
+                            store_impl_build.extend(view);
+                        }
                     } else {
                         let sid = classes[sc].id_name.clone();
-                        store_impl.extend(quote! {
+                        let view = quote! {
                             #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object (instance ", stringify!(#inst_name), ").")]
                             pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#vt> {
                                 #body_rw
                             }
-                        });
+                        };
+                        store_impl_frozen.extend(view.clone());
+                        if phased && !d.is_phased() {
+                            store_impl_build.extend(view);
+                        }
                     }
                 }
                 _ => {}
@@ -1778,7 +2116,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 let read = &yb.name;
                 let xinst = &members[xi].0;
                 let yinst = &members[yi].0;
-                store_impl.extend(quote! {
+                store_impl_frozen.extend(quote! {
                     #[doc = concat!("Builder read view: the `", stringify!(#read), "` field (instance ", stringify!(#yinst), "), where the id arrived through the `", stringify!(#through), "` reference closure (instance ", stringify!(#xinst), ").")]
                     pub fn #getter(&self, self_id: #sid) -> #tid {
                         #sref.#field
@@ -1801,7 +2139,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         );
         op_names.push(acc.to_string());
         let h = &classes[ci].name;
-        store_impl.extend(quote! {
+        store_impl_frozen.extend(quote! {
             #[doc = concat!("Root handle: the \"object\" view of this store for the unfused root `", stringify!(#h), "`.")]
             pub fn #acc(&self) -> #h<'_> {
                 #h { store: self }
@@ -1916,8 +2254,11 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             }
             _ => ValidateVariant::Plain,
         };
+        // A `Plain` body (membership-agnostic — csr's offsets check) serves
+        // any membership kind; the wanted variant wins when authored.
         let Some(vbody) = d
             .clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == wanted_variant))
+            .or_else(|| d.clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == ValidateVariant::Plain)))
             .map(|c| match c {
                 Clause::Validate { body, .. } => body,
                 _ => unreachable!(),
@@ -1933,7 +2274,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 .unwrap_or_else(|| a.name.clone())
         });
         let class_of = class_of_arrow(i, a)?;
-        let mut roles = ComposedRoles::new(&classes, d, a, class_of, root_self, classes[tc].name.clone())
+        let mut roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, root_self, classes[tc].name.clone())
             .at(quote!(self))
             .with_det(det_field.unwrap_or_else(|| a.name.clone()));
         if card_of_decl(d) == Cardinality::Keyed {
@@ -2024,7 +2365,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             }
         });
     }
-    store_impl.extend(quote! {
+    let validate_method = quote! {
         #[doc = "Structural validation: the canonical runtime inventory, one authored contribution per bound backing (key existence, value-in-arena, value-host agreement for keyed maps; endpoint ranges and the intrusive-ownership contract for lists — the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
         pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
             let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
@@ -2035,14 +2376,86 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 ::core::result::Result::Err(errs.join("; "))
             }
         }
-    });
+    };
 
-    out.extend(quote! {
-        impl #store {
-            #store_impl
-            #validate_methods
+    // freeze()/finish() (phased): compact every phased backing in binding
+    // order at the single boundary, then rebuild the store with the phase
+    // marker swapped — build-attributed fields reset (their Frozen type is
+    // `()`, and the compact body already drained them), everything else
+    // moved over.
+    let compact_hooks: Vec<Ident2> = validate_order
+        .iter()
+        .filter_map(|key| {
+            inst_infos.iter().enumerate().find_map(|(i, infos)| {
+                let info = infos
+                    .iter()
+                    .find(|x| format!("{}.{}", members[i].0, x.decl.name) == *key)?;
+                let d = info.backing?;
+                d.is_phased()
+                    .then(|| format_ident!("__compact_{}_{}", snake(&members[i].0.to_string()), info.decl.name))
+            })
+        })
+        .collect();
+    let freeze_fields = classes
+        .iter()
+        .filter(|cl| cl.owns_records && cl.loc == ClassLoc::Root)
+        .map(|cl| {
+            let a = &cl.arena_fld;
+            quote!(#a: self.#a,)
+        })
+        .chain(store_fields.iter().map(|fc| {
+            let n = &fc.field;
+            match fc.phase {
+                Some(crate::backing::PhaseLabel::Build) => quote!(#n: ::std::default::Default::default(),),
+                _ => quote!(#n: self.#n,),
+            }
+        }))
+        .collect::<Vec<_>>();
+    let freeze_finish = quote! {
+        #[doc = "The single builder boundary: compact the phased backings in binding order, consume the build-phase store, and return the frozen store. Insert-after-freeze is unrepresentable — freeze consumes."]
+        pub fn freeze(mut self) -> #store<Frozen> {
+            #(self.#compact_hooks();)*
+            #store {
+                #(#freeze_fields)*
+                _phase: ::core::marker::PhantomData,
+            }
         }
-    });
+
+        #[doc = "Freeze, then validate — M4's flush ordering: compaction (flush step 6) precedes validation (step 7)."]
+        pub fn finish(self) -> ::core::result::Result<#store<Frozen>, ::std::string::String> {
+            let frozen = self.freeze();
+            frozen.validate()?;
+            ::core::result::Result::Ok(frozen)
+        }
+    };
+
+    if phased {
+        out.extend(quote! {
+            impl #store<Build> {
+                #store_impl_build
+                #freeze_finish
+            }
+            impl #store<Frozen> {
+                #store_impl_frozen
+                #validate_methods
+                #validate_method
+            }
+        });
+    } else {
+        out.extend(quote! {
+            impl #store {
+                #store_impl_build
+                #store_impl_frozen
+                #validate_methods
+                #validate_method
+            }
+        });
+    }
+
+    // The store type as handles and iterators hold it: bare when unphased
+    // (M2 shape); `#store<Frozen>` when phased — handles exist only for the
+    // frozen phase.
+    let store_ref: TokenStream2 = if phased { quote!(#store<Frozen>) } else { quote!(#store) };
 
     // ---- handles ----
     for ci in 0..classes.len() {
@@ -2050,10 +2463,10 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         let h = &cl.name;
         let (body, id_fn, eq_body, hash_body, dbg_body) = if !cl.owns_records {
             (
-                quote!(store: &'g #store),
+                quote!(store: &'g #store_ref),
                 quote!(),
                 quote!(::std::ptr::eq(self.store, other.store)),
-                quote!((self.store as *const #store).hash(state);),
+                quote!((self.store as *const #store_ref).hash(state);),
                 {
                     quote!(f.debug_tuple(stringify!(#h)).finish())
                 },
@@ -2063,7 +2476,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 ClassLoc::Root => {
                     let idt = &cl.id_name;
                     (
-                        quote!(store: &'g #store, id: #idt),
+                        quote!(store: &'g #store_ref, id: #idt),
                         quote! {
                             #[doc = "Index of this entity in its arena."]
                             pub fn id(self) -> #idt {
@@ -2072,7 +2485,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         },
                         quote!(self.id == other.id && ::std::ptr::eq(self.store, other.store)),
                         quote! {
-                            (self.store as *const #store).hash(state);
+                            (self.store as *const #store_ref).hash(state);
                             self.id.hash(state);
                         },
                         quote!(write!(f, "{}({:?})", stringify!(#h), self.id)),
@@ -2082,7 +2495,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     let hid = &classes[host].id_name;
                     let idt = &cl.id_name;
                     (
-                        quote!(store: &'g #store, host: #hid, id: u32),
+                        quote!(store: &'g #store_ref, host: #hid, id: u32),
                         quote! {
                             #[doc = "Index path of this entity: host record plus index in the embedded arena."]
                             pub fn id(self) -> #idt {
@@ -2095,7 +2508,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                                 && ::std::ptr::eq(self.store, other.store)
                         ),
                         quote! {
-                            (self.store as *const #store).hash(state);
+                            (self.store as *const #store_ref).hash(state);
                             self.host.hash(state);
                             self.id.hash(state);
                         },
@@ -2179,7 +2592,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         let tc = class_index_of(i, ent_index(i, &a.target)?);
         let it = iter_name(i, &a.name);
         let class_of = class_of_arrow(i, a)?;
-        let mut roles = ComposedRoles::new(&classes, d, a, class_of, false, classes[tc].name.clone())
+        let mut roles = ComposedRoles::new(&classes, i, &store_field_names, d, a, class_of, false, classes[tc].name.clone())
             .at(quote!(self.store))
             .with_walk_ty(it);
         let a_sub = self_id_expr(sc);
@@ -2274,6 +2687,8 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                                 .map(|(n, t)| {
                                     let ty_roles = ComposedRoles::new(
                                         &classes,
+                                        i,
+                                        &store_field_names,
                                         decl,
                                         d,
                                         class_of,
@@ -2300,7 +2715,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             proc_macro2::Span::call_site(),
                             format!("backing `{}` authors no advance(w) body", decl.name),
                         ))?;
-                    let adv_roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                    let adv_roles = ComposedRoles::new(&classes, i, &store_field_names, decl, d, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self.store))
                         .with_w(quote!(self))
                         .with_walk_ty(walk_ty.clone());
@@ -2323,7 +2738,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     iter_defs.extend(quote! {
                         #[doc = concat!("Iterator of `", stringify!(#arrow_doc_name), "' (instance ", stringify!(#inst_name), "; backing `", stringify!(#backing_name), "`): authored Walk, ", #iter_doc, ".")]
                         pub struct #it<'g> {
-                            store: &'g #store,
+                            store: &'g #store_ref,
                             #host_field
                             #(#walk_fields)*
                         }
@@ -2339,7 +2754,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             proc_macro2::Span::call_site(),
                             format!("backing `{}` authors no iterate(a) body", decl.name),
                         ))?;
-                    let mut roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                    let mut roles = ComposedRoles::new(&classes, i, &store_field_names, decl, d, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self.store))
                         .with_walk_ty(walk_ty);
                     let a_sub = self_id_expr(sc);
@@ -2370,7 +2785,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             format!("backing `{}` authors no read(a) body", decl.name),
                         ))?;
                     let class_of = class_of_arrow(i, d)?;
-                    let mut roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                    let mut roles = ComposedRoles::new(&classes, i, &store_field_names, decl, d, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self.store));
                     if root_self {
                         roles = roles.with_a(quote!(()));
@@ -2406,7 +2821,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             format!("backing `{}` authors no lookup(a, k) body", decl.name),
                         ))?;
                     let class_of = class_of_arrow(i, d)?;
-                    let mut roles = ComposedRoles::new(&classes, decl, d, class_of, root_self, classes[tc].name.clone())
+                    let mut roles = ComposedRoles::new(&classes, i, &store_field_names, decl, d, class_of, root_self, classes[tc].name.clone())
                         .at(quote!(self.store))
                         .with_map(map_of_arrow[&(i, d.name.to_string())].clone())
                         .with_k(quote!(key));
