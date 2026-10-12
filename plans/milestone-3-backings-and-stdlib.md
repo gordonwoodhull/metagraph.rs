@@ -13,8 +13,13 @@ is recorded untested rather than claimed: hook-body hygiene across the
 token channel is spike-verified (spike 5), and courier resolution inside
 `implement!` is spike-verified for *root metadata* (spike 1), but the
 conjunction — `implement!` resolving a *backing binding* through a
-backing courier and splicing its bodies — has never been bounced. Task 1
-gates on that bounce before the fixed table is deleted. Spike-verified
+backing courier and splicing its bodies — has never been bounced. The bounce
+gate — cross-crate arms included — runs before the fixed table is
+deleted (Implementation plan). Round 4 records two smaller seams in the
+same spirit: the `advance(w)` clause is grounded in the landed codegen's
+hard-coded `next()` bodies but has never been authored through the DSL
+and emitted (probe owed, this round); and csr at a fused root-marked
+self is admitted by the applicability rule but unemitted (Frontier). Spike-verified
 islands: keyed mechanics in both embedded and store-level map placements
 (spike 11; the edge-induced probe, 5/5 tests), CSR with its phase
 annotations (spike 6), one authored validate body emitted at two
@@ -59,9 +64,9 @@ uniform across all backings.
 | field's field-on-self-record, constructor arg, direct read | (a) — the `ctor_arg` clause | M1 backings table |
 | arena: no fields, no hooks, existence membership, iterator over the target arena | (a), including the declared requirement `hosts_arena` | M1 backings table |
 | hash_index map placement: root-level self record, host-embedded record, or store | (a) — contributions target the self record, per the three-case self taxonomy (placement rules below) | M1 naming rule; spike 11 (host record); edge-induced probe (store-level) |
-| per-backing validate checks (key existence, value-in-arena, value-host agreement, link well-formedness, membership consistency, partition, CSR offsets) | (a) — the validate clause (below) | M2 canonical inventory; spike 4; edge-induced probe; spike 6 |
-| placement computation; entity kits (`Id(pub u32)`, compound path ids under embedding); hand-written handle `Eq`/`Hash` by (store pointer, id); the function-per-hook shape; collision prefixing of contributed names (arrow-stem prefix on same-record collision, intra-pattern and composition alike) | (b) — uniform, backing-independent | M2 placement rule; M2 ("`NodeId`'s `pub u32` stays — the tests depend on it"); spike 11 finding 4 |
-| the *stem formulas* that name contributed fields (arrow name for `field`; `stem_` + `link_stem(arrow)` for `intrusive_list`; `<arrow>_index` for `hash_index`; declared stem for csr) | (a) — declaration-specified, pinned per backing (the grammar section's table); there is no single mechanical rule | the four artifacts' pinned names: `source`, `first_out`/`next_out` (grammar.rs `link_stem`), `subnode_index` (spike 11, edge-induced probe, round-3 probe), `buckets` (spike 6) |
+| per-backing validate checks (key existence, value-in-arena, value-host agreement, link well-formedness, membership consistency, partition, CSR offsets) | (a) — the validate clause (below) | M2 canonical inventory (main's M2 — the merge vehicle; this branch's M2 predates the round-3 fold that added the third check); spike 4; edge-induced probe; spike 6 |
+| placement computation; entity kits (`Id(pub u32)`, compound path ids under embedding); hand-written handle `Eq`/`Hash` by (store pointer, id); the named doc-hidden hook method per write path; collision prefixing of contributed names (the prefix names the colliding scope — arrow-stem within one instance, instance prefix across composition; grammar section) | (b) — uniform, backing-independent | M2 placement rule; M2 ("`NodeId`'s `pub u32` stays — the tests depend on it"); spike 11 finding 4 |
+| the *stem formulas* that name contributed fields (arrow name for `field`; `stem_` + `link_stem(arrow)` for `intrusive_list`; `<arrow>_index` for `hash_index` — the instantiation's *local* arrow name, as in field's row; declared stem for csr) | (a) — declaration-specified, pinned per backing (the grammar section's table); there is no single mechanical rule | the four artifacts' pinned names: `source`, `first_out`/`next_out` (grammar.rs `link_stem`), `subnode_index` (spike 11, edge-induced probe, round-3 probe), `buckets` (spike 6) |
 | arena bound to an arrow whose target's arena is hosted elsewhere | (a) — arena's declared requirement (`hosts_arena`) | M2 frontier; Hierarchy is the legal shape |
 | intrusive sourced at an embedded class | (b) — uniform restriction: contributed fields locate only on root-level classes or the store in M3. Separately, intrusive_list declares the stronger (a) predicate `direct_records` on its *endpoints* (a different condition with a different extension — hash_index's host-embedded map legally sits on an embedded configuration) | M2 frontier (this branch's M2 carries the reclassification; fold to main pending — merge chore, Depends on) |
 | intrusive sourced at an unfused root | (a) — DSL-legal: the unfused root's record is the store, so the head is a store-level field, the hook is self-less, the op is a **store-level method** (never a root-handle method — the root handle wraps a shared `&Store`), and the read rides the root handle. Probe-verified end to end (/tmp/m3-probe-r3-root-intrusive, 5/5), including coexistence with per-record lists on one store and the partition validators | M2 write-ops rule; M3 placement rules; the root-intrusive probe |
@@ -127,9 +132,9 @@ reserved set):
 |---|---|
 | `a`, `b`, `k` | the hook's id parameters (self, target, key). Subject to the self rule above: at a root-marked-and-unfused self there is no `a`, and role expressions mentioning it fold to their store-level forms |
 | `rec(x)` | the record of id `x` through its placement-correct path — flat: `store.x_arena[i]`; embedded: `store.host_arena[h].x_arena[i]`; reference-fused: resolved through the partner map to the partner class's path (M2) |
-| `b_arena_of(a)`, `map_from(a)` | "the arena/map hosted by `a`'s record", per the three-case self taxonomy (a fused root-marked self's record is the class record; an unfused root-marked self's record is the store) |
+| `b_arena_of(a)`, `map_from(a)` | "the arena/map hosted by `a`'s record", per the three-case self taxonomy (a fused root-marked self's record is the class record; an unfused root-marked self's record is the store). `b_arena_of` generalizes per entity variable (`k_arena_of` for the key), and like `host_of` it has one definition per placement — at the vacuous-host form (flat ids) it yields the root-level arena of its entity, which is what makes composed containment placement-uniform: `idx(v) < b_arena_of(host_of(v)).len()` is one body at every placement (round 4 — the poly-placement probe verified this check through per-placement bound roles, `$v_in_arena`; the composed role form is its DSL spelling) |
 | `records(E)` | placement-polymorphic enumeration of the **ids** of entity `E`'s records, wherever placed — path ids under embedding, flat ids at root level. Bodies reach the record through `rec(id)`; the id is what error messages name (round-3 repair: the old "(host path, index) pairs / flat index range" wording made `ra.value`-style bodies untypeable and left the error convention without an id) |
-| `maps(A)` | every map the backing contributed for arrow self `A`, wherever placed, as **`(owner, map)` pairs** — one store-level pair whose owner is the vacuous host, or one per host record with the host id as owner. The pair shape is what makes value-host agreement expressible (the host-agreement probe, 5/5; the poly-placement probe's bare-map `$maps` role could not — its honest-limits item 2) |
+| `maps(A)` | every map the backing contributed for arrow self `A`, wherever placed, as **`(owner, map)` pairs** — one store-level pair whose owner is the vacuous host, one pair per self record at a plain self (owner the vacuous host — flat ids carry no host component), or one per host record with the host id as owner. The pair shape is what makes value-host agreement expressible (the host-agreement probe, 5/5; the poly-placement probe's bare-map `$maps` role could not — its honest-limits item 2) |
 | `host_of(v)` | the host component of an id — a path id's host id, or the vacuous host for flat ids. One definition per placement (no overloading — E0428; codegen picks), so with owner-yielding `maps(A)` the value-host-agreement check is one placement-uniform comparison, vacuously true at the store-level placement |
 | `store` | the store value binding available to every body |
 | `AId`, `BId`, `KId` | the id types of the declaration's entity variables — placement-parametric per the self taxonomy: at a plain self `AId` is A's own id type; at a fused root-marked self it is the host's id type; at an unfused root-marked self it does not exist |
@@ -138,7 +143,15 @@ reserved set):
 
 Reserved placeholders (the second closed set, named here so the
 closed-vocabulary preamble holds): `determining(a)`, bound by codegen to
-the by-arrow's emitted field (see intrusive_list's `validate by`).
+the by-arrow's emitted field (see intrusive_list's `validate by`); and
+`handle(x)`, legal in `advance` bodies — it mints the target's handle at
+this placement from the Walk's reserved store ref and, at embedded
+placements, the host path the Walk carries, taking an id or a raw index
+(arena's Walk counts indices). The landed codegen's mint —
+`TargetHandle { store, id }`, path form `(host, index)` — is exactly
+this operation (round 4: both advance sketches used `handle(...)` while
+the table omitted it, breaking the closed-vocabulary preamble the
+clause was written under).
 
 Contributed field names are part of each backing's declared contract,
 stated as a per-site formula the plan pins per backing — there is no
@@ -151,13 +164,21 @@ stem-first, `subnode_index` arrow-first):
 |---|---|---|
 | field | `value` on A | the arrow's local name (`source`) — M1's naming table |
 | intrusive_list | `first` on A, `next` on B | `stem_` + the arrow's stem via M1's `link_stem` `_edges`-strip (`first_out`, `next_out`) |
-| hash_index | `index` on A | `<arrow>_index` (`subnode_index` — spike 11, the edge-induced probe, the round-3 probe) |
+| hash_index | `index` on A | the instantiation's local arrow name + `_index` (`subnode_index` — spike 11, the edge-induced probe, the round-3 probe; "local" pinned explicitly in round 4, matching field's row) |
 | csr_adjacency | `buckets`/`offsets`/`adj` on the store | the declared stem, bare when unambiguous |
 
-Collisions — two contributions deriving one name on one record — take
-the arrow-stem prefix (`buckets_out`/`buckets_in` for two csr bindings on
-one store; `outer_source` across composition instances, matching
-`add_outer_node`/`outer_node_arena`); the collision rule is the (b)
+Collisions — two contributions deriving one name on one record — are
+resolved by a prefix naming the colliding scope (round 4 split what the
+old text called one "arrow-stem prefix" into its two mechanisms):
+within one pattern instance, the arrow-stem prefix (`buckets_out`/
+`buckets_in` for two csr bindings on one store); across composition
+instances, the instance prefix (`outer_source`, matching
+`add_outer_node`/`outer_node_arena` — `outer` is the instance there,
+not a stem). The cross-instance arm is reachable, not exotic: several
+unfused roots on one store are legal (M2), and two unfused-root
+instances of one keyed pattern each contribute a store-level
+`<arrow>_index` — identical stems, so the instance prefix is what
+distinguishes them. The collision rule is the (b)
 uniform half. M1's naming tables carry over unchanged for field and
 intrusive_list.
 
@@ -165,7 +186,9 @@ Each `validate` body is emitted as one doc-hidden method per bound
 backing on the store it validates (`fn __validate_<arrow>(&self) ->
 Result<(), String>` — a method, not a free function: two `implement!`
 sites in one module would collide on the free-function name; the
-round-3 probe hit exactly that), summoned from the store's `validate()`
+round-3 probe recorded the collision and suffixed its hand-emitted names
+around it — `__validate_subnode`, `__validate_subnode_hier`,
+`__validate_subnode_edge`), summoned from the store's `validate()`
 in the `implement!` block's
 binding order. Errors name offending ids in the message text (the
 edge-induced probe's style).
@@ -185,8 +208,11 @@ backing! {
                         // codegen; set_-time re-pointing is M4 vocabulary)
         read(a) { rec(a).value }     // id-space; codegen wraps into the B handle
         validate { for ra in records(A) {
-            /* endpoint-in-range: idx(rec(ra).value) < arena_len(B)
-               (or the placement-correct containment when B is embedded),
+            /* endpoint-in-range, placement-uniform:
+               idx(rec(ra).value)
+                 < b_arena_of(host_of(rec(ra).value)).len()
+               (at flat ids the vacuous-host b_arena_of is the root-level
+               B arena, so the body degenerates to arena_len(B) there),
                naming ra in the message */
         } }
     }
@@ -252,11 +278,12 @@ backing! {
         lookup(a, k) { map_from(a).get(&k).copied() }
         validate {          // every self record's map, wherever placed:
             for (owner, m) in maps(A) {
-                /* per entry (k, v): key existence (idx(k) < arena_len(K)),
-                   value-in-arena (placement-correct containment of v), and
-                   value-host agreement (host_of(v) == owner — one
-                   placement-uniform comparison, vacuously true at the
-                   store-level placement),
+                /* per entry (k, v), all three placement-uniform:
+                   key existence (idx(k) < k_arena_of(host_of(k)).len()),
+                   value-in-arena (idx(v) < b_arena_of(host_of(v)).len()),
+                   value-host agreement (host_of(v) == owner — vacuous
+                   wherever ids are flat: plain self and store level
+                   alike, the vacuous host is each pair's owner there),
                    naming offending ids in the message */
             }
         }
@@ -294,6 +321,58 @@ backing! {
 }
 ```
 
+**The clause grammar, pinned (round 4).** The five declarations imply a
+grammar the plan never stated — a parser author had to invent the
+clause inventory, the mandatory/optional split, and the selection
+rules. The inventory, per cardinality (`req` mandatory, `opt` optional,
+`—` illegal):
+
+| clause | `one` | `many` | `key(K)` | when absent |
+|---|---|---|---|---|
+| `on A { .. }` / `on B { .. }` | opt | opt | opt | no contribution on that record (arena has none) |
+| `on store [build\|frozen] { .. }` | opt | opt | opt | no store-level contribution; labels are legal only on `store`, from the closed set `{build, frozen}` (Constraints); unlabeled `on store` exists in all phases — csr spells the labeled forms, hash_index never spells the slot (its `on A` folds to it) |
+| `ctor_arg` | opt | — | — | the field is hook-maintained or default-initialized; requires an `add_<A>`-orchestrated self (below) |
+| `read(a)` / `lookup(a, k)` | req | — | req | — (the access protocol). The keyword is backing-conventional — the trait method's name comes from the root's registration metadata (M1), never from the clause keyword |
+| `iter Walk { .. }` | — | req | — | — (keyed traits carry no GAT — the hash-index probe's pinned shape) |
+| `iterate(a)` | — | req | — | — |
+| `advance(w)` | — | req | — | — (the body is the whole `next()` body, returning `Option<`target handle`>`) |
+| `on_insert(a[, k], b)` | — | opt | opt | no insert-hook maintenance; `one`'s write path is `ctor_arg` (M4's `set_` grows the re-pointing) |
+| `on_add(a)` | opt | opt | opt | no per-add growth of store-level per-self state; requires an `add_<A>`-orchestrated self |
+| `compact { .. }` | — | opt | — | legal only on a phased backing; phased backings are `many` in M3 (csr is the only one) |
+| `validate` | opt | opt | opt | no validate body summoned for this backing (arena writes none) |
+| `validate by` / `validate primitive` | — | opt | — | selected per binding — below |
+| `membership: existence` | — | opt | — | membership kind comes from the binding site (primitive or `by`-derived, M1) |
+| `requires: ..` | opt | opt | opt | no applicability predicates |
+| `contract: ..` | opt | opt | opt | no contract annotation |
+| `iteration_order: ..` | — | opt | — | no order contract |
+| `phase: ..` | — | opt | — | the backing is unphased |
+
+Rules the table rides on:
+
+- **Selection.** `validate by` is selected when the bound arrow is
+  `by`-derived and `validate primitive` when its membership is
+  primitive — the arrow's instantiation facts, read at `implement!`
+  time where the binding is known (the declaration authors both; the
+  binding picks). A declaration carrying only one variant binds only
+  that membership kind; the other kind at the binding site is an
+  `implement!`-time rejection quoting the arrow and the missing body.
+  Carrying neither is arena's shape.
+- **Cardinality is two checks.** Clause legality (this table) and the
+  root's declared cardinality (Constraints) must both hold; either
+  rejects independently.
+- **Order and repetition.** Clauses appear in any order. A clause
+  repeats only as its selector distinguishes it — `on` once per
+  (target, label) pair, the validate family once per variant. Any
+  other repeat, and any clause not in the table, is grammar-rejected.
+- **Annotation families.** `requires:` (closed predicate vocabulary,
+  Constraints), `contract:` (contract annotations; the closed set is
+  `exclusive_membership` today), `iteration_order:` (closed values
+  `reverse_insertion`, `forward_insertion`), `phase:` (a comma list of
+  properties, each a bare ident or `ident: value` — spike 6's
+  vocabulary distributed across three syntactic homes, each home's set
+  closed), and `membership:` (`existence`). Unknown items in any
+  family are grammar-rejected with the closed set quoted.
+
 What each clause is load-bearing for:
 
 - **`ctor_arg` (field).** A required field must be in the record literal
@@ -302,7 +381,13 @@ What each clause is load-bearing for:
   whose backing contributes `ctor_arg`" — `ctor_arg` requires totality
   (an optional `one` arrow's field is default-initialized and updated by
   M4's `set_`). Field is the only such binding in M3, so the M1/M2
-  constructor surfaces are unchanged. Under composition the merged
+  constructor surfaces are unchanged. Applicability: `ctor_arg` requires
+  an `add_<A>`-orchestrated self (the rule the csr bullet below states
+  for `on_add`); at an unfused root the root owns no constructor
+  (`Store::new()` takes no arguments, M1's pinned API), so the binding —
+  reachable, since `field` is the *default* binding for `one` arrows and
+  M1 allows arrows sourced at the root — is an `implement!`-time
+  rejection (round 4). Under composition the merged
   constructor takes the union of every member's `ctor_arg` arguments;
   colliding argument names are *shared* when the two members' resolved
   target classes agree (one argument feeds both fields — the `<->`
@@ -325,11 +410,17 @@ What each clause is load-bearing for:
   constructors (M1's commitment extended to entity constructors). The
   spike maintained this invariant hand-inlined in `add_node`; without
   the clause the declaration panics on first insert or fails its own
-  validate. Applicability follows: a phased backing requires an
-  `add_<A>`-orchestrated self — plain or fused root-marked. At an
-  unfused root there is no `add_<A>` (the root owns no constructor) and
-  no `a` for `store.buckets[idx(a)]`; `csr_adjacency` bound to an entity
-  arrow or an unfused-root self is an `implement!`-time rejection.
+  validate. Applicability follows, and generalizes (round 4) to every
+  constructor-orchestrated clause — `on_add` here, `ctor_arg` on field:
+  such a clause requires an `add_<A>`-orchestrated self — plain or
+  fused root-marked. At an unfused root there is no `add_<A>` (the root
+  owns no constructor) and no `a` for `store.buckets[idx(a)]`;
+  `csr_adjacency` bound to an entity arrow or an unfused-root self is an
+  `implement!`-time rejection. The fused root-marked form is admitted
+  but unemitted: spike 6 built flat `Digraph` only, and the inference —
+  `a` is the host id, `on_add` fires from the host class's constructor,
+  buckets stay store-level — while coherent is carried as frontier
+  until emission (Frontier, below).
 - **Phase attribution on contributions (`on store build` / `on store
   frozen`).** The type-state store needs to know which fields exist in
   which phase; the spike split them by comment, which two legal
@@ -342,9 +433,18 @@ What each clause is load-bearing for:
   compact in binding order at the single `freeze()`; unlabeled
   store-level contributions (hash_index at an unfused root) exist in
   all phases.
-- **Hooks are id-space functions over `&mut` store state** — spike 11's
-  shape (`insert_subnode_hook(&mut Store, host, main, sub)`), the M1/M2
-  commitment that M4's flush replay builds on. The read side is
+- **Hooks are id-space methods on the store** — doc-hidden
+  `fn __insert_<arrow>(&mut self, ..)` per backing, the landed M1 shape
+  (`macros/src/codegen.rs` emits methods and invokes them
+  `self.#hook(..)`); spike 11's free-function spelling
+  (`insert_subnode_hook(&mut Store, host, main, sub)`) was hand-emission
+  convenience, and the round-3 probes reverted to methods. Methods for
+  the same reason validate is a method (round 4, aligning text with
+  code): two `implement!` sites in one module cannot collide on a
+  method of distinct store types, where free functions would — the
+  hash-index probe recorded exactly that collision and suffixed its
+  hand-emitted names around it. The M1/M2 commitment that M4's flush
+  replay builds on stands; the read side is
   id-space too (`read`, `lookup`); codegen wraps ids into handles for
   the trait impls.
 - **`iter Walk` names the iterator** feeding the trait's GAT — a `many`
@@ -360,7 +460,13 @@ What each clause is load-bearing for:
   iterator fields: codegen adds the store ref to every Walk, and at
   embedded placements the host path beside it — path-id handles need
   the host to mint from, and `iterate(a)`'s `a` is the host id there
-  (M2: embedded iteration "gains a host parameter").
+  (main's M2: embedded iteration "gains a host parameter" — the branch's
+  copy predates the sentence). The clause's own mechanism — body
+  splicing, the `w` binding, `handle(x)` availability — is unprobed
+  (every probe iterator to date was hand-emitted whole); round 4's
+  advance-at-embedded probe is the recorded coverage, and `handle(x)`
+  joins the reserved placeholders (role table) so the body's vocabulary
+  stays closed.
 
 Two mechanical obligations come with user-writable backings:
 
@@ -446,7 +552,12 @@ clause must reproduce the checks the fixed-table era hard-coded.
   /tmp/m3-probe-r3-hostagree, 5/5 — the round-3 hash_index probe first
   demonstrated the gap live under the bare-map reading,
   /tmp/m3-probe-r3-hashindex, 11/11), naming offending ids in
-  the message (the edge-induced probe's style). Key uniqueness is not an
+  the message (the edge-induced probe's style). Round 4 extends the
+  same settlement to the first two checks: with the vacuous-host
+  `b_arena_of`/`k_arena_of` definitions (role table), key existence and
+  value-in-arena are the same one-body shape — the sketches above now
+  author all three checks outright, where round 3 left "placement-
+  correct containment" as a comment. Key uniqueness is not an
   emitted check — a per-self `HashMap` cannot hold two values for one
   key, and a plain insert silently overwrites with `validate()` still
   passing (the edge-induced probe demonstrates both). Uniqueness is
@@ -596,7 +707,10 @@ is rebuilding; that is the whole of the interaction.
 M4 interaction (flagged, not rewritten there): flush step 6 is the
 freeze — the transaction rebuilds through the build phase and finalizes
 before step 7's `validate()`; the spike's `finish()` demonstrates the
-ordering.
+ordering. One gap flagged for M4, not adjudicated here: its step 6 does
+not state the compaction order when several phased backings share a
+store — this plan pins binding order at the single `freeze()` (the
+phase-attribution bullet), and M4 inherits or revisits that pin.
 
 ## Standard library refactor
 
@@ -719,6 +833,20 @@ and "field backing into an embedded class rejected" as a blanket bar
 retired is its extension to hook-maintained path-id values — see the
 placement rules).
 
+Standing limits of the round-3 probes, carried as frontier (round 4):
+`maps(A)` must unify one owner type across a store's map placements —
+mixed host-id shapes (two embedding levels, or path-id and flat-id maps
+on one store) are untested (the host-agreement probe's limits); no
+canonical element-handle accessor is pinned — the root-intrusive
+probe's tests obtained element handles through the members read, and
+codegen owes the accessor its own decision; the ctor-share probe
+asserted `<->` resolution by emitted type only (no partner-map
+machinery executed). One admission ahead of emission, alongside the
+on_add applicability note: csr at a fused root-marked self is admitted
+but unemitted — spike 6 built flat `Digraph` only, and the inference
+(`a` is the host id, `on_add` fires from the host class's constructor,
+buckets stay store-level) holds on paper until something emits it.
+
 ## Depends on
 
 M2 complete — especially a hook interface that survived keyed indexes.
@@ -738,7 +866,15 @@ the extended docking arms (same-instance element-element, self-hosting)
 that pin the two-member consequence. This branch's M2 carries those
 reconciliations; at merge, take main's M2 (rounds 3–4 win) *plus* these
 three reconciliations, and add the same-instance trybuild fixture to
-the compose-time validation acceptance.
+the compose-time validation acceptance. The fold carries two more
+files, and the chore names them (round 4): **epic.md** — main's epic
+still carries the retired "re-expressed as a composition in M3" promise
+(spike 12 killed it), the pre-round status markers (`[vague]`, eleven
+spikes), and lacks the hostings paragraph and the amended invariant-7
+wording; take this branch's epic at merge. **spikes.md** — both
+branches add rows at the same Probes anchor, and main's queued
+combined-rule row is retired by /tmp/m3-probe-r3-ctor-share; union the
+rows, keeping the branch's superset.
 
 ## Task sequence (sketch)
 
