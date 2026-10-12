@@ -592,41 +592,97 @@ refs already handed out, because nothing is applied until flush.
   incremental reuse (persistent structures, chunked arenas) would attach
   if it ever becomes necessary.
 
-## Task sequence (sketch)
+## Implementation checklist
 
-1. Change-set data model + provisional refs for flat `Digraph`; flush =
-   the seven-step pipeline, rebuilding through the build phase from the
-   old store's data (a phased store cannot be cloned-then-replayed —
-   replay-into-frozen is a compile error under M3's type-state decision;
-   for non-phased stores the "build phase" is the M1 builder shape; the
-   kept-membership carry is probe-verified, /tmp/m4-probe-phased-flush).
-   Königsberg built via
-   transaction must equal the M1 store in every observable way (same test
-   assertions).
-2. Write traits generated per arrow — root-sourced default names,
-   courier write slot, one trait per verb (write-trait identity above) —
-   with associated ref types; a generic
-   read→write transform (nodes via a per-pattern node-constructor bound,
-   edges via per-arrow ops, primitive arrows only) as the portability
-   proof.
-3. Flush-error surface: the full list from the core model (dangling
-   endpoint, unknown old id, `set_`/`remove` of a removed
-   element, double removal, ops under a
-   removed nested path) and the staging panics (foreign or stale ref
-   stamp, removal of a `Pending` ref, keyed insert onto a live key);
-   `tx.check()` factoring steps 1–2 as the `into_edit()` pre-flight;
-   deterministic violation ordering.
-4. Nested stores: path-addressed ops (ref segments) and owned
-   sub-transaction scopes; hierarchy
-   edit tests (stage a new outer node *and* its subgraph in one flush —
-   probe-verified, /tmp/m4-probe-nested-pending).
-5. Induction for the subgraph pattern: the inducing `add_subedge`
-   constructor as a builder extension over the generated primitives and
-   the id-based read view.
-6. Removal with compaction and the id-remap report; cascade-policy tests
-   (dangling removals rejected, nested stores dropped with their record;
-   the keyed cascade split, survivors-only liveness, and two-flush
-   re-keying per the probe — /tmp/m4-probe-keyed-carry).
+Ordered by dependency; each step names its acceptance instrument. The
+flat non-phased core is spike-verified (spike 7, 32 tests), and every
+later mechanism is probe-verified — each step's acceptance is the
+corresponding probe's tests reproduced against *generated* code, with
+the probe crate under `/tmp` as the reference implementation.
+
+**Stage 1 — flat, non-phased core (spike 7's territory)**
+
+- [ ] 1. Change-set data model: `Tx` over `&Store` (`edit()`),
+      token-stamped refs (`Existing | Pending`, `Copy`), one flat op
+      queue whose indices count every op, staging methods with local
+      spellings. Acceptance: refs expose no read methods (compile-fail
+      fixture); the change set is a plain struct.
+- [ ] 2. Staging panics: foreign/stale stamp, removal of a `Pending`
+      ref, `set_` of a `Pending` ref, keyed insert onto a live key
+      (two arms: existing entry or staged insert, same host).
+      Acceptance: one `should_panic` test each.
+- [ ] 3. Flush against the M1 builder shape (steps 1–5+7; step 6
+      vacuous): range-guarded step 2 over effective endpoints, honor
+      semantics, attribution (removal op vs naming op), compact +
+      per-arena maps, skeleton sub-order with rebuild-by-walk,
+      submission-order replay. Acceptance: spike 7's 32 tests
+      reproduced, including Königsberg signature equality, plus the
+      out-of-range `Existing` ref returning the listed error, not a
+      panic (the spike-7 bug, /tmp/spike7-oob-repro).
+- [ ] 4. `tx.check()` — steps 1–2 as a pure predicate — plus consuming
+      `flush(self)` and the deterministic error surface (collect,
+      sort, format). Acceptance: byte-identical `Display` across runs
+      (probe 4's determinism test); the committed-mode contract
+      exercised (`check()` green → `into_edit` flush commits).
+- [ ] 5. `into_edit()` allocation reuse, flat non-phased:
+      derive-before-write, forward writes. Acceptance: spike 7's
+      `into_edit` tests.
+
+**Stage 2 — generated write surface**
+
+- [ ] 6. Write-trait codegen: courier write slot; root-sourced names
+      (`AddNode`/`RemoveNode` entity-named, `InsertOutEdges`/
+      `SetSource` arrow-named), one trait per verb, associated ref
+      types, inherent local spellings on the transaction. Acceptance:
+      spike 8's generic copy and node-replacement transforms compile
+      and run unmodified at two marker instantiations against
+      generated code.
+- [ ] 7. `set_` + delete hooks: `unlink_<list>` (total) and the
+      re-point orchestration emitted per binding; builder
+      `set_<one-arrow>` for all `one` arrows (field-write hooks are
+      M2's deliverable, not M4's). Acceptance: probe 3's tests as
+      generated equivalents (head/middle/tail unlink, honor case,
+      double `set_` last-wins, same-verbs-in-order normalization).
+- [ ] 8. Unfused-root forms: self-less `insert_<arrow>(Ref<B>)`
+      (primitive and keyed), store-level ops. Acceptance: the
+      root-intrusive (/tmp/m3-probe-r3-root-intrusive) and
+      edge-induced (/tmp/m2-probe-edge-induced) probes' tests as
+      generated equivalents.
+
+**Stage 3 — nesting, induction, keyed, phased**
+
+- [ ] 9. Nested stores: `within()` owned scope threading `&mut Tx`,
+      ref-segment paths, per-level maps + op-index replay table,
+      root-before-nested grouping, `RemovedPathHost`. Acceptance:
+      probe 2's tests (one-flush hierarchy edit, host-id translation,
+      per-arena ordering).
+- [ ] 10. Induction: the inducing `add_subedge` constructor over
+      generated primitives + the id-based read view, running during
+      replay through the same constructors. The induction×flush-replay
+      probe (HANDOFF-m4-final) must land green before this step
+      starts. Acceptance: the edge-induced probe's tests plus that
+      probe's, as generated equivalents.
+- [ ] 11. Removal + keyed carry: id-remap report (old ids only),
+      survivors-only cascade, composed remap at carry and
+      staged-insert replay, `Existing`-only keyed host/target.
+      Acceptance: probe 4's 15 tests plus spike 7's 14 removal tests
+      as generated equivalents.
+- [ ] 12. Phased stores: flush into `GraphStore<Build>`,
+      kept-fed-then-replay carry (old *frozen* reads only),
+      `finish()` = steps 6–7. Acceptance: probe 1's 12 tests as
+      generated equivalents.
+
+**Stage 4 — hardening**
+
+- [ ] 13. Negative suite: trybuild fixtures (read-on-ref, wrong-marker
+      bounds, handle survival under `into_edit`), the `should_panic`
+      staging tests collected, a downstream-crate transform
+      portability test (M1 step 9's pattern).
+- [ ] 14. Doc pass: crate-root docs for transaction/flush/pass
+      discipline, macro docs updated (M1 step 11's pattern).
+
+Dependencies: 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 11, 12);
+9 → 10. Stage 2 is independent of Stage 1's steps 4–5.
 
 ## Risks
 
