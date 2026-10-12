@@ -252,3 +252,30 @@ fn duplicate_key_rejected_at_the_insert_call() {
     // staging needs the pure form).
     s.insert_subnode(o0(), i0, s1);
 }
+
+#[test]
+fn builder_read_view_getters() {
+    // The builder read view is id-based: getters take and return ids, never
+    // handles. Cross-boundary reads are named `<read-through>_<read>`:
+    // `main_edge_source` reads inner's `source` field where the id arrived
+    // through sub's `main_edge` closure.
+    let mut s = HierarchyStore::new();
+    let a = s.add_outer_node();
+    let _b = s.add_outer_node();
+    let i0 = s.add_inner_node();
+    let i1 = s.add_inner_node();
+    let ie0 = s.add_inner_edge(i0, i1);
+    let sn = s.add_sub_node(a, i0);
+
+    // Same-instance spellings.
+    assert_eq!(s.inner_source(ie0), i0); // `source` collides across instances, so the getter prefixes
+    assert_eq!(s.main_node(sn), i0);
+    // The cross-boundary form: read inner's fields on a main-side id.
+    assert_eq!(s.main_edge_source(ie0), i0);
+    assert_eq!(s.main_edge_target(ie0), i1);
+    // Keyed lookups read the map.
+    s.insert_subnode(a, i0, sn);
+    assert_eq!(s.subnode_by_key(a, i0), Some(sn));
+    assert_eq!(s.subnode_by_key(a, i1), None);
+    assert!(s.validate().is_ok());
+}

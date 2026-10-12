@@ -516,6 +516,57 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             }
         }
     });
+    // The builder's read view: generated id-based getters on the store,
+    // taking and returning ids and copies — never handles (during
+    // construction there is exactly one store, being read and mutated at
+    // once, so no handle can coexist with the `&mut` builder). One
+    // field-read getter per bound `one` arrow, named after the arrow whose
+    // field it reads, plus one keyed lookup per keyed arrow. Pattern-level
+    // constructor logic (induction, dedup) is user code over this view; the
+    // getter names are contract.
+    let read_view = infos.iter().filter_map(|info| {
+        let d = info.decl;
+        match info.backing.as_deref() {
+            Some("field") => {
+                let getter = &d.name;
+                let sid = id_ty(&d.source);
+                let tid = id_ty(&d.target);
+                let s_arena = arena_fld(&d.source);
+                let arrow_doc = &d.name;
+                Some(quote! {
+                    #[doc = concat!("Builder read view: the `", stringify!(#arrow_doc), "` field of `self_id`.")]
+                    pub fn #getter(&self, self_id: #sid) -> #tid {
+                        self.#s_arena[self_id.0 as usize].#getter
+                    }
+                })
+            }
+            Some("hash_index") => {
+                let getter = format_ident!("{}_by_key", d.name);
+                let kid = id_ty(d.key.as_ref().expect("keyed arrows bind a key sort"));
+                let tid = id_ty(&d.target);
+                let idx = format_ident!("{}_index", d.name);
+                let arrow_doc = &d.name;
+                if is_root(&d.source) {
+                    Some(quote! {
+                        #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup.")]
+                        pub fn #getter(&self, key: #kid) -> ::core::option::Option<#tid> {
+                            self.#idx.get(&key).copied()
+                        }
+                    })
+                } else {
+                    let sid = id_ty(&d.source);
+                    let s_arena = arena_fld(&d.source);
+                    Some(quote! {
+                        #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object.")]
+                        pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#tid> {
+                            self.#s_arena[self_id.0 as usize].#idx.get(&key).copied()
+                        }
+                    })
+                }
+            }
+            _ => None,
+        }
+    });
     let root_snake = Ident2::new(&snake(&root_entity.name.to_string()), root_entity.name.span());
     let root_handle = &root_entity.name;
     let store_pattern_name = config
@@ -543,6 +594,8 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             #hook_impls
 
             #(#count_fns)*
+
+            #(#read_view)*
 
             #[doc = concat!("The root handle: the \"object\" view of this store (root entity `", stringify!(#root_handle), "`).")]
             pub fn #root_snake(&self) -> #root_handle<'_> {

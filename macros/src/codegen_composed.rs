@@ -1101,6 +1101,151 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         }
     }
 
+    // The builder's read view: id-based getters on the store, taking and
+    // returning ids and copies — never handles (no handle can coexist with
+    // the `&mut` builder). One field-read getter per bound `one` arrow
+    // (named after the arrow whose field it reads; instance-prefixed on
+    // cross-instance arrow-name collision), plus a cross-boundary form
+    // `<a>_<b>` for each `<->` closure: `a` is the read-through arrow
+    // targeting the open entity, `b` the underlying read on the partner
+    // instance (the probe's `main_edge_source(me)` spelling). One keyed
+    // lookup per keyed arrow (`<arrow>_by_key`). The names are contract:
+    // user-written constructor logic (induction, dedup) reads through them.
+    for (i, infos) in inst_infos.iter().enumerate() {
+        let inst_snake = snake(&members[i].0.to_string());
+        let inst_name = &members[i].0;
+        for info in infos {
+            let d = info.decl;
+            match info.backing.as_deref() {
+                Some("field") => {
+                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+                    let sid = classes[sc].id_name.clone();
+                    let tid = id_ty_of(i, ent_index(i, &d.target)?);
+                    let field = field_of_arrow[&(i, d.name.to_string())].clone();
+                    let getter = if arrow_name_users[&d.name.to_string()] > 1 {
+                        format_ident!("{}_{}", inst_snake, d.name)
+                    } else {
+                        d.name.clone()
+                    };
+                    op_names.push(getter.to_string());
+                    let sref = rec_ref_ts(&classes, sc, quote!(self_id));
+                    let arrow_doc = &d.name;
+                    store_impl.extend(quote! {
+                        #[doc = concat!("Builder read view: the `", stringify!(#arrow_doc), "` field of `self_id` (instance ", stringify!(#inst_name), ").")]
+                        pub fn #getter(&self, self_id: #sid) -> #tid {
+                            #sref.#field
+                        }
+                    });
+                }
+                Some("hash_index") => {
+                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+                    let kid = id_ty_of(i, ent_index(i, d.key.as_ref().unwrap())?);
+                    let vt = id_ty_of(i, ent_index(i, &d.target)?);
+                    let getter = if arrow_name_users[&d.name.to_string()] > 1 {
+                        format_ident!("{}_{}_by_key", inst_snake, d.name)
+                    } else {
+                        format_ident!("{}_by_key", d.name)
+                    };
+                    op_names.push(getter.to_string());
+                    let arrow_doc = &d.name;
+                    if !classes[sc].owns_records {
+                        let map = root_map_of[&(i, d.name.to_string())].clone();
+                        store_impl.extend(quote! {
+                            #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (root-sourced; no self id).")]
+                            pub fn #getter(&self, key: #kid) -> ::core::option::Option<#vt> {
+                                self.#map.get(&key).copied()
+                            }
+                        });
+                    } else {
+                        let sid = classes[sc].id_name.clone();
+                        let map = classes[sc]
+                            .maps
+                            .iter()
+                            .find(|(f, _, _)| {
+                                let want = format_ident!("{}_index", d.name);
+                                let prefixed =
+                                    format_ident!("{}_{}", inst_snake, want);
+                                *f == want || *f == prefixed
+                            })
+                            .map(|(f, _, _)| f.clone())
+                            .expect("hash_index map contributed at collection");
+                        let sref = rec_ref_ts(&classes, sc, quote!(self_id));
+                        store_impl.extend(quote! {
+                            #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object.")]
+                            pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#vt> {
+                                #sref.#map.get(&key).copied()
+                            }
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Cross-boundary field reads: for each `<->` closure (open X.O, partner
+    // Y.E), each X-arrow `a` targeting O pairs with each bound field-backed
+    // `one` arrow `b` sourced at E in Y: `<a>_<b>(id) -> target`, reading
+    // b's field where the caller's id arrived through a's closure.
+    for f in &c.fusions {
+        if f.op != crate::grammar::FusionOp::Ref {
+            continue;
+        }
+        // (open instance, open entity) and (closed instance, closed entity).
+        let (xi, oi, yi, ei) = {
+            let li = members.iter().position(|(m, _, _)| *m == f.lhs.0).unwrap();
+            let ri = members.iter().position(|(m, _, _)| *m == f.rhs.0).unwrap();
+            let le = members[li].2.entities.iter().position(|e| e.name == f.lhs.1).unwrap();
+            let re = members[ri].2.entities.iter().position(|e| e.name == f.rhs.1).unwrap();
+            if members[li].2.entities[le].open {
+                (li, le, ri, re)
+            } else {
+                (ri, re, li, le)
+            }
+        };
+        // Arrows of X targeting the open entity.
+        for xa in members[xi].2.arrows.iter().filter(|a| {
+            members[xi]
+                .2
+                .entities
+                .iter()
+                .position(|e| e.name == a.target)
+                == Some(oi)
+        }) {
+            // Bound field-backed one arrows of Y sourced at the closed entity.
+            for yb in members[yi].2.arrows.iter().filter(|b| {
+                members[yi]
+                    .2
+                    .entities
+                    .iter()
+                    .position(|e| e.name == b.source)
+                    == Some(ei)
+            }) {
+                let yinfo = inst_infos[yi]
+                    .iter()
+                    .find(|inf| inf.decl.name == yb.name)
+                    .expect("every arrow resolved");
+                if yinfo.backing.as_deref() != Some("field") {
+                    continue;
+                }
+                let getter = format_ident!("{}_{}", xa.name, yb.name);
+                op_names.push(getter.to_string());
+                let sid = classes[class_index_of(yi, ei)].id_name.clone();
+                let tid = id_ty_of(yi, ent_index(yi, &yb.target)?);
+                let sc = class_index_of(yi, ei);
+                let field = field_of_arrow[&(yi, yb.name.to_string())].clone();
+                let sref = rec_ref_ts(&classes, sc, quote!(self_id));
+                let through = &xa.name;
+                let read = &yb.name;
+                store_impl.extend(quote! {
+                    #[doc = concat!("Builder read view: the `", stringify!(#read), "` field, where the id arrived through the `", stringify!(#through), "` reference closure.")]
+                    pub fn #getter(&self, self_id: #sid) -> #tid {
+                        #sref.#field
+                    }
+                });
+            }
+        }
+    }
+
     // Root accessors: one per unfused root entity, instance-prefixed.
     for ci in 0..classes.len() {
         if classes[ci].owns_records || !classes[ci].has_root {
