@@ -1286,11 +1286,323 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         });
     }
 
-    // validate() boundary (step 12 fills the canonical inventory).
+    // ---- validate(): the canonical runtime inventory (M2 step 12) ----
+    // Exactly what M4's flush will run: key existence, value-in-arena, and
+    // value-host agreement for keyed maps (path ids need the host check —
+    // value-in-arena alone passes a value parked in the wrong host's
+    // arena); endpoint range checks plus the intrusive-ownership check for
+    // list backings — the partition walk for primitive membership,
+    // consistency against the determining field for `by`-derived
+    // membership. `arena` backing stores no endpoints: membership is
+    // presence in the target arena.
+    // Value-in-arena test for an id `v` of class cj (path-aware: a path id
+    // is in-bounds only within the arena its host component names).
+    let out_of_range = |cj: usize, v: TokenStream2| -> TokenStream2 {
+        match classes[cj].loc {
+            ClassLoc::Root => {
+                let ta = &classes[cj].arena_fld;
+                quote!((#v).0 as usize >= self.#ta.len())
+            }
+            ClassLoc::Embedded(hc) => {
+                let ha = &classes[hc].arena_fld;
+                let ta = &classes[cj].arena_fld;
+                quote!(
+                    (#v).0.0 as usize >= self.#ha.len()
+                        || (#v).1 as usize >= self.#ha[(#v).0.0 as usize].#ta.len()
+                )
+            }
+        }
+    };
+    // Enumerate every record of class ci with `self_id` bound to its id
+    // and `srec` to its record data (host-nested for embedded classes).
+    let enum_recs = |ci: usize, inner: TokenStream2| -> TokenStream2 {
+        match classes[ci].loc {
+            ClassLoc::Root => {
+                let a = &classes[ci].arena_fld;
+                let idt = &classes[ci].id_name;
+                quote! {
+                    for (ri_, srec_) in self.#a.iter().enumerate() {
+                        let self_id = #idt(ri_ as u32);
+                        let srec = srec_;
+                        #inner
+                    }
+                }
+            }
+            ClassLoc::Embedded(hc) => {
+                let ha = &classes[hc].arena_fld;
+                let a = &classes[ci].arena_fld;
+                let hid = &classes[hc].id_name;
+                let idt = &classes[ci].id_name;
+                quote! {
+                    for (hi_, hrec_) in self.#ha.iter().enumerate() {
+                        for (ri_, srec_) in hrec_.#a.iter().enumerate() {
+                            let self_id = #idt(#hid(hi_ as u32), ri_ as u32);
+                            let srec = srec_;
+                            #inner
+                        }
+                    }
+                }
+            }
+        }
+    };
+    // Safe record access for walks: None when an id is out of range (the
+    // range pre-pass has already reported it; the walk must not panic).
+    let rec_get = |cj: usize, idv: TokenStream2| -> TokenStream2 {
+        match classes[cj].loc {
+            ClassLoc::Root => {
+                let ta = &classes[cj].arena_fld;
+                quote!(self.#ta.get((#idv).0 as usize))
+            }
+            ClassLoc::Embedded(hc) => {
+                let ha = &classes[hc].arena_fld;
+                let ta = &classes[cj].arena_fld;
+                quote!(self.#ha.get((#idv).0.0 as usize).and_then(|h| h.#ta.get((#idv).1 as usize)))
+            }
+        }
+    };
+    let mut validate_checks: Vec<TokenStream2> = Vec::new();
+    for (i, infos) in inst_infos.iter().enumerate() {
+        let inst_name = &members[i].0;
+        let inst_snake = snake(&members[i].0.to_string());
+        let arrow_label = |n: &Ident2| quote!(stringify!(#inst_name), stringify!(#n));
+        for info in infos {
+            let d = info.decl;
+            match info.backing.as_deref() {
+                Some("field") => {
+                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+                    let tc = class_index_of(i, ent_index(i, &d.target)?);
+                    let field = field_of_arrow[&(i, d.name.to_string())].clone();
+                    let bad = out_of_range(tc, quote!(v));
+                    let label = arrow_label(&d.name);
+                    validate_checks.push(enum_recs(sc, quote! {
+                        let v = srec.#field;
+                        if #bad {
+                            errs.push(::std::format!("arrow `{}.{}`: {:?} points at {:?}, which is not a live record", #label, self_id, v));
+                        }
+                    }));
+                }
+                Some("intrusive_list") => {
+                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+                    let tc = class_index_of(i, ent_index(i, &d.target)?);
+                    let tid = classes[tc].id_name.clone();
+                    let head = format_ident!("first_{}", crate::grammar::link_stem(&d.name));
+                    let next = format_ident!("next_{}", crate::grammar::link_stem(&d.name));
+                    let head_field = classes[sc].fields
+                        .iter()
+                        .find(|fc| fc.field == head || fc.field == format_ident!("{}_{}", inst_snake, head))
+                        .map(|fc| fc.field.clone())
+                        .unwrap_or(head.clone());
+                    let next_field = classes[tc].fields
+                        .iter()
+                        .find(|fc| fc.field == next || fc.field == format_ident!("{}_{}", inst_snake, next))
+                        .map(|fc| fc.field.clone())
+                        .unwrap_or(next.clone());
+                    let label = arrow_label(&d.name);
+                    // Range pre-pass over every endpoint the backing stores.
+                    let bad_link = out_of_range(tc, quote!(n));
+                    validate_checks.push(enum_recs(tc, quote! {
+                        if let ::core::option::Option::Some(n) = srec.#next_field {
+                            if #bad_link {
+                                errs.push(::std::format!(
+                                    "arrow `{}.{}`: `{}` link of {:?} points at {:?}, which is not a live record",
+                                    #label, stringify!(#next_field), self_id, n,
+                                ));
+                            }
+                        }
+                    }));
+                    let bad_head = out_of_range(tc, quote!(h));
+                    validate_checks.push(enum_recs(sc, quote! {
+                        if let ::core::option::Option::Some(h) = srec.#head_field {
+                            if #bad_head {
+                                errs.push(::std::format!(
+                                    "arrow `{}.{}`: `{}` head of {:?} points at {:?}, which is not a live record",
+                                    #label, stringify!(#head_field), self_id, h,
+                                ));
+                            }
+                        }
+                    }));
+                    let get_rec = rec_get(tc, quote!(mid));
+                    if d.by.is_none() {
+                        // Primitive membership: the intrusive-ownership
+                        // partition check. Per-walk repeats are cycles
+                        // (traversal diverges); cross-list repeats are
+                        // shared membership (insert silently truncated the
+                        // older list).
+                        let per_rec = enum_recs(sc, quote! {
+                            let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                            let mut cur = srec.#head_field;
+                            while let ::core::option::Option::Some(mid) = cur {
+                                if !walk.insert(mid) {
+                                    errs.push(::std::format!(
+                                        "arrow `{}.{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
+                                        #label, self_id, mid,
+                                    ));
+                                    break;
+                                }
+                                if !seen.insert(mid) {
+                                    errs.push(::std::format!(
+                                        "arrow `{}.{}`: {:?} appears in more than one list — shared membership; the insert silently truncated the older list",
+                                        #label, mid,
+                                    ));
+                                    break;
+                                }
+                                cur = match #get_rec {
+                                    ::core::option::Option::Some(r) => r.#next_field,
+                                    ::core::option::Option::None => break,
+                                };
+                            }
+                        });
+                        validate_checks.push(quote! {
+                            {
+                                let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                                #per_rec
+                            }
+                        });
+                    } else {
+                        // `by`-derived membership: consistency against the
+                        // determining field covers exclusivity (a determinant
+                        // is single-valued, so consistent membership cannot
+                        // repeat), plus coverage — every record must sit in
+                        // the list its determinant names.
+                        let det_name = d.by.as_ref().unwrap();
+                        let detf = field_of_arrow[&(i, det_name.to_string())].clone();
+                        let per_rec = enum_recs(sc, quote! {
+                            let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                            let mut cur = srec.#head_field;
+                            while let ::core::option::Option::Some(mid) = cur {
+                                let mrec = match #get_rec {
+                                    ::core::option::Option::Some(r) => r,
+                                    ::core::option::Option::None => break,
+                                };
+                                if mrec.#detf != self_id {
+                                    errs.push(::std::format!(
+                                        "arrow `{}.{}`: {:?} is in the list of {:?} but its `{}` field says {:?} — membership contradicts the determinant",
+                                        #label, mid, self_id, stringify!(#det_name), mrec.#detf,
+                                    ));
+                                }
+                                if !walk.insert(mid) {
+                                    errs.push(::std::format!(
+                                        "arrow `{}.{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
+                                        #label, self_id, mid,
+                                    ));
+                                    break;
+                                }
+                                if !seen.insert(mid) {
+                                    errs.push(::std::format!(
+                                        "arrow `{}.{}`: {:?} appears in more than one list — shared membership",
+                                        #label, mid,
+                                    ));
+                                    break;
+                                }
+                                cur = mrec.#next_field;
+                            }
+                        });
+                        let coverage = enum_recs(tc, quote! {
+                            if !seen.contains(&self_id) {
+                                errs.push(::std::format!(
+                                    "arrow `{}.{}`: {:?} is missing from the list of its `{}` ({:?})",
+                                    #label, self_id, stringify!(#det_name), srec.#detf,
+                                ));
+                            }
+                        });
+                        validate_checks.push(quote! {
+                            {
+                                let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                                #per_rec
+                                #coverage
+                            }
+                        });
+                    }
+                }
+                Some("hash_index") => {
+                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+                    let tc = class_index_of(i, ent_index(i, &d.target)?);
+                    let kc = class_index_of(i, ent_index(i, d.key.as_ref().unwrap())?);
+                    let kbad = out_of_range(kc, quote!(k));
+                    let vbad = out_of_range(tc, quote!(v));
+                    let label = arrow_label(&d.name);
+                    if !classes[sc].owns_records {
+                        // Store-level map (unfused-root self): key existence
+                        // and value-in-arena. No host agreement — there is
+                        // no self record to anchor the value's host against.
+                        let map = root_map_of[&(i, d.name.to_string())].clone();
+                        validate_checks.push(quote! {
+                            for (k, v) in self.#map.iter() {
+                                if #kbad {
+                                    errs.push(::std::format!("arrow `{}.{}`: key {:?} does not name a record", #label, k));
+                                }
+                                if #vbad {
+                                    errs.push(::std::format!("arrow `{}.{}`: value {:?} of key {:?} is not a live record", #label, v, k));
+                                }
+                            }
+                        });
+                    } else {
+                        let map = classes[sc]
+                            .maps
+                            .iter()
+                            .find(|(f, _, _)| {
+                                let want = format_ident!("{}_index", d.name);
+                                let prefixed = format_ident!("{}_{}", inst_snake, want);
+                                *f == want || *f == prefixed
+                            })
+                            .map(|(f, _, _)| f.clone())
+                            .expect("hash_index map contributed at collection");
+                        // Value-host agreement: an embedded-target map holds
+                        // host-anchored path ids — the value's host component
+                        // must name the host record anchoring this self
+                        // object (the self record itself when its class is
+                        // the host, its own host component when embedded in
+                        // the same host class). Without this check a value
+                        // parked in a different host's arena passes
+                        // value-in-arena.
+                        let host_agree = match classes[tc].loc {
+                            ClassLoc::Embedded(hc) => match (sc == hc, classes[sc].loc) {
+                                (true, _) => Some(quote!(v.0 != self_id)),
+                                (false, ClassLoc::Embedded(sch)) if sch == hc => {
+                                    Some(quote!(v.0 != self_id.0))
+                                }
+                                _ => None,
+                            },
+                            ClassLoc::Root => None,
+                        }
+                        .map(|cond| quote! {
+                            if #cond {
+                                errs.push(::std::format!(
+                                    "arrow `{}.{}`: value {:?} of key {:?} is anchored at the wrong host (self is {:?})",
+                                    #label, v, k, self_id,
+                                ));
+                            }
+                        })
+                        .unwrap_or_default();
+                        validate_checks.push(enum_recs(sc, quote! {
+                            for (k, v) in srec.#map.iter() {
+                                if #kbad {
+                                    errs.push(::std::format!("arrow `{}.{}`: key {:?} does not name a record", #label, k));
+                                }
+                                if #vbad {
+                                    errs.push(::std::format!("arrow `{}.{}`: value {:?} of key {:?} on {:?} is not a live record", #label, v, k, self_id));
+                                }
+                                #host_agree
+                            }
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // validate() boundary: the canonical inventory, collected above.
     store_impl.extend(quote! {
-        #[doc = "Structural validation. The canonical per-backing and keyed checks land with milestone-2 step 12; M4's flush calls this unconditionally."]
+        #[doc = "Structural validation: the canonical runtime inventory. Keyed maps check key existence, value-in-arena, and (for embedded targets) value-host agreement; list backings check endpoint ranges and the intrusive-ownership contract — the partition walk for primitive membership, determinant consistency for `by`-derived membership. M4's flush calls this unconditionally."]
         pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
-            ::core::result::Result::Ok(())
+            let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+            #(#validate_checks)*
+            if errs.is_empty() {
+                ::core::result::Result::Ok(())
+            } else {
+                ::core::result::Result::Err(errs.join("; "))
+            }
         }
     });
 

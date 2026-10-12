@@ -54,6 +54,9 @@ fn node_ids(order: Vec<Node<'_>>) -> Vec<u32> {
 #[test]
 fn store_shape() {
     let s = koenigsberg();
+    // The canonical inventory over a flat store: determinant consistency
+    // and coverage for both by-derived list arrows, endpoint ranges.
+    assert!(s.validate().is_ok());
     assert_eq!(s.node_count(), 4);
     assert_eq!(s.edge_count(), 14);
 

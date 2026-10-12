@@ -486,6 +486,204 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         }
     }
 
+    // ---- validate(): the canonical runtime inventory (M2 step 12) ----
+    // Everything M4's flush will run, and nothing more: key existence and
+    // value-in-arena for keyed maps (flat stores have no embedded classes,
+    // so no host component to agree); endpoint range checks plus the
+    // intrusive-ownership check for list backings — the partition walk for
+    // primitive membership, consistency against the determining field for
+    // `by`-derived membership. `arena` backing stores no endpoints to
+    // check: membership is presence in the target arena.
+    let mut checks: Vec<TokenStream2> = Vec::new();
+    for info in &infos {
+        let d = info.decl;
+        let arrow_doc_name = &d.name;
+        match info.backing.as_deref() {
+            Some("field") => {
+                let f = &d.name;
+                let sid = id_ty(&d.source);
+                let s_arena = arena_fld(&d.source);
+                let t_arena = arena_fld(&d.target);
+                checks.push(quote! {
+                    for (si, rec) in self.#s_arena.iter().enumerate() {
+                        let v = rec.#f;
+                        if v.0 as usize >= self.#t_arena.len() {
+                            errs.push(::std::format!(
+                                "arrow `{}`: {:?} points at {:?}, which is not a live record",
+                                stringify!(#arrow_doc_name), #sid(si as u32), v,
+                            ));
+                        }
+                    }
+                });
+            }
+            Some("intrusive_list") => {
+                let head = format_ident!("first_{}", link_stem(&d.name));
+                let next = format_ident!("next_{}", link_stem(&d.name));
+                let sid = id_ty(&d.source);
+                let tid = id_ty(&d.target);
+                let s_arena = arena_fld(&d.source);
+                let t_arena = arena_fld(&d.target);
+                // Range pre-pass over every endpoint the backing stores.
+                checks.push(quote! {
+                    for (ti, trec) in self.#t_arena.iter().enumerate() {
+                        if let Some(n) = trec.#next {
+                            if n.0 as usize >= self.#t_arena.len() {
+                                errs.push(::std::format!(
+                                    "arrow `{}`: `{}` link of {:?} points at {:?}, which is not a live record",
+                                    stringify!(#arrow_doc_name), stringify!(#next), #tid(ti as u32), n,
+                                ));
+                            }
+                        }
+                    }
+                    for (si, srec) in self.#s_arena.iter().enumerate() {
+                        if let Some(h) = srec.#head {
+                            if h.0 as usize >= self.#t_arena.len() {
+                                errs.push(::std::format!(
+                                    "arrow `{}`: `{}` head of {:?} points at {:?}, which is not a live record",
+                                    stringify!(#arrow_doc_name), stringify!(#head), #sid(si as u32), h,
+                                ));
+                            }
+                        }
+                    }
+                });
+                if d.by.is_none() {
+                    // Primitive membership: the intrusive-ownership
+                    // partition check. Per-walk repeats are cycles (traversal
+                    // diverges); cross-list repeats are shared membership
+                    // (insert silently truncated the older list).
+                    checks.push(quote! {
+                        {
+                            let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                            for (si, srec) in self.#s_arena.iter().enumerate() {
+                                let self_id = #sid(si as u32);
+                                let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                                let mut cur = srec.#head;
+                                while let Some(mid) = cur {
+                                    if !walk.insert(mid) {
+                                        errs.push(::std::format!(
+                                            "arrow `{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
+                                            stringify!(#arrow_doc_name), self_id, mid,
+                                        ));
+                                        break;
+                                    }
+                                    if !seen.insert(mid) {
+                                        errs.push(::std::format!(
+                                            "arrow `{}`: {:?} appears in more than one list — shared membership; the insert silently truncated the older list",
+                                            stringify!(#arrow_doc_name), mid,
+                                        ));
+                                        break;
+                                    }
+                                    cur = match self.#t_arena.get(mid.0 as usize) {
+                                        ::core::option::Option::Some(r) => r.#next,
+                                        ::core::option::Option::None => break,
+                                    };
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    // `by`-derived membership: consistency against the
+                    // determining field covers exclusivity (a determinant is
+                    // single-valued, so consistent membership cannot repeat),
+                    // plus coverage — every record must sit in the list its
+                    // determinant names.
+                    let detf = d.by.as_ref().unwrap();
+                    checks.push(quote! {
+                        {
+                            let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                            for (si, srec) in self.#s_arena.iter().enumerate() {
+                                let self_id = #sid(si as u32);
+                                let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
+                                let mut cur = srec.#head;
+                                while let Some(mid) = cur {
+                                    let mrec = match self.#t_arena.get(mid.0 as usize) {
+                                        ::core::option::Option::Some(r) => r,
+                                        ::core::option::Option::None => break,
+                                    };
+                                    if mrec.#detf != self_id {
+                                        errs.push(::std::format!(
+                                            "arrow `{}`: {:?} is in the list of {:?} but its `{}` field says {:?} — membership contradicts the determinant",
+                                            stringify!(#arrow_doc_name), mid, self_id, stringify!(#detf), mrec.#detf,
+                                        ));
+                                    }
+                                    if !walk.insert(mid) {
+                                        errs.push(::std::format!(
+                                            "arrow `{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
+                                            stringify!(#arrow_doc_name), self_id, mid,
+                                        ));
+                                        break;
+                                    }
+                                    if !seen.insert(mid) {
+                                        errs.push(::std::format!(
+                                            "arrow `{}`: {:?} appears in more than one list — shared membership",
+                                            stringify!(#arrow_doc_name), mid,
+                                        ));
+                                        break;
+                                    }
+                                    cur = mrec.#next;
+                                }
+                            }
+                            for (ti, trec) in self.#t_arena.iter().enumerate() {
+                                let mid = #tid(ti as u32);
+                                if !seen.contains(&mid) {
+                                    errs.push(::std::format!(
+                                        "arrow `{}`: {:?} is missing from the list of its `{}` ({:?})",
+                                        stringify!(#arrow_doc_name), mid, stringify!(#detf), trec.#detf,
+                                    ));
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            Some("hash_index") => {
+                let t_arena = arena_fld(&d.target);
+                let k_arena = arena_fld(d.key.as_ref().expect("keyed arrows bind a key sort"));
+                let idx = format_ident!("{}_index", d.name);
+                if is_root(&d.source) {
+                    checks.push(quote! {
+                        for (k, v) in self.#idx.iter() {
+                            if k.0 as usize >= self.#k_arena.len() {
+                                errs.push(::std::format!(
+                                    "arrow `{}`: key {:?} does not name a record",
+                                    stringify!(#arrow_doc_name), k,
+                                ));
+                            }
+                            if v.0 as usize >= self.#t_arena.len() {
+                                errs.push(::std::format!(
+                                    "arrow `{}`: value {:?} of key {:?} is not a live record",
+                                    stringify!(#arrow_doc_name), v, k,
+                                ));
+                            }
+                        }
+                    });
+                } else {
+                    let s_arena = arena_fld(&d.source);
+                    let sid = id_ty(&d.source);
+                    checks.push(quote! {
+                        for (si, srec) in self.#s_arena.iter().enumerate() {
+                            for (k, v) in srec.#idx.iter() {
+                                if k.0 as usize >= self.#k_arena.len() {
+                                    errs.push(::std::format!(
+                                        "arrow `{}`: key {:?} does not name a record",
+                                        stringify!(#arrow_doc_name), k,
+                                    ));
+                                }
+                                if v.0 as usize >= self.#t_arena.len() {
+                                    errs.push(::std::format!(
+                                        "arrow `{}`: value {:?} of key {:?} on {:?} is not a live record",
+                                        stringify!(#arrow_doc_name), v, k, #sid(si as u32),
+                                    ));
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     // ---- store struct ----
     let arena_fields = elements.iter().map(|e| {
         let f = arena_fld(&e.name);
@@ -602,9 +800,15 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 #root_handle { store: self }
             }
 
-            #[doc = "Structural validation. M1 has nothing to check (every invariant holds by construction); M2 hangs key and per-backing checks on this boundary, and M4's flush calls it unconditionally."]
+            #[doc = "Structural validation: the canonical runtime inventory. Key existence and value-in-arena for keyed maps; endpoint ranges and the intrusive-ownership check for list backings (the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
             pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
-                ::core::result::Result::Ok(())
+                let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+                #(#checks)*
+                if errs.is_empty() {
+                    ::core::result::Result::Ok(())
+                } else {
+                    ::core::result::Result::Err(errs.join("; "))
+                }
             }
         }
     });
