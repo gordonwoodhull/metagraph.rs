@@ -708,7 +708,7 @@ the probe crate under `/tmp` as the reference implementation.
       reproduced, including Königsberg signature equality, plus the
       out-of-range `Existing` ref returning the listed error, not a
       panic (the spike-7 bug, /tmp/spike7-oob-repro).
-- [ ] 4. `tx.check()` — steps 1–2 as a pure predicate — plus consuming
+- [x] 4. `tx.check()` — steps 1–2 as a pure predicate — plus consuming
       `flush(self)` and the deterministic error surface (collect,
       sort, format). Acceptance: byte-identical `Display` across runs
       (probe 4's determinism test); the committed-mode contract

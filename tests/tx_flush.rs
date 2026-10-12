@@ -614,3 +614,66 @@ fn out_of_range_existing_ref_is_a_flush_error_not_a_panic() {
         }
     }
 }
+
+// ---- step 4: check() + the deterministic error surface ------------------
+
+#[test]
+fn check_green_then_flush_commits() {
+    // The committed-mode contract's read half: a green check means the
+    // subsequent flush of the SAME change set passes steps 1-2 (the
+    // analysis is shared). The owning half — check on an `into_edit`
+    // transaction — lands with step 5.
+    let base = koenigsberg();
+    let mut tx = base.edit();
+    let x = tx.add_node();
+    tx.add_edge(x, NodeId(0));
+    tx.remove_edge(EdgeId(13));
+    assert_eq!(tx.check(), Ok(()));
+    let out = tx.flush().expect("green check -> flush commits");
+    assert_eq!(out.store.edge_count(), 14); // 13 kept + 1 staged
+    out.store.validate().expect("validate");
+}
+
+#[test]
+fn check_reports_the_same_violations_as_flush() {
+    // check is the flush's own analysis, not a re-implementation: the
+    // violation lists agree exactly on the same change set.
+    let base = koenigsberg();
+    let render = |tx: Tx<'_>| -> FlushError {
+        match tx.flush() {
+            Ok(_) => panic!("this change set dangles"),
+            Err(e) => e,
+        }
+    };
+    let mut tx1 = base.edit();
+    tx1.remove_node(NodeId(0)); // five incident edges dangle
+    let flush_err = render(tx1);
+    let mut tx2 = base.edit();
+    tx2.remove_node(NodeId(0));
+    let check_err = tx2.check().expect_err("danglers");
+    assert_eq!(check_err, flush_err);
+    assert_eq!(check_err.violations.len(), 10); // 5 out + 5 in
+}
+
+#[test]
+fn error_display_is_deterministic() {
+    // Six independently built identical stores, the same failing change
+    // set -> byte-identical Display every time (probe 4's pattern). The
+    // payload spans several violation kinds and op indices so any
+    // discovery-order leak would surface.
+    let render = || {
+        let mut base = koenigsberg();
+        let _d = base.add_node(); // shift nothing; keep ids stable
+        let mut tx = base.edit();
+        tx.remove_node(NodeId(0)); // ops 0: five out- and five in-danglers
+        tx.remove_edge(EdgeId(13)); // op 1: cures one
+        tx.remove_edge(EdgeId(0)); // op 2: cures another
+        tx.add_edge(NodeId(1), NodeId(0)); // op 3: staged dangler at its op
+        tx.remove_edge(EdgeId(42)); // op 4: unknown old id
+        tx.flush().unwrap_err().to_string()
+    };
+    let a = render();
+    for _ in 0..5 {
+        assert_eq!(a, render());
+    }
+}

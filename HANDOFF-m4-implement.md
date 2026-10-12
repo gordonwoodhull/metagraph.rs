@@ -50,7 +50,20 @@ be exercised before its staging call exists. Recorded here per the plan's
   Violation/FlushError/RecordDesc/FlushReport{per-arena _map}/
   FlushOutcome emitted per store.
 
-Not started: steps 4–14.
+- **Step 4** (this commit): flush steps 1–2 factored into a generated
+  doc-hidden `Tx::__analyze(old, ops) -> Result<__TxAnalysis,
+  FlushError>` (per-arena counts + removed/removed_by sets); `pub fn
+  check(&self)` predicates on it, flush destructures its result and
+  runs steps 3–7 on the same bindings. Tests in tests/tx_flush.rs:
+  check-green→flush-commits (via edit — the into_edit half of the
+  committed-mode contract lands with step 5), check's violations ==
+  flush's on the same change set, byte-identical Display across six
+  independent builds. Note: the flat non-phased pipeline has no
+  HashMap-sourced order yet; the sort half of the determinism rule
+  ("collect, sort") starts mattering with step 11's keyed carries —
+  the emission point is where the keyed loops land.
+
+Not started: steps 5–14.
 
 ## Architecture decisions (settled in the survey, keep unless forced)
 

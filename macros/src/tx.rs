@@ -301,6 +301,23 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let f = &x.map;
         quote!(#f: #f,)
     });
+    // The analysis struct's per-entity members, in the pipeline's local
+    // names, so the destructure in `flush` hands steps 3-7 the same
+    // bindings the inlined pipeline used to declare.
+    let analysis_struct_fields = ents.iter().flat_map(|x| {
+        let (c, removed, removed_by) = (&x.count, &x.removed, &x.removed_by);
+        [
+            quote!(#c: usize,),
+            quote!(#removed: ::std::vec::Vec<bool>,),
+            quote!(#removed_by: ::std::vec::Vec<::core::option::Option<usize>>,),
+        ]
+    });
+    let analysis_members: Vec<Ident2> = ents
+        .iter()
+        .flat_map(|x| [x.count.clone(), x.removed.clone(), x.removed_by.clone()])
+        .collect();
+    let analysis_fields = analysis_members.iter().map(|m| quote!(#m,));
+    let analysis_names = analysis_members.iter().map(|m| quote!(#m,));
     let flush_types = quote! {
         #[doc = "How a record was named in a [`Violation::DanglingEndpoint`]: an old-store record kept from the previous store (its arena name and old id), or a record staged in this change set (its `add` op's index)."]
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -352,6 +369,12 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         pub struct FlushOutcome {
             pub store: #store,
             pub report: FlushReport,
+        }
+
+        #[doc(hidden)]
+        #[doc = "The shared steps 1-2 analysis (per-arena counts, resolved removal sets with attribution) that `check` predicates on and `flush` consumes."]
+        struct __TxAnalysis {
+            #(#analysis_struct_fields)*
         }
     };
 
@@ -673,10 +696,12 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     });
 
     let flush_method = quote! {
-        #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists rebuilt by walking the old chains) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — flat stores have none), (7) `validate()`. The old store is untouched; a rejection leaves nothing half-applied."]
-        pub fn flush(self) -> ::core::result::Result<FlushOutcome, FlushError> {
-            let Tx { old, token: _, ops } = self;
-
+        #[doc(hidden)]
+        #[doc = "Steps 1-2 as one pure analysis over (old store, ops): the resolved removal sets (with attributing op indices), per-arena counts, and every violation found in old-id space. `check` and `flush` consume the same function, so a green check and a committing flush can never disagree."]
+        fn __analyze(
+            old: &#store,
+            ops: &[Op],
+        ) -> ::core::result::Result<__TxAnalysis, FlushError> {
             // -- step 1: resolve removals; validate every Existing ref -----
             #(#s1_counts)*
             #(#s1_state)*
@@ -700,6 +725,22 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             if !violations.is_empty() {
                 return ::core::result::Result::Err(FlushError { violations });
             }
+            ::core::result::Result::Ok(__TxAnalysis {
+                #(#analysis_fields)*
+            })
+        }
+
+        #[doc = "The flush's first two steps as a pure predicate: resolves removals and collects every violation (unknown ids, double removals, danglers) the flush would reject with — without building anything. A green check means a subsequent `flush` of the SAME change set passes steps 1-2 (the committed-mode contract's read half; `into_edit` is the other)."]
+        pub fn check(&self) -> ::core::result::Result<(), FlushError> {
+            Self::__analyze(self.old, &self.ops).map(|_| ())
+        }
+
+        #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space — steps 1-2 are the same `check` analysis, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists rebuilt by walking the old chains) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — flat stores have none), (7) `validate()`. The old store is untouched; a rejection leaves nothing half-applied."]
+        pub fn flush(self) -> ::core::result::Result<FlushOutcome, FlushError> {
+            let Tx { old, token: _, ops } = self;
+            let __TxAnalysis {
+                #(#analysis_names)*
+            } = Self::__analyze(old, &ops)?;
 
             // -- step 3: compaction; per-arena old->new id maps ------------
             #(#s3_maps)*
