@@ -1,0 +1,16 @@
+[package]
+name = "downstream-indirect"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+metagraph-exper = { path = "../../.." }
+downstream-reexporter = { path = "../reexporter" }
+
+[features]
+# The resolver's negative case: composing a pattern whose member's
+# declaring crate (m2-fixtures) is NOT a direct dependency here. The
+# courier is reachable textually through the re-export, so the schema
+# arrives, and the failure must be the resolver's clean compile_error.
+# Verify: cargo build -p downstream-indirect --features indirect
+indirect = []

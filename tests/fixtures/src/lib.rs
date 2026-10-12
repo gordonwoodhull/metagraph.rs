@@ -56,7 +56,7 @@ pub mod shapes {
         Subgraph {
             entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open);
             arrows {
-                subnodes:  ::metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
+                subnodes:  metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
                 subedges:  crate::roots::EdgesOf,              Subgraph -> SubEdge;
                 main_node: crate::roots::MainNode,             SubNode -> MainNode;
                 main_edge: crate::roots::MainEdge,             SubEdge -> MainEdge;
@@ -72,7 +72,7 @@ pub mod shapes {
         SubPlain {
             entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open);
             arrows {
-                subnodes:  ::metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
+                subnodes:  metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
                 subedges:  crate::roots::EdgesOf,            Subgraph -> SubEdge;
                 main_node: crate::roots::MainNode,           SubNode -> MainNode;
                 main_edge: crate::roots::MainEdge,           SubEdge -> MainEdge;

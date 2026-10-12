@@ -6,6 +6,9 @@ members = [
     "tests/downstream/own-root",
     "tests/downstream/renamed",
     "tests/fixtures",
+    "tests/downstream/composed-renamed",
+    "tests/downstream/reexporter",
+    "tests/downstream/indirect",
 ]
 
 [package]

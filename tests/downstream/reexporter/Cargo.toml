@@ -1,0 +1,8 @@
+[package]
+name = "downstream-reexporter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+metagraph-exper = { path = "../../.." }
+m2-fixtures = { path = "../../fixtures" }

@@ -1488,16 +1488,20 @@ pub(crate) fn declaring_crate_root(pkg: &str) -> syn::Result<TokenStream2> {
 /// declaring crate* (whose package name rides beside the schema): the path
 /// was written there, so it means what it means there. Leading-`::` paths
 /// pass verbatim; `crate::`/`self::`-rooted paths swap their head for the
-/// declaring crate's local root; anything else (`stdlib::Nodes`) is prefixed
-/// with it. A bare single-segment path is rejected — the courier it would
-/// name lives in a module, not at the declaring crate's root.
+/// declaring crate's local root. A relative path's first segment may name a
+/// *package* — an extern crate in the declaring crate's scope (e.g. a
+/// fixture pattern instantiating `metagraph_exper::stdlib::Nodes`): then it
+/// resolves through `proc-macro-crate` at the implement site (renames
+/// honored on both sides). Otherwise the whole path is prefixed with the
+/// declaring crate's root. A bare single-segment path is rejected — the
+/// courier it would name lives in a module, not at a crate root.
 pub(crate) fn resolve_schema_path(p: &Path, pkg: &str) -> syn::Result<TokenStream2> {
     if p.leading_colon.is_some() {
         return Ok(path_tokens(p));
     }
     let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
-    let root = declaring_crate_root(pkg)?;
     if first == "crate" || first == "self" {
+        let root = declaring_crate_root(pkg)?;
         let rest: Vec<&Ident> = p.segments.iter().skip(1).map(|s| &s.ident).collect();
         return Ok(quote!(#root:: #(#rest)::*));
     }
@@ -1511,6 +1515,24 @@ pub(crate) fn resolve_schema_path(p: &Path, pkg: &str) -> syn::Result<TokenStrea
             ),
         ));
     }
+    // First segment as a package name: try the spelling as written, then the
+    // hyphenated package spelling of an underscored extern crate name.
+    for candidate in [first.clone(), first.replace('_', "-")] {
+        if let Ok(found) = proc_macro_crate::crate_name(&candidate) {
+            let rest: Vec<&Ident> = p.segments.iter().skip(1).map(|s| &s.ident).collect();
+            let root = match found {
+                // The path names the *current* crate: `crate::` resolves
+                // here regardless of further context.
+                proc_macro_crate::FoundCrate::Itself => quote!(crate),
+                proc_macro_crate::FoundCrate::Name(n) => {
+                    let n = Ident::new(&n, proc_macro2::Span::call_site());
+                    quote!(::#n)
+                }
+            };
+            return Ok(quote!(#root:: #(#rest)::*));
+        }
+    }
+    let root = declaring_crate_root(pkg)?;
     let segs: Vec<&Ident> = p.segments.iter().map(|s| &s.ident).collect();
     Ok(quote!(#root:: #(#segs)::*))
 }

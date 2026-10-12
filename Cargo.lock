@@ -10,9 +10,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "downstream-composed-renamed"
+version = "0.1.0"
+dependencies = [
+ "m2-fixtures",
+ "metagraph-exper",
+]
+
+[[package]]
+name = "downstream-indirect"
+version = "0.1.0"
+dependencies = [
+ "downstream-reexporter",
+ "metagraph-exper",
+]
+
+[[package]]
 name = "downstream-own-root"
 version = "0.1.0"
 dependencies = [
+ "metagraph-exper",
+]
+
+[[package]]
+name = "downstream-reexporter"
+version = "0.1.0"
+dependencies = [
+ "m2-fixtures",
  "metagraph-exper",
 ]
 
