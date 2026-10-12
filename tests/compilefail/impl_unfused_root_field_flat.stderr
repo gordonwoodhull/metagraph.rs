@@ -1,0 +1,9 @@
+error: arrow `r` is sourced at the root-marked entity `G`; the `field` backing needs a field on the self record, and the root owns no record (it *is* the store)
+  --> tests/compilefail/impl_unfused_root_field_flat.rs:8:1
+   |
+ 8 | / implement! {
+ 9 | |     m2_fixtures::neg::RootSourced as RootStore {}
+10 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

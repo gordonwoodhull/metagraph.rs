@@ -1,0 +1,5 @@
+error: authored body for `on_insert` in backing `shady_list` binds reserved ident `rec` — the role vocabulary is closed and rewritten unconditionally (reserved: rec, records, maps, host_of, idx, b_arena_of, k_arena_of, map_from, determining, handle, store, a, b, k, w, errs, arrow_label, det_label); rename the local
+  --> tests/compilefail/backing_shadow_reserved.rs:13:13
+   |
+13 |             on_insert(a, b) {
+   |             ^^^^^^^^^

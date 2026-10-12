@@ -869,6 +869,66 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
     // Triggers are declaration facts (clauses, cardinality, declared
     // predicates); the messages are the pinned ones (a backing's
     // declaration name is its binding spelling).
+    // Placement-fact descriptions for the pinned error templates: an
+    // endpoint's location, B's arena location, and A's self case per the
+    // plan's three-case taxonomy.
+    let loc_desc = |ci: usize| -> String {
+        if !classes[ci].owns_records {
+            format!("the store (unfused root `{}`)", classes[ci].name)
+        } else {
+            match classes[ci].loc {
+                ClassLoc::Root => "at root level".to_string(),
+                ClassLoc::Embedded(h) => format!("embedded in `{}`", classes[h].name),
+            }
+        }
+    };
+    let arena_loc_desc = |ci: usize| -> String {
+        match classes[ci].loc {
+            ClassLoc::Root => "a root-level arena of the store".to_string(),
+            ClassLoc::Embedded(h) => format!("embedded in `{}`'s records", classes[h].name),
+        }
+    };
+    let self_case_desc = |ci: usize| -> String {
+        if !classes[ci].owns_records {
+            "an unfused root (its record is the store; the predicate is satisfied by any root-level B arena)".to_string()
+        } else if classes[ci].has_root {
+            "a fused root-marked self (its record is the class record it is hosted by)".to_string()
+        } else {
+            "a plain self (an element record; the predicate needs B's arena embedded in this class's record)"
+                .to_string()
+        }
+    };
+    // `membership: existence` (declared predicate): B's entity arrow is
+    // the unique arrow targeting B bound to an existence backing — a
+    // duplicate binding is rejected naming both arrows (the plan's
+    // evaluation table).
+    let mut existence_by_target: HashMap<usize, Vec<String>> = HashMap::new();
+    for (i, infos) in inst_infos.iter().enumerate() {
+        for info in infos {
+            let Some(d) = info.backing else { continue };
+            if !d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+                continue;
+            }
+            let tc = class_index_of(i, ent_index(i, &info.decl.target)?);
+            existence_by_target
+                .entry(tc)
+                .or_default()
+                .push(format!("{}.{}", members[i].0, info.decl.name));
+        }
+    }
+    for (tc, arrows) in &existence_by_target {
+        if arrows.len() > 1 {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "class `{}` has two entity-arrow candidates — arrows `{}` and `{}` both bind a `membership: existence` backing; the entity arrow of a target is unique, so one of them must bind a relation backing (`intrusive_list`)",
+                    classes[*tc].name,
+                    arrows[0],
+                    arrows[1],
+                ),
+            ));
+        }
+    }
     for (i, infos) in inst_infos.iter().enumerate() {
         for info in infos {
             let Some(d) = info.backing else { continue };
@@ -917,35 +977,61 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     ));
                 }
             }
-            // `direct_records` (declared predicate): contributed fields
-            // locate on root-level classes or the store in M3.
+            // `membership: existence` (declared predicate): the entity
+            // arrow's membership kind is primitive — a `by`-derived arrow
+            // contradicts existence (the plan's "the arrow and its
+            // membership kind otherwise" arm).
+            if d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+                if let Some(det) = &a.by {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "backing `{d_name}` on arrow `{named}` declares `membership: existence`, but `{named}` derives membership `by {det}` — existence is primitive; bind a relation backing (`intrusive_list`) or drop the `by`",
+                            d_name = d.name,
+                        ),
+                    ));
+                }
+            }
+            // `hosts_arena` (declared predicate): B's arena is hosted by
+            // A's record — B's arena embeds in the self class's record, or
+            // the self is an unfused root and B's arena is root-level.
+            if d.has(|c| matches!(c, Clause::Requires { items, .. } if items.iter().any(|x| *x == "hosts_arena"))) {
+                let holds = match classes[tc].loc {
+                    ClassLoc::Root => !classes[sc].owns_records,
+                    ClassLoc::Embedded(h) => h == sc,
+                };
+                if !holds {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "arrow `{named}` declares `requires: hosts_arena` (backing `{d_name}`), but B's arena is {arena_loc}, not hosted by the self record (self case: {self_case}; placement: target `{tc_name}` {target_loc})",
+                            d_name = d.name,
+                            arena_loc = arena_loc_desc(tc),
+                            self_case = self_case_desc(sc),
+                            tc_name = classes[tc].name,
+                            target_loc = loc_desc(tc),
+                        ),
+                    ));
+                }
+            }
+            // `direct_records` (declared predicate): both endpoints
+            // addressable without path indirection — root-level classes or
+            // the store (an embedded *target* is fine: path ids flow
+            // through the links; an embedded *self* has no anchor).
             if d.has(|c| matches!(c, Clause::Requires { items, .. } if items.iter().any(|x| *x == "direct_records")))
                 && matches!(classes[sc].loc, ClassLoc::Embedded(_))
             {
                 return Err(syn::Error::new(
                     proc_macro2::Span::call_site(),
                     format!(
-                        "arrow `{named}` is `{}`-backed and sourced at the embedded class `{}` (frontier limit: intrusive arrows sourced at embedded classes)",
-                        d.name,
-                        classes[sc].name
+                        "arrow `{named}` declares `requires: direct_records` (backing `{d_name}`), but its self class `{sc_name}` is {self_loc} — the predicate holds only at root-level classes and the store (placement: self `{sc_name}` {self_loc}, target `{tc_name}` {target_loc})",
+                        d_name = d.name,
+                        sc_name = classes[sc].name,
+                        self_loc = loc_desc(sc),
+                        tc_name = classes[tc].name,
+                        target_loc = loc_desc(tc),
                     ),
                 ));
-            }
-            // `hosts_arena` (declared predicate): B's arena is hosted by A's
-            // record — at an unfused-root self, any root-level B arena.
-            if d.has(|c| matches!(c, Clause::Requires { items, .. } if items.iter().any(|x| *x == "hosts_arena"))) {
-                if let ClassLoc::Embedded(host) = classes[tc].loc {
-                    if sc != host {
-                        return Err(syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            format!(
-                                "arrow `{named}` is `{}`-backed into the embedded class `{}`, which is hosted by another class (frontier: arena arrows into an embedded class hosted by another class)",
-                                d.name,
-                                classes[tc].name
-                            ),
-                        ));
-                    }
-                }
             }
             // The keyed host-agreement gap: the authored
             // `host_of(v) != owner` check compares against a self-side

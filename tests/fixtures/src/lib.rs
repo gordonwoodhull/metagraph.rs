@@ -139,6 +139,20 @@ pub mod neg {
         }
     }
 
+    // Two primitive `many` arrows targeting one entity: binding both to
+    // `arena` is the duplicate existence-binding rejection (M3 step 7);
+    // binding the element-sourced one alone is the flat `hosts_arena`
+    // rejection.
+    pattern! {
+        TwoInto {
+            entities: root G, N, M;
+            arrows {
+                m1: metagraph_exper::stdlib::Nodes, G -> N;
+                m2: metagraph_exper::stdlib::Edges, M -> N;
+            }
+        }
+    }
+
     // `r` is a `one` arrow sourced at the pattern's root: unfused, the
     // field backing has no self record to live on.
     pattern! {

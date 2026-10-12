@@ -1,0 +1,18 @@
+[package]
+name = "downstream-backing-indirect"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+metagraph-exper = { path = "../../.." }
+downstream-reexporter = { path = "../reexporter" }
+
+[features]
+# The backing courier's negative case, mirroring downstream-indirect: a
+# user backing whose declaring crate (backing-provider) is NOT a direct
+# dependency here — the courier is reachable textually through the
+# re-export, so the declaration arrives, and the failure must be the
+# resolver's clean compile_error (GenInput::BackingStep via
+# declaring_crate_root), not a generated-code error.
+# Verify: cargo build -p downstream-backing-indirect --features indirect
+indirect = []

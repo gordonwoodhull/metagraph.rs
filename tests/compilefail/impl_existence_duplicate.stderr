@@ -1,0 +1,12 @@
+error: class `N` has two entity-arrow candidates — arrows `m1` and `m2` both bind a `membership: existence` backing; the entity arrow of a target is unique, so one of them must bind a relation backing (`intrusive_list`)
+  --> tests/compilefail/impl_existence_duplicate.rs:6:1
+   |
+ 6 | / implement! {
+ 7 | |     m2_fixtures::neg::TwoInto as TwoStore {
+ 8 | |         m1: arena,
+ 9 | |         m2: arena,
+10 | |     }
+11 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,12 @@
+error: arrow `m2` declares `requires: hosts_arena` (backing `arena`), but B's arena is a root-level arena of the store, not hosted by the self record (self case: plain self at the element `M`; target `N` at root level; flat stores host every arena at the store, so `arena` binds only root-sourced arrows)
+  --> tests/compilefail/impl_arena_at_element.rs:8:1
+   |
+ 8 | / implement! {
+ 9 | |     m2_fixtures::neg::TwoInto as TwoStore {
+10 | |         m1: intrusive_list,
+11 | |         m2: arena,
+12 | |     }
+13 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

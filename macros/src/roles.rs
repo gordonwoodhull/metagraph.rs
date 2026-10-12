@@ -126,6 +126,76 @@ const ROLE_HEADS: &[&str] = &[
     "handle",
 ];
 
+/// The full reserved set a body may not bind: the role heads (rewritten
+/// unconditionally), the `store` role, the entity-parameter spellings the
+/// emitted signatures bind (`a`/`b`/`k`, and `w` in `advance`), and the
+/// scaffold lets codegen wraps around the body. Hygiene caveat 3 as a
+/// grammar rule: the substitution is textual, so a `let`/`fn`/`struct`
+/// binding of one of these would be silently captured by the rewrite.
+pub(crate) const RESERVED_BINDINGS: &[&str] = &[
+    "rec",
+    "records",
+    "maps",
+    "host_of",
+    "idx",
+    "b_arena_of",
+    "k_arena_of",
+    "map_from",
+    "determining",
+    "handle",
+    "store",
+    "a",
+    "b",
+    "k",
+    "w",
+    "errs",
+    "arrow_label",
+    "det_label",
+];
+
+/// Reject `let`/`fn`/`struct` bindings of the reserved set in one authored
+/// body (called per clause body at declaration collection — before any
+/// rewrite happens). A shallow token scan, recursing into groups: it sees
+/// every binding site authored text can reach without a full parse.
+pub(crate) fn check_reserved_bindings(ts: &TokenStream2) -> Option<String> {
+    fn scan(ts: &TokenStream2, hit: &mut Option<String>) {
+        let tts: Vec<TokenTree> = ts.clone().into_iter().collect();
+        let mut i = 0;
+        while i < tts.len() {
+            match &tts[i] {
+                TokenTree::Group(g) => scan(&g.stream(), hit),
+                TokenTree::Ident(id)
+                    if matches!(id.to_string().as_str(), "let" | "fn" | "struct") =>
+                {
+                    // Skip `mut` after `let`, then the bound name (tuple and
+                    // other patterns start with a delimiter — only a plain
+                    // leading ident is a binding head worth checking).
+                    let mut j = i + 1;
+                    if id.to_string() == "let" {
+                        if let Some(TokenTree::Ident(m)) = tts.get(j) {
+                            if m.to_string() == "mut" {
+                                j += 1;
+                            }
+                        }
+                    }
+                    if let Some(TokenTree::Ident(bound)) = tts.get(j) {
+                        let name = bound.to_string();
+                        if RESERVED_BINDINGS.contains(&name.as_str()) {
+                            *hit = Some(name);
+                            return;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    let mut hit = None;
+    scan(ts, &mut hit);
+    hit
+}
+
 /// Rewrite one authored body under a binding.
 pub(crate) fn rewrite(ts: &TokenStream2, rb: &dyn RoleBinding) -> TokenStream2 {
     let mut scope: Vec<(String, ScopeKind)> = Vec::new();

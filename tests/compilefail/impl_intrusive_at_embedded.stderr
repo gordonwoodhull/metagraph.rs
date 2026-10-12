@@ -1,4 +1,4 @@
-error: arrow `chained.cs` is `intrusive_list`-backed and sourced at the embedded class `N` (frontier limit: intrusive arrows sourced at embedded classes)
+error: arrow `chained.cs` declares `requires: direct_records` (backing `intrusive_list`), but its self class `N` is embedded in `Node` — the predicate holds only at root-level classes and the store (placement: self `N` embedded in `Node`, target `C` embedded in `Node`)
   --> tests/compilefail/impl_intrusive_at_embedded.rs:19:1
    |
 19 | / implement! {

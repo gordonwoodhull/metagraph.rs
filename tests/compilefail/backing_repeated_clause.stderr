@@ -1,0 +1,5 @@
+error: repeated `iteration_order` clause in backing `bad_backing`; a clause repeats only as its selector distinguishes it
+  --> tests/compilefail/backing_repeated_clause.rs:13:13
+   |
+13 |             iteration_order: reverse_insertion
+   |             ^^^^^^^^^^^^^^^

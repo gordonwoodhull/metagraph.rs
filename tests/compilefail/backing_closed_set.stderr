@@ -1,0 +1,5 @@
+error: contract annotations come from the closed set {exclusive_membership}; found `shared_membership`
+  --> tests/compilefail/backing_closed_set.rs:11:23
+   |
+11 |             contract: shared_membership
+   |                       ^^^^^^^^^^^^^^^^^

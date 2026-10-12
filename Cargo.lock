@@ -18,6 +18,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "downstream-backing-indirect"
+version = "0.1.0"
+dependencies = [
+ "downstream-reexporter",
+ "metagraph-exper",
+]
+
+[[package]]
 name = "downstream-basic"
 version = "0.1.0"
 dependencies = [
@@ -51,6 +59,7 @@ dependencies = [
 name = "downstream-reexporter"
 version = "0.1.0"
 dependencies = [
+ "backing-provider",
  "m2-fixtures",
  "metagraph-exper",
 ]

@@ -1,0 +1,5 @@
+error: store phase labels come from the closed set {build, frozen} (the `phase:` annotations describe properties, not labels); found `archival`
+ --> tests/compilefail/backing_bad_store_label.rs:8:22
+  |
+8 |             on store archival { buckets: Vec<BId> }
+  |                      ^^^^^^^^

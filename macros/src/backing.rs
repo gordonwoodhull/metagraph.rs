@@ -762,6 +762,39 @@ fn validate_inventory(decl: &BackingDecl) -> syn::Result<()> {
         }
     }
 
+    // ---- reserved-set shadowing (hygiene caveat 3 as a grammar rule) ----
+    // The role rewrite is textual and unconditional, so a body that binds
+    // a reserved ident (`let rec = ..`, `fn handle(..)`) would be silently
+    // captured. Reject at declaration time, quoting the closed set.
+    fn clause_body(c: &Clause) -> Option<&proc_macro2::TokenStream> {
+        match c {
+            Clause::Read { body, .. }
+            | Clause::Lookup { body, .. }
+            | Clause::Iterate { body, .. }
+            | Clause::Advance { body, .. }
+            | Clause::OnInsert { body, .. }
+            | Clause::OnAdd { body, .. }
+            | Clause::Compact { body, .. }
+            | Clause::Validate { body, .. } => Some(body),
+            _ => None,
+        }
+    }
+    for c in &decl.clauses {
+        if let Some(body) = clause_body(c) {
+            if let Some(hit) = crate::roles::check_reserved_bindings(body) {
+                return Err(syn::Error::new(
+                    c_span(c),
+                    format!(
+                        "authored body for `{}` in backing `{}` binds reserved ident `{hit}` — the role vocabulary is closed and rewritten unconditionally (reserved: {}); rename the local",
+                        c.kind_name(),
+                        decl.name,
+                        crate::roles::RESERVED_BINDINGS.join(", "),
+                    ),
+                ));
+            }
+        }
+    }
+
     // ---- mandatory clauses (the pinned table's `req` rows) ----
     let has = |f: fn(&Clause) -> bool| decl.has(f);
     match decl.card {

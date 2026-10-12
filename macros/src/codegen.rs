@@ -499,6 +499,33 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     }
 
     // ---- per-declaration applicability (flat placements) ----
+    // `membership: existence` (declared predicate): B's entity arrow is
+    // the unique arrow targeting B bound to an existence backing — a
+    // duplicate binding is rejected naming both arrows (parity with the
+    // composed applicability loop).
+    let mut existence_by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for info in &infos {
+        let Some(d) = info.backing else { continue };
+        if !d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+            continue;
+        }
+        existence_by_target
+            .entry(info.decl.target.to_string())
+            .or_default()
+            .push(info.decl.name.to_string());
+    }
+    for (target, arrows) in &existence_by_target {
+        if arrows.len() > 1 {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "class `{target}` has two entity-arrow candidates — arrows `{}` and `{}` both bind a `membership: existence` backing; the entity arrow of a target is unique, so one of them must bind a relation backing (`intrusive_list`)",
+                    arrows[0],
+                    arrows[1],
+                ),
+            ));
+        }
+    }
     for info in &infos {
         let Some(d) = info.backing else { continue };
         let named = info.decl.name.to_string();
@@ -525,6 +552,39 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 format!(
                     "arrow `{named}` is sourced at the root-marked entity `{}`; the `{}` backing needs a field on the self record, and the root owns no record (it *is* the store)",
                     info.decl.source, d.name
+                ),
+            ));
+        }
+        // `membership: existence` (declared predicate): the entity arrow's
+        // membership kind is primitive — a `by`-derived arrow contradicts
+        // existence.
+        if d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+            if let Some(det) = &info.decl.by {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "backing `{d_name}` on arrow `{named}` declares `membership: existence`, but `{named}` derives membership `by {det}` — existence is primitive; bind a relation backing (`intrusive_list`) or drop the `by`",
+                        d_name = d.name,
+                    ),
+                ));
+            }
+        }
+        // `hosts_arena` (declared predicate): B's arena is hosted by A's
+        // record. A flat store hosts every arena at the store, so the
+        // predicate holds only at the pattern's root (the unfused-root
+        // self case); at an element self it is rejected with the placement
+        // facts. (`direct_records` holds everywhere flat — no embedded
+        // placements exist — so it evaluates to true and needs no check.)
+        if d.has(|c| matches!(c, Clause::Requires { items, .. } if items.iter().any(|x| *x == "hosts_arena")))
+            && !is_root(&info.decl.source)
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "arrow `{named}` declares `requires: hosts_arena` (backing `{d_name}`), but B's arena is a root-level arena of the store, not hosted by the self record (self case: plain self at the element `{src}`; target `{tgt}` at root level; flat stores host every arena at the store, so `arena` binds only root-sourced arrows)",
+                    d_name = d.name,
+                    src = info.decl.source,
+                    tgt = info.decl.target,
                 ),
             ));
         }

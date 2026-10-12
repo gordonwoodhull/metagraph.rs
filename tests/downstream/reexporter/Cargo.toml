@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 metagraph-exper = { path = "../../.." }
 m2-fixtures = { path = "../../fixtures" }
+backing-provider = { path = "../backing-provider" }

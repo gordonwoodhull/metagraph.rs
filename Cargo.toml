@@ -11,6 +11,7 @@ members = [
     "tests/downstream/indirect",
     "tests/downstream/backing-provider",
     "tests/downstream/backing-user",
+    "tests/downstream/backing-indirect",
 ]
 
 [package]

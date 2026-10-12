@@ -987,7 +987,7 @@ Contract: the declarations, the placement rules, the premise table.
 the hygiene caveats.
 - [x] `on A` + `on B` contributions, the stem formula, the push-front
       hook as a store method
-- [ ] the hygiene caveats as grammar rules: `Span::mixed_site()`
+- [x] the hygiene caveats as grammar rules: `Span::mixed_site()`
       scaffold idents, absolutized container paths, reserved-set
       shadowing rejected
 - [x] `validate by` + `validate primitive` authored and selected per
@@ -1023,10 +1023,10 @@ validate contribution.
 
 **Step 7 — Constraint predicates + trybuild error tests.** Contract:
 Constraints and applicability, the evaluation table.
-- [ ] predicate evaluation with the pinned error templates:
+- [x] predicate evaluation with the pinned error templates:
       cardinality, `existence`, `hosts_arena`, `direct_records`
-- [ ] the `ctor_arg`/`on_add` orchestrator-rule rejection
-- [ ] trybuild fixtures for each predicate and for the grammar
+- [x] the `ctor_arg`/`on_add` orchestrator-rule rejection
+- [x] trybuild fixtures for each predicate and for the grammar
       rejections from step 1; messages quote tokens and state
       placement facts
 - Depends: 3–5
