@@ -23,9 +23,19 @@ id-based read view it reads through (mechanism probe-verified; Builder
 shape, below) as *generated* code; and the bipartite test (M1 machinery
 only, but never run). Spike limits, now the
 milestone's known frontier, stated in full: embedding depth 1 only;
-intrusive arrows sourced at embedded classes or unfused roots rejected;
-field backing into an embedded class rejected (its id needs a host path);
-arena arrows into an embedded class hosted by another class rejected;
+intrusive arrows sourced at embedded classes rejected (M3 reclassifies:
+a uniform contributed-field-location restriction, not an
+intrusive-specific rule); intrusive arrows sourced at unfused roots
+legal — the unfused root's record is the store, so the head field is
+store-level and the insert op drops the self argument (M3's placement
+rules; write-ops rule below) — probe-verified
+(/tmp/m3-probe-r3-root-intrusive, 5/5), with the landed M2 check still
+rejecting the arm until M3's intrusive step relaxes it; field backing
+into an embedded class rejected (its id needs a host path — the
+addressability half, implement-time checks below; hook-maintained
+path-id values are legal, spike 11); arena arrows into an embedded
+class hosted by another class rejected (M3: this is arena's declared
+`hosts_arena` requirement);
 `<=>` transitivity is vacuous beyond two members *by design* — every
 legal colocation class has exactly one element member (Structural
 validation pins this; the spike exercised two-member classes only);
@@ -585,22 +595,33 @@ classes-closed check:
   closure (`a.X <-> b.N` *and* `a.X <-> c.N`) would unify `b.N`'s and
   `c.N`'s ids through one open entity and is rejected.
 - Fusion classes must be closed: no open entity survives composition.
-- Every colocation-fusion class has exactly one arena placement, and
-  its element members come from at most one instance. This rejects
+- Every colocation-fusion class has exactly one arena placement, and is
+  a *docking*: exactly one root-marked entity, with element members
+  from exactly one instance *other than* the root's. This rejects
   double-closed entities (`a.X <=> b.N` *and* `a.X <=> c.N`, where
   transitivity merges arenas from two instances), cross-multiplicity
   colocations (fusing an entity whose arena embeds per-record with one
   whose arena lives at root: each asks one id type to index two
-  arenas), two root-marked entities in one class, and peer-shaped
+  arenas), two root-marked entities in one class, peer-shaped
   cross-instance colocation (`a.X <=> c.Y`, elements of two instances
   — spike 1's message: "colocation class fuses elements of multiple
-  instances"). The host shape — one instance's element hosting other
-  instances' roots, `outer.Node <=> sub.Subgraph` — is the legal
-  cross-instance form. A consequence, accepted as a design decision
-  (2026-10 review): every legal colocation class has exactly two
-  members — one element member plus at most one root — because any
-  transitively formed three-member class contains either two
-  cross-instance elements or two roots, both rejected. `<=>`
+  instances"), same-instance element-element fusions (`outer.Node <=>
+  outer.Edge` — sort-sharing within one instance, admitted by the
+  at-most-one-instance reading alone and defined by nothing), and the
+  self-hosting regress (an instance's root fused with its own element,
+  which would embed the instance's arenas into their own records). The
+  host shape — one instance's element hosting other instances' roots,
+  `outer.Node <=> sub.Subgraph` — is the legal cross-instance form.
+  A consequence, accepted as a design decision (2026-10 review): every
+  legal colocation class has exactly two members — one element member
+  plus at most one root — because any transitively formed three-member
+  class contains either two elements or two roots, both rejected (the
+  element pair by the peer-shaped and same-instance arms together,
+  which is what makes "exactly one element member" follow rather than
+  merely "elements from one instance"). (The docking re-anchoring and
+  its two arms landed with the M3 round-4 merge; the landed check
+  implements the at-most-one-instance reading, so the arms' code and
+  their trybuild fixtures are a named follow-up — Tests.) `<=>`
   transitivity is therefore vacuous in practice, and one host element
   can host exactly *one* instance's arenas: two Subgraph instances
   both fused to `outer.Node` over the same inner graph is rejected.
@@ -635,9 +656,18 @@ Two run at `implement!` time, because they need backing bindings:
   post-fusion (`outer.Edge <=> chain.Chain` gives chain's root the
   fused outer-edge record). The re-scoped rule runs *after*
   fusion-class and host resolution: a root-marked self has a record
-  exactly when it is colocation-fused into a host element, so the
-  rejection fires only for unfused roots (where it houses the
-  frontier's "intrusive arrows sourced at … unfused roots" item).
+  exactly when it is colocation-fused into a host element — and an
+  *unfused* root has one too: the store itself (M3's three-case self
+  taxonomy), so contributed fields of arrows sourced at an unfused root
+  land as store-level fields, the contribution site M1's backing
+  contract has always allowed. That lifts the old "intrusive arrows
+  sourced at … unfused roots" rejection in plan (probe-verified,
+  /tmp/m3-probe-r3-root-intrusive, 5/5 — store-level head, self-less
+  op, root-handle read), while the landed check still rejects the arm
+  until M3's intrusive step relaxes it; the `field` backing at an
+  unfused root stays rejected on the ground M3 pins instead — its
+  `ctor_arg` requires an `add_<A>`-orchestrated self, and the unfused
+  root owns no constructor.
   A verbatim port of M1's check into composed codegen kills the
   milestone's own Refinement test — the spike solved this in code;
   this paragraph is the plan recording the rule. One
@@ -648,11 +678,11 @@ Two run at `implement!` time, because they need backing bindings:
   spike 4 pinned ("every arena is in the one store, so every
   contribution trivially has a home"); like the no-self-containment
   check's vacuity above, the boundary is kept for the layouts that make
-  it bite. The home half fires exactly when the would-be home does not
-  exist — a contribution whose self owns no record — which houses the
-  frontier's "intrusive arrows sourced at … unfused roots" rejection
-  (the embedded-class half of that frontier item stays a codegen
-  frontier: the record exists, so it is not a home failure). The live
+  it bite. With the unfused root's home recognized (the store), the
+  home half is vacuous across all of M2's single-store layouts — kept
+  for the multi-store shapes that make it bite. The embedded-class
+  half of the old frontier item stays a codegen frontier: the record
+  exists, so it is not a home failure. The live
   half is addressability, and it is a `field`-backing rule: a
   `field`-backed arrow whose value would reference an embedded class is
   rejected, because the embedded class's ids are host-anchored paths
@@ -819,7 +849,10 @@ impossible by construction.
   five — unknown fusion endpoint, `<->` arity/endpoint violations,
   double reference closure, unclosed open entity, placement conflicts —
   the generated-name-uniqueness check, the implement!-time home and
-  addressability rejections, and the new keyed-cardinality mismatches);
+  addressability rejections, and the new keyed-cardinality mismatches;
+  the M3 round-4 merge's docking arms — same-instance element-element
+  and self-hosting rejections — join this list, their fixtures owed
+  with the arms' implementation);
   a `#[should_panic]` test for duplicate-key rejection at the insert
   call; and `validate()` failure tests driving the canonical inventory —
   ghost keys, out-of-range and cross-host path-id values, corrupted

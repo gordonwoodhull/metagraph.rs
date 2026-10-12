@@ -72,11 +72,11 @@ uniform across all backings.
 | field's field-on-self-record, constructor arg, direct read | (a) — the `ctor_arg` clause | M1 backings table |
 | arena: no fields, no hooks, existence membership, iterator over the target arena | (a), including the declared requirement `hosts_arena` | M1 backings table |
 | hash_index map placement: root-level self record, host-embedded record, or store | (a) — contributions target the self record, per the three-case self taxonomy (placement rules below) | M1 naming rule; spike 11 (host record); edge-induced probe (store-level) |
-| per-backing validate checks (key existence, value-in-arena, value-host agreement, link well-formedness, membership consistency, partition, CSR offsets) | (a) — the validate clause (below) | M2 canonical inventory (main's M2 — the merge vehicle; this branch's M2 predates the round-3 fold that added the third check); spike 4; edge-induced probe; spike 6 |
+| per-backing validate checks (key existence, value-in-arena, value-host agreement, link well-formedness, membership consistency, partition, CSR offsets) | (a) — the validate clause (below) | M2 canonical inventory; spike 4; edge-induced probe; spike 6 |
 | placement computation; entity kits (`Id(pub u32)`, compound path ids under embedding); hand-written handle `Eq`/`Hash` by (store pointer, id); the named doc-hidden hook method per write path; collision prefixing of contributed names (the prefix names the colliding scope — arrow-stem within one instance, instance prefix across composition; grammar section) | (b) — uniform, backing-independent | M2 placement rule; M2 ("`NodeId`'s `pub u32` stays — the tests depend on it"); spike 11 finding 4 |
 | the *stem formulas* that name contributed fields (arrow name for `field`; `stem_` + `link_stem(arrow)` for `intrusive_list`; `<arrow>_index` for `hash_index` — the instantiation's *local* arrow name, as in field's row; declared stem for csr) | (a) — declaration-specified, pinned per backing (the grammar section's table); there is no single mechanical rule | the four artifacts' pinned names: `source`, `first_out`/`next_out` (grammar.rs `link_stem`), `subnode_index` (spike 11, edge-induced probe, round-3 probe), `buckets` (spike 6) |
 | arena bound to an arrow whose target's arena is hosted elsewhere | (a) — arena's declared requirement (`hosts_arena`) | M2 frontier; Hierarchy is the legal shape |
-| intrusive sourced at an embedded class | (b) — uniform restriction: contributed fields locate only on root-level classes or the store in M3. Separately, intrusive_list declares the stronger (a) predicate `direct_records` on its *endpoints* (a different condition with a different extension — hash_index's host-embedded map legally sits on an embedded configuration) | M2 frontier (this branch's M2 carries the reclassification; fold to main pending — merge chore, Depends on) |
+| intrusive sourced at an embedded class | (b) — uniform restriction: contributed fields locate only on root-level classes or the store in M3. Separately, intrusive_list declares the stronger (a) predicate `direct_records` on its *endpoints* (a different condition with a different extension — hash_index's host-embedded map legally sits on an embedded configuration) | M2 frontier (reclassified at the round-4 merge) |
 | intrusive sourced at an unfused root | (a) — DSL-legal: the unfused root's record is the store, so the head is a store-level field, the hook is self-less, the op is a **store-level method** (never a root-handle method — the root handle wraps a shared `&Store`), and the read rides the root handle. Probe-verified end to end (/tmp/m3-probe-r3-root-intrusive, 5/5), including coexistence with per-record lists on one store and the partition validators | M2 write-ops rule; M3 placement rules; the root-intrusive probe |
 
 The boundary the table draws: the (a) half is what a `backing!`
@@ -747,11 +747,10 @@ sort-sharing.** Every colocation class is a docking: exactly one
 guest root-marked entity plus element entities of exactly one *other*
 instance (the root's own instance may not contribute elements — a
 same-instance fusion, `outer.Node <=> outer.Edge`, is rejected at
-compose time; M2's docking check as extended by this review — the
-same-instance element-element and self-hosting arms, carried in this
-branch's M2; main's check 5 predates them, so the fold to main is a
-recorded merge chore, and the extension deserves a same-instance
-trybuild fixture in M2's compose-time validation acceptance). Composition nests whole patterns
+compose time; M2's docking check carries the same-instance
+element-element and self-hosting arms as of the round-4 merge, with
+their trybuild fixtures owed as a code follow-up in M2's
+negative-tests list). Composition nests whole patterns
 inside others and juxtaposes them; sharing a population is expressible
 only target-side, by `<->` id unification. A flat multi-arrow schema
 over shared sorts is reachable only inside one `pattern!` block —
@@ -809,10 +808,10 @@ other candidate). Promotion uses these names as-is.
 ## Lesser decisions, folded
 
 - **`union` is renamed `sum`** (this fold; plan-text edits only). The
-  rename predates M1's implementation landing — the landed code still
-  spells the derivation `union` (`macros/src/grammar.rs`,
-  `src/stdlib.rs`); the mechanical code rename rides with M2's step-1
-  grammar pass (main's M2 implementation list pins it there). The semantics
+  rename predates M1's implementation landing — the landed code spelled
+  the derivation `union` until the mechanical code rename rode with
+  M2's step-1 grammar pass (`macros/src/grammar.rs` and `src/stdlib.rs`
+  now parse only `sum`). The semantics
   are unchanged and were always multiset-sum: self-loops appear twice,
   out-edges chained with in-edges. The word `union` suggested dedup;
   `sum` does not.
@@ -829,9 +828,8 @@ From M2's list, re-expressed under the premise: embedding depth 1;
 contributed fields locating on embedded classes (uniform restriction,
 above); `<=>` transitivity — vacuous beyond two members *by design*
 once M2's docking consequence (every legal class is one element member
-plus at most one root) is pinned by the extended docking check (main's
-adjudication; this branch's M2 carries the arms — merge chore, Depends
-on); and further
+plus at most one root) is pinned by the extended docking check (the
+arms are in M2 as of the round-4 merge); and further
 composition of a composed pattern (the grammar note above). Retired in
 this fold: intrusive lists sourced at unfused roots — DSL-legal
 (store-level head, self-less store-level op, root-handle read) and
@@ -868,26 +866,21 @@ promotion). Do not start the
 `backing!` grammar before the four built-ins exist; that ordering is the
 whole point of the milestone.
 
-**Merge chore against main's M2** (recorded here because this branch's
-M2 is not the merge vehicle — main's is): main's M2 (cd521c4) still
-rejects, in its frontier list and implement-time checks, what this plan
-reclassifies — intrusive arrows sourced at unfused roots (DSL-legal
-here; probe-verified) and the blanket field-into-embedded reading (the
-ctor_arg-side addressability check stands; the hook-maintained
-exemption is M2's own carve-out) — and its colocation check 5 predates
-the extended docking arms (same-instance element-element, self-hosting)
-that pin the two-member consequence. This branch's M2 carries those
-reconciliations; at merge, take main's M2 (rounds 3–4 win) *plus* these
-three reconciliations, and add the same-instance trybuild fixture to
-the compose-time validation acceptance. The fold carries two more
-files, and the chore names them (round 4): **epic.md** — main's epic
-still carries the retired "re-expressed as a composition in M3" promise
-(spike 12 killed it), the pre-round status markers (`[vague]`, eleven
-spikes), and lacks the hostings paragraph and the amended invariant-7
-wording; take this branch's epic at merge. **spikes.md** — both
-branches add rows at the same Probes anchor, and main's queued
-combined-rule row is retired by /tmp/m3-probe-r3-ctor-share; union the
-rows, keeping the branch's superset.
+**Merge chore against main's M2 — discharged at the round-4 merge**
+(the rebase took main's M2 wholesale and re-grafted the
+reconciliations as plan text; the chore is kept as the record of what
+was grafted): intrusive arrows sourced at unfused roots reclassified
+DSL-legal, probe-verified (/tmp/m3-probe-r3-root-intrusive, 5/5) —
+the landed check still rejects the arm until M3's intrusive step
+relaxes it, a named code follow-up; the field-into-embedded scope
+(addressability stands, hook-maintained exempt) was already main's own
+D2(a) fold; the docking arms (same-instance element-element,
+self-hosting) are plan-pinned in check 5, with their code and trybuild
+fixtures a named follow-up in M2's negative-tests list. **epic.md** —
+this branch's epic taken at merge (hostings paragraph, spike-12
+amendments, status markers). **spikes.md** — rows unioned, keeping the
+branch's superset; main's queued combined-rule row retired by
+/tmp/m3-probe-r3-ctor-share.
 
 ## Implementation plan
 
@@ -902,12 +895,12 @@ overall gate, stated once: the four built-ins re-implemented as
 green unchanged.
 
 **Step 0 — Preconditions (a gate, not work).**
-- [ ] M2 complete on main and the merge chore discharged: the three M2
-      reconciliations plus the same-instance trybuild fixture
-      (Depends on, above), the epic.md fold, and the spikes.md row
-      union
-- [ ] the `union` → `sum` code rename landed (it rides with M2's
-      step-1 grammar pass)
+- [x] M2 complete on main and the merge chore discharged at the
+      round-4 merge (the three M2 reconciliations, the epic.md fold,
+      and the spikes.md row union — Depends on, above; the docking
+      arms' code + fixtures are the one named code follow-up)
+- [x] the `union` → `sum` code rename landed (it rode with M2's
+      step-1 grammar pass — verified in `macros/src/grammar.rs`)
 - [x] /tmp/m3-probe-r4-advance read, its limits carried (the
       reserved-host-field refinement, grammar section); the planned
       /tmp/m3-probe-r4-bounce superseded at the round-4 merge — the
