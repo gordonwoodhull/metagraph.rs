@@ -30,20 +30,26 @@ arena arrows into an embedded class hosted by another class rejected;
 legal colocation class has exactly one element member (Structural
 validation pins this; the spike exercised two-member classes only);
 constructor argument name collisions across instances of one fusion
-class dedup the argument list, keeping the first, and the dropped
-member's field is fed from the kept argument when the two arguments'
-resolved target classes agree — the partner map usually guarantees
-this — with the composition rejected at compose time otherwise (pinned
-rule, replacing the earlier "un-fed field" frontier: Rust record
-literals cannot leave a field unset, so this was a missing emission
-rule, not a deferrable detail). Spike 1 never exercised a true
-collision (its field emission would hit a duplicate field first), so
-the rule is plan-pinned, not spike-verified; further composition of a
+class share one argument — feeding both members' fields from it —
+when the two arguments' resolved target classes agree (the partner map
+usually guarantees this), and take the instance prefix when they
+differ (combined rule, reconciling round 3's dedup-keeps-first with
+M3 review 2's instance-prefixing, 2026-10-11; the earlier "un-fed
+field" frontier stays closed either way: Rust record literals cannot
+leave a field unset, and both halves name where every field's value
+comes from, so the compose-time rejection clause disappears). The
+sharing half is plan-pinned, not spike-verified (spike 1 never
+exercised a true collision — its field emission would hit a duplicate
+field first); the prefixing half is probe-verified for the
+targets-differ case (/tmp/m3-probe-ctor-merge, 2/2 + E0063 negcheck);
+a combined-rule probe — one fused record, one shared-arg constructor
+(targets agree via `<->`), one prefixed constructor (targets differ),
+asserting field routing — is queued in plans/spikes.md; further composition of a
 composed pattern untested (the emitted courier has the right shape,
-but the member-schema grammar would need to nest); union (`:=`)
+but the member-schema grammar would need to nest); sum (`:=`)
 sibling sets whose targets resolve to different classes after fusion
 are unchecked — a generated-code compile error, not a validation
-message (no planned test composes a cross-instance union);
+message (no planned test composes a cross-instance sum);
 cross-crate composition of a pattern with crate-local roots requires
 the implementing crate to depend directly on every member pattern's
 declaring crate (the declaring-crate resolver's one constraint —
@@ -79,8 +85,11 @@ the fusion declarations, and the schemas collected so far; each step
 appends one member schema and emits the next courier invocation. The final
 hop computes fusion classes, mints the per-instance marker modules, and
 emits the composed pattern's own courier — the same `#[macro_export]` +
-`pub use` shape, embedding the full composed schema (instances, fusions,
-marker paths). A composed pattern is then indistinguishable from a
+`pub use` shape, embedding the full composed schema (instances, fusions;
+the per-instance markers are minted at emission and their paths derived
+from the composed pattern's path by the M1 rule, not embedded — the
+spike's shape, and what makes `implement!` resolution
+configuration-free). A composed pattern is then indistinguishable from a
 hand-written one: same markers-module layout, same courier rule, same
 path-derivation rule, composable and implementable by the same machinery.
 The courier rule never grows; composition only reuses the target
@@ -97,14 +106,24 @@ run over composed handles, and unqualified method calls infer in every
 case the qualification rules below say they should.
 
 Spike-pinned mechanics: the chain's configuration (composed name, module
-path, remaining-courier queue, fusion declarations, schemas collected so
-far) rides verbatim in the courier's rest tail, with fusions staying
-opaque token soup until the final hop; the *composed* schema embedded in
-the final courier has its own structured grammar (`instances`, per-member
-schemas, `fusions`), which `__implement_gen!` distinguishes from a flat
-schema by first keyword; and member schemas re-emit their `root`/`(open)`
-entity markers so the placement rule and closure checks read them after
-the hops.
+name — the spike's `mod` payload is the snake-case module name derived
+from the composed pattern's name, not a path — remaining-courier queue,
+fusion declarations, schemas collected so far) rides verbatim in the
+courier's rest tail, with fusions staying opaque token soup until the
+final hop; the *composed* schema embedded in the final courier has its
+own structured grammar (`instances`, per-member schemas, `fusions`),
+which `__implement_gen!` distinguishes from a flat schema by first
+keyword; and member schemas re-emit their `root`/`(open)` entity markers
+so the placement rule and closure checks read them after the hops.
+Review 4 addition: each member schema rides with its declaring package
+as `("pkg", {schema})` in the collected set — the root-resolver
+constraint (Open entities: the implementing crate must depend directly
+on every member's declaring crate) is only enforceable if each member's
+baked package survives the hops, and implement-time root-path resolution
+is keyed by member instance. Neither spike exercised this (spike 1's
+ComposedSchema carried no pkg; the root-resolver probe carried one
+schema, not per-member schemas) — first-compile at implementation time,
+and the milestone's highest-risk unverified codegen.
 
 Fusion has two flavors (epic invariant 4):
 
@@ -171,11 +190,13 @@ Fusion has two flavors (epic invariant 4):
   collision. Merged constructors take the union of every member's total
   `one`-arrow arguments in that same order — composition-instance order,
   then each member's schema order (argument-name collisions across
-  instances of one fusion class dedup, keeping the first, and feed the
-  dropped member's field from the kept argument when the two arguments'
-  resolved target classes agree — the partner map usually guarantees
-  this — and reject the composition at compose time otherwise; pinned
-  rule, not spike-verified: spike 1 never exercised a true collision). Counts match placement: a root-level entity gets a global
+  instances of one fusion class share one argument feeding both
+  members' fields when the two arguments' resolved target classes
+  agree — the partner map usually guarantees this — and take the
+  instance prefix when they differ; combined rule, round 3 reconciled
+  with M3 review 2, 2026-10-11: sharing half plan-pinned, prefixing
+  half probe-verified for the targets-differ case,
+  /tmp/m3-probe-ctor-merge). Counts match placement: a root-level entity gets a global
   `*_count()`; an embedded entity's count is per-host
   (`sub_node_count(host: OuterNodeId)` — spike 1's shape). Iterators
   match placement too: M1's arena iterator is a single global index
@@ -314,7 +335,7 @@ like the instantiation-side `by` — it never restates the cardinality
 (`by` never appears on a root, which declares a bare capability;
 `key(K)` must, since the root owns the keyed cardinality — see M1's
 trait-identity section). `key(K)` does not combine with `by` or with
-`:= union` (keyed arrows bind explicitly and are never derived), and an
+`:= sum` (keyed arrows bind explicitly and are never derived), and an
 unbound keyed arrow draws the same missing-binding error as an unbound
 `many` arrow.
 
@@ -403,7 +424,10 @@ is a function — but the plain `HashMap` emission silently overwrites on
 a live key: last write wins, the old target is orphaned in its arena,
 and `validate()` cannot see it (the probe reproduced exactly this
 failure). So the insert hook checks the map first, the builder method
-panics on a live key, and M4's transaction does the same at the staging
+panics on a live key (the panic's emission is unverified — the probe
+documents last-write-wins, and the staged-key probe covers only M4's
+staging API; the `#[should_panic]` acceptance test in Tests below is
+the pin), and M4's transaction does the same at the staging
 call — checked against the borrowed old store and the already-staged
 inserts, a staging panic like a foreign ref, deterministically
 detectable where the op is submitted and never a flush error. Uniqueness
@@ -467,7 +491,10 @@ read-side addition it will reuse:
   map where the arrow crosses an open entity) — and one keyed lookup
   per keyed arrow (`subnode_by_key(key) -> Option<target id>`); getter
   names take the instance prefix on collision, like every other
-  generated name (the collision rule under Naming above). This is
+  generated name (the collision rule under Naming above). The name
+  function is pinned by these two examples rather than a general rule —
+  review 4 leaves the bare same-instance spelling, and whether flat
+  uncomposed stores emit the view at all, as implementer decisions. This is
   user-callable surface — the inducing constructor is user code — so
   the getter names
   are contract, not convenience. Handles are rejected outright: during
@@ -722,8 +749,11 @@ impossible by construction.
   none is planned before M4. The mechanism is
   probe-verified end to end (/tmp/m2-probe-edge-induced); the generated
   code is uncompiled. With the declaring-crate resolver spike-verified
-  (Open entities), this test lives in `tests/` as an integration test,
-  and a fully cross-crate composed-implement test (M1 step 9's
+  (Open entities), this test lives in `tests/` as an integration test;
+  Subgraph and its four local roots are declared in a dev-dependency
+  fixture crate shared by this test and the Hierarchy test (each
+  `tests/*.rs` is its own crate — review 4 pin), and a fully cross-crate
+  composed-implement test (M1 step 9's
   precedent, including a renamed-dependency variant) exercises the
   resolver's `Name(n)` arm as the mechanism's acceptance test.
 - Hierarchy: outer graph whose nodes contain subgraphs of the inner
@@ -812,10 +842,12 @@ Pinned down during the milestone, not before:
   identity rule), so `SubNodeOf` owns `Subnode<M>`.
 - How fusion classes are named in generated docs.
 - The key-entity restriction for keyed arrows: any entity in scope, or
-  only entities reachable via nearby total `one` arrows.
+  only entities reachable via nearby total `one` arrows. (Both
+  review-4 probes keyed on an open entity — `key(MainNode)` — so "any
+  entity declared in the pattern" is the minimal reading.)
 - Derived arrows are scoped to the instance that declares them;
   cross-instance derivations are out of scope. (The per-instance scoping
-  is load-bearing: it keeps union's sibling rule away from
+  is load-bearing: it keeps `sum`'s sibling rule away from
   fusion-collapsed arrow sets.)
 
 ## Depends on
@@ -834,3 +866,97 @@ provide, and are M2 work: named hooks for anything but `intrusive_list`
 store-level backing contribution site. M2 is the stress
 test of all five; expect the hook interface to grow (keyed insert —
 and, per Builder shape, field-write hooks as well).
+
+## Implementation steps (review 4)
+
+Ordered so the declaring-crate resolver precedes any test touching
+Subgraph's local roots, the courier chain precedes fusion codegen, the
+read view precedes the edge-induced goal test, and negative tests
+follow the checks they exercise.
+
+1. **Qualified binding grammar.** `Binding` gains the `instance.arrow`
+   dotted-pair form; duplicate/unknown-arrow checks compare qualified
+   keys; `bindings_tokens` round-trips; bare-Ident stays legal; the
+   `outer.*` sugar is *not* grammar. Acceptance: round-trip unit
+   tests; full M1 suite green. The mechanical `union` → `sum` code
+   rename (macros/src/grammar.rs, src/stdlib.rs) rides with this
+   grammar pass — plan text is renamed throughout, M1's shipped
+   grammar spells `union` until then.
+2. **Declaring-crate resolver.** `pattern!` bakes `CARGO_PKG_NAME`
+   into the courier schema (new grammar slot, folded into step 1's
+   grammar work, including the per-member `("pkg", {schema})`
+   carriage pinned under Mechanism above); resolution at the
+   implement/compose hop via `proc_macro_crate`. Acceptance: the
+   probe's matrix recast in-repo — same-crate, direct cross-crate,
+   renamed dependency, one compose hop, indirect-dependency trybuild
+   failure. Depends: 1. Precedes every test touching Subgraph's local
+   roots.
+3. **Hook surface growth.** Named field-write hooks in flat codegen;
+   check-then-write factorization where M4 needs a pure predicate.
+   Acceptance: koenigsberg assertions unchanged and green; expanded
+   code shows named hooks.
+4. **Keyed arrow grammar (macro side).** Root-side `key(K)` with
+   `type Key` and `Option` return, no GAT; instantiation-side
+   `key(LocalEntity)`; `keyed` as a third cardinality value;
+   pattern-time checks. Acceptance: round-trip tests; a root
+   `pattern!` emits the probe's trait shape and compiles.
+5. **Composition courier chain.** `compose_pattern!` +
+   `__compose_step!` + rest-tail payload grammar; flat-vs-composed
+   dispatch by first keyword in `__implement_gen!`; composed courier
+   emission with per-instance marker minting as fresh unit structs.
+   Acceptance: spike's compose_chain equivalent — three-instance
+   collection, diamond markers distinct by TypeId. Depends: 1, 2.
+6. **Compose-time structural validation.** The five final-hop checks
+   plus generated-name uniqueness and the ctor-argument combined rule.
+   Acceptance: per-check pass/fail fixtures plus Hierarchy and
+   Refinement schemas as realistic inputs. Depends: 5.
+7. **Fusion codegen.** Port the spike's `expand_gen_composed`:
+   union-find classes, partner map, per-instance placement, path ids
+   and nested handles, instance-prefixed names, merged constructors,
+   per-host counts, re-scoped home/addressability checks. Acceptance:
+   Hierarchy test with arena bindings (keyed deferred to step 8) —
+   two-level traversal, generic bfs, per-host counts. Depends: 5, 6.
+   Spike-compiled wholesale; expect drift at the seams against the
+   evolved M1 baseline (steps 1, 3), not in the core.
+8. **`hash_index` backing + store-level contribution site.** Fourth
+   built-in backing; insert hook in both configurations;
+   duplicate-key check-then-write panic; keyed read impls with the
+   E0637-pinned emission; new cardinality error arms. Acceptance: the
+   full Hierarchy test (`hash_index` ×2) and a `#[should_panic]`
+   duplicate-key test. Depends: 3, 4, 7. High unverified-codegen
+   concentration: every macro-side detail is first-compile here.
+9. **Builder read view.** Id-based getters on the store; one keyed
+   lookup per keyed arrow; instance-prefix on collision. Acceptance:
+   probe's exact spellings exercised by a small induction scenario.
+   Depends: 7, 8.
+10. **Edge-induced goal test.** Subgraph + local roots in the
+    dev-dependency fixture crate; the `EdgeInduced` composition; one
+    `implement!`; hand-written inducing `add_subedge`; `validate()`;
+    plus the cross-crate composed-implement test with a renamed
+    dependency. Acceptance: goal test green in `tests/`. Depends: 2,
+    4, 8, 9.
+11. **Edge-chain refinement test.** `Chain` pattern; `Refinement`
+    composition; `insert_elems(OuterEdgeId, InnerEdgeId)`; chain walk
+    as generic `OutEdges<M>` traversal. Acceptance: plan's Refinement
+    sketch green with `validate()` Ok. Depends: 6, 7.
+12. **`validate()` canonical inventory.** Key existence,
+    value-in-arena, value-host agreement; per-backing structural
+    checks; the intrusive-ownership partition check. Acceptance:
+    `validate()` Ok on every positive-test store from steps 7–11.
+    Depends: 7, 8.
+13. **Negative tests.** trybuild fixtures for every check from steps
+    2, 4, 6, 7, 8; runtime `validate()` failure tests driving the
+    canonical inventory. Depends: the checks they exercise.
+14. **Bipartite plain-pattern test.** M1 machinery only; documents
+    invariant 6's limit. Depends: none; placed late for suite
+    hygiene.
+15. **Doc pass.** `compose_pattern!`, keyed arrows, marker
+    qualification spellings; generated-code doc comments carry
+    instance prefixes. Acceptance: M1 step-11 standard.
+
+Unverified-codegen concentration: step 2's per-member package
+carriage (highest — no spike coverage, on the goal test's path);
+steps 8–9 (high — the plan itself marks the keyed macro side and the
+read view uncompiled); step 7 (moderate — spike-compiled design
+ported onto an evolved baseline); steps 2, 6, 12 otherwise low
+(probe-verified mechanisms, mostly porting).

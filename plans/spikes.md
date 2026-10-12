@@ -182,6 +182,12 @@ dispatches at two key sorts, `add_subedge(me)` induces through id
 getters, and a plain HashMap duplicate insert silently overwrites —
 which made duplicate-key rejection an insert-time rule in M2/M4.
 
+## Probes (review-session evidence outside the numbered spikes)
+
+| probe | workspace | result |
+|---|---|---|
+| Combined ctor-collision rule (M2 review 4) | queued | One fused record, one shared-arg constructor (targets agree via `<->`), one instance-prefixed constructor (targets differ), asserting each field routes from the right argument. Covers the sharing half of the combined rule, which is plan-pinned only; the prefixing half is already covered by /tmp/m3-probe-ctor-merge |
+
 ## Sequencing rules (from the original brief)
 
 7 before 8 and 9; 1 before 2's codegen version; 4–6 independent; 11
