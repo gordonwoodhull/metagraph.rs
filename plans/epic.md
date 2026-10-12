@@ -133,7 +133,8 @@ until further composition is on the frontier.
 | 3 | User-facing backings, stdlib refactor | [partial](milestone-3-backings-and-stdlib.md) |
 | 4 | Write-side builders, mutation by rebuild | [preliminary](milestone-4-builders.md) |
 | 5 | Implement-time data — user payloads on records | [preliminary](milestone-5-data.md) |
-| 6+ | Selection, interop — see below | this file |
+| 6 | The crossing — ports, portals, embedded adjacency | [preliminary](milestone-6-crossing.md) |
+| 7+ | Selection, interop — see below | this file |
 
 Cross-cutting implementability validation (twelve throwaway spikes against
 milestones 1–4): [spikes.md](spikes.md) — status, results, and what each
@@ -162,7 +163,20 @@ through M4's flush. The maintenance boundary is the design's one-line
 decider: *arrows are maintained by the toolkit; data is maintained by
 you.* Full sketch: [milestone-5-data.md](milestone-5-data.md).
 
-## Milestone 6+ (purposely vague)
+## Milestone 6 (summary): the crossing
+
+The edge-crossing scenario end to end: ports on nodes, a hosted inner
+graph at a node, the portal pairing through a host-owned keyed map,
+and the inner graph traversing as a graph — every hop of the crossing
+walk a stock root-trait call. Three growths: the optional-`one` axis
+(optionality owned by the root, like cardinality), the intrusive head
+at an embedded record (the `addressable_records` predicate split, with
+host agreement for embedded links), and `set_`/flush remap extended
+into the nested world under one discipline: *a pointer into an
+embedded arena is owned by its host.* Full sketch:
+[milestone-6-crossing.md](milestone-6-crossing.md).
+
+## Milestone 7+ (purposely vague)
 
 Threads we can see from here but haven't scoped:
 

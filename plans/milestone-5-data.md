@@ -509,10 +509,10 @@ from M4 beyond its already-specified structural copy.
 - **`Default`-init beyond the closed set**, **user data-validate
   hooks**, **data in introspection/serialization** — M6+ threads.
 - **The crossing-levels leftovers**, named during the M5 review
-  conversation and awaiting scheduling, none as large as this
-  milestone: the optional-`one` pattern grammar (the M4 seam above);
-  embedded-record adjacency (the intrusive-at-embedded relaxation M3's
-  frontier list already carries); keyed adjacency at an embedded plain
-  self (unadjudicated there, and here left to that list); `set_`
-  writing path-id values into embedded records (unadjudicated; data
-  fields absorb the payload cases, structural links still want it).
+  conversation — **taken by M6**
+  ([milestone-6-crossing.md](milestone-6-crossing.md)): the
+  optional-`one` pattern grammar (the M4 seam above), embedded-record
+  adjacency (the intrusive-at-embedded relaxation M3's frontier list
+  carries), and `set_` writing path-id values into embedded records.
+  Keyed adjacency at an embedded plain self is M6's named non-goal
+  (its fallback).
