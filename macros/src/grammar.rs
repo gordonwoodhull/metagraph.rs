@@ -400,6 +400,263 @@ mod packaged_tests {
 }
 
 // ---------------------------------------------------------------------------
+// Composition: fusions and the composed schema
+// ---------------------------------------------------------------------------
+
+/// One entity-fusion declaration: `inst.Entity <op> inst.Entity ;`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FusionOp {
+    /// `<=>` colocation fusion: symmetric, transitive; merges records.
+    Coloc,
+    /// `<->` reference fusion: unifies id types only.
+    Ref,
+}
+
+#[derive(Clone, Debug)]
+pub struct Fusion {
+    pub lhs: (Ident, Ident),
+    pub op: FusionOp,
+    pub rhs: (Ident, Ident),
+}
+
+impl Parse for Fusion {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let li: Ident = input.parse()?;
+        input.parse::<Token![.]>()?;
+        let le: Ident = input.parse()?;
+        input.parse::<Token![<]>()?;
+        let op = if input.peek(Token![-]) {
+            input.parse::<Token![-]>()?;
+            input.parse::<Token![>]>()?;
+            FusionOp::Ref
+        } else {
+            input.parse::<Token![=]>()?;
+            input.parse::<Token![>]>()?;
+            FusionOp::Coloc
+        };
+        let ri: Ident = input.parse()?;
+        input.parse::<Token![.]>()?;
+        let re: Ident = input.parse()?;
+        input.parse::<Token![;]>()?;
+        Ok(Fusion { lhs: (li, le), op, rhs: (ri, re) })
+    }
+}
+
+impl Fusion {
+    pub fn tokens(&self) -> TokenStream {
+        let (li, le) = &self.lhs;
+        let (ri, re) = &self.rhs;
+        let op = match self.op {
+            FusionOp::Coloc => quote!(<=>),
+            FusionOp::Ref => quote!(<->),
+        };
+        quote!(#li.#le #op #ri.#re ;)
+    }
+}
+
+/// A composed pattern's schema, embedded in its courier under the same
+/// packaging wrapper as a flat one: `("composing-pkg", { instances: ..;
+/// members: ..; fusions: { .. } })`. Each member schema rides with its own
+/// declaring package as `("pkg", { schema })` inside the members list. The
+/// composed pattern's own package matters only for a composition-of-a-
+/// composed (frontier, untested) — member root resolution is keyed by the
+/// *member* packages.
+#[derive(Clone)]
+pub struct ComposedSchema {
+    /// Instance names, in chain (declaration) order.
+    pub instances: Vec<Ident>,
+    /// Per instance: (instance, declaring package, member schema).
+    pub members: Vec<(Ident, String, SchemaBody)>,
+    pub fusions: Vec<Fusion>,
+    /// The package of the crate where `compose_pattern!` ran.
+    pub pkg: String,
+}
+
+impl Parse for ComposedSchema {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let wrapper = SchemaWrapper::parse_around(input)?;
+        let c: ComposedInner = syn::parse2(wrapper.body.stream())?;
+        Ok(ComposedSchema {
+            instances: c.instances,
+            members: c.members,
+            fusions: c.fusions,
+            pkg: wrapper.pkg,
+        })
+    }
+}
+
+struct ComposedInner {
+    instances: Vec<Ident>,
+    members: Vec<(Ident, String, SchemaBody)>,
+    fusions: Vec<Fusion>,
+}
+
+impl Parse for ComposedInner {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let kw: Ident = input.parse()?;
+        if kw != "instances" {
+            return Err(syn::Error::new(kw.span(), "expected `instances`"));
+        }
+        input.parse::<Token![:]>()?;
+        let mut instances = Vec::new();
+        loop {
+            instances.push(input.parse()?);
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+        input.parse::<Token![;]>()?;
+        let kw: Ident = input.parse()?;
+        if kw != "members" {
+            return Err(syn::Error::new(kw.span(), "expected `members`"));
+        }
+        input.parse::<Token![:]>()?;
+        let mut members = Vec::new();
+        loop {
+            // One paren group per member: ("declaring-pkg", inst { schema }).
+            let content;
+            syn::parenthesized!(content in input);
+            let pkg: syn::LitStr = content.parse()?;
+            content.parse::<Token![,]>()?;
+            let inst: Ident = content.parse()?;
+            let inner;
+            braced!(inner in content);
+            let schema: SchemaBody = inner.parse()?;
+            members.push((inst, pkg.value(), schema));
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+        input.parse::<Token![;]>()?;
+        let kw: Ident = input.parse()?;
+        if kw != "fusions" {
+            return Err(syn::Error::new(kw.span(), "expected `fusions`"));
+        }
+        input.parse::<Token![:]>()?;
+        let content;
+        braced!(content in input);
+        let mut fusions = Vec::new();
+        while !content.is_empty() {
+            fusions.push(content.parse()?);
+        }
+        Ok(ComposedInner { instances, members, fusions })
+    }
+}
+
+/// The packaging wrapper's spine: `("pkg", { .. })`, body kept raw.
+struct SchemaWrapper {
+    pkg: String,
+    body: proc_macro2::Group,
+}
+
+impl SchemaWrapper {
+    /// Parse the wrapper from a stream that starts with `("pkg", {`.
+    fn parse_around(input: ParseStream) -> syn::Result<Self> {
+        let content;
+        syn::parenthesized!(content in input);
+        let pkg: syn::LitStr = content.parse()?;
+        content.parse::<Token![,]>()?;
+        let body: proc_macro2::Group = content.parse()?;
+        if !content.is_empty() {
+            return Err(syn::Error::new(content.span(), "trailing tokens after the schema body"));
+        }
+        Ok(SchemaWrapper { pkg: pkg.value(), body })
+    }
+}
+
+/// Re-emit a composed schema in its packaging wrapper (round-trips through
+/// `ComposedSchema::parse`).
+pub fn composed_schema_tokens(c: &ComposedSchema) -> TokenStream {
+    let insts = &c.instances;
+    let members = c.members.iter().map(|(inst, pkg, body)| {
+        let s = schema_body_tokens(body);
+        let p = pkg.as_str();
+        quote!((#p, #inst { #s }))
+    });
+    let fusions = c.fusions.iter().map(Fusion::tokens);
+    let pkg = c.pkg.as_str();
+    quote! {
+        (#pkg, { instances: #(#insts),* ; members: #(#members),* ; fusions: { #(#fusions)* } })
+    }
+}
+
+/// What a pattern's courier forwards: a flat schema or a composed one, each
+/// packaged with its declaring crate. Dispatch is by the body's first
+/// keyword (`entities:` vs `instances:`) under the packaging wrapper.
+pub enum GenSchema {
+    Flat(PackagedSchema),
+    Composed(ComposedSchema),
+}
+
+/// Parse the schema group riding a courier payload: `("pkg", { body })`,
+/// where body is headed `entities:` (flat) or `instances:` (composed).
+pub fn parse_gen_schema(group: proc_macro2::Group) -> syn::Result<GenSchema> {
+    use syn::parse::Parser as _;
+    let wrapper = SchemaWrapper::parse_around
+        .parse2(group.stream())
+        .map_err(|e| syn::Error::new(e.span(), format!("malformed packaged schema: {e}")))?;
+    let first = wrapper.body.stream().into_iter().next();
+    match first {
+        Some(proc_macro2::TokenTree::Ident(kw)) if kw == "instances" => {
+            Ok(GenSchema::Composed(syn::parse2(group.stream())?))
+        }
+        _ => Ok(GenSchema::Flat(syn::parse2(group.stream())?)),
+    }
+}
+
+/// Re-emit either schema kind in its packaging wrapper.
+pub fn gen_schema_tokens(schema: &GenSchema) -> TokenStream {
+    match schema {
+        GenSchema::Flat(p) => packaged_schema_tokens(p),
+        GenSchema::Composed(c) => composed_schema_tokens(c),
+    }
+}
+
+#[cfg(test)]
+mod composed_tests {
+    use super::*;
+
+    fn composed_sig(c: &ComposedSchema) -> String {
+        let mut s = String::new();
+        s.push_str(&format!(
+            "i:[{}];",
+            c.instances.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+        ));
+        for (inst, pkg, body) in &c.members {
+            s.push_str(&format!(
+                "m:{inst}/{pkg}/{}e/{}a;",
+                body.entities.len(),
+                body.arrows.len()
+            ));
+        }
+        s.push_str(&format!("f:{};p:{};", c.fusions.len(), c.pkg));
+        s
+    }
+
+    #[test]
+    fn composed_schema_roundtrip() {
+        let src = r#"
+        ("test-crate", { instances: main, sub ;
+        members: ("metagraph-exper", main { entities: root Graph, Node, Edge; arrows { nodes: stdlib::Nodes, Graph -> Node; } }), ("m2-fixtures", sub { entities: root Subgraph, SubNode, MainNode(open); arrows { subnode: crate::roots::SubNodeOf, Subgraph -> SubNode, key(MainNode); } }) ;
+        fusions: { sub.MainNode <-> main.Node ; } })
+        "#;
+        let ts: TokenStream = src.parse().expect("src parses");
+        let once: ComposedSchema = syn::parse2(ts).expect("parse");
+        assert_eq!(
+            composed_sig(&once),
+            "i:[main, sub];m:main/metagraph-exper/3e/1a;m:sub/m2-fixtures/3e/1a;f:1;p:test-crate;"
+        );
+        let emitted = composed_schema_tokens(&once);
+        let twice: ComposedSchema = syn::parse2(emitted.clone()).expect("reparse");
+        assert_eq!(composed_sig(&once), composed_sig(&twice), "emitted: {emitted}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Root registration metadata (the metadata tuple)
 // ---------------------------------------------------------------------------
 

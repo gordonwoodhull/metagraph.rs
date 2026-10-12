@@ -10,6 +10,7 @@
 //! parsers (shared module [`grammar`]), where errors get real spans.
 
 mod codegen;
+mod compose;
 mod grammar;
 
 use proc_macro::TokenStream;
@@ -489,6 +490,408 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
 }
 
 // ---------------------------------------------------------------------------
+// compose_pattern! and the __compose_step! courier chain
+// (plans/milestone-2, "the courier chain")
+// ---------------------------------------------------------------------------
+
+/// Replace a pattern path's last segment with its courier name
+/// (`P::Name` -> `P::__metagraph_pattern_Name`).
+fn courier_path(pattern_path: &Path) -> syn::Result<Path> {
+    if pattern_path.segments.len() < 2 {
+        let last = pattern_path.segments.last().unwrap();
+        return Err(syn::Error::new(
+            last.ident.span(),
+            format!(
+                "`{}` is a bare pattern name; import the pattern's module and pass its path (e.g. `m2_fixtures::shapes::{}`)",
+                last.ident, last.ident
+            ),
+        ));
+    }
+    let mut p = pattern_path.clone();
+    let last = p.segments.last_mut().expect("pattern path nonempty");
+    last.ident = format_ident!("__metagraph_pattern_{}", last.ident);
+    Ok(p)
+}
+
+struct ComposeInput {
+    name: Ident,
+    instances: Vec<(Ident, Path)>,
+    /// Raw fusion declarations, parsed into `Fusion`s only at the final hop
+    /// where all member schemas are in hand.
+    fusions: TokenStream2,
+}
+
+impl Parse for ComposeInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        let body;
+        braced!(body in input);
+        let kw: Ident = body.parse()?;
+        if kw != "instances" {
+            return Err(syn::Error::new(kw.span(), "expected `instances`"));
+        }
+        body.parse::<Token![:]>()?;
+        let mut instances = Vec::new();
+        loop {
+            let inst: Ident = body.parse()?;
+            body.parse::<Token![:]>()?;
+            let path: Path = body.parse()?;
+            instances.push((inst, path));
+            if body.peek(Token![,]) {
+                body.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+        body.parse::<Token![;]>()?;
+        let fusions: TokenStream2 = body.parse()?;
+        if instances.is_empty() {
+            return Err(syn::Error::new(
+                name.span(),
+                "compose_pattern! needs at least one instance",
+            ));
+        }
+        for (i, (inst, _)) in instances.iter().enumerate() {
+            if instances[..i].iter().any(|(x, _)| x == inst) {
+                return Err(syn::Error::new(
+                    inst.span(),
+                    format!("duplicate instance name `{inst}` in compose_pattern!"),
+                ));
+            }
+        }
+        Ok(ComposeInput { name, instances, fusions })
+    }
+}
+
+/// Compose pattern instances by declaring entity fusions:
+///
+/// ```ignore
+/// compose_pattern! {
+///     EdgeInduced {
+///         instances: main: metagraph_exper::stdlib::Digraph, sub: m2_fixtures::shapes::Subgraph;
+///         sub.MainNode <-> main.Node;
+///         sub.MainEdge <-> main.Edge;
+///     }
+/// }
+/// ```
+///
+/// `<=>` is colocation fusion (one record, summed capabilities);
+/// `<->` is reference fusion (closes an open entity, unifying id types
+/// only). A proc macro cannot read its member patterns' tokens, so this
+/// emits an invocation of the first member's schema courier with the
+/// doc-hidden `__compose_step!` as the forwarding target; each hop appends
+/// one member schema and forwards, and the final hop validates the
+/// composition, mints per-instance markers, and emits the composed
+/// pattern's own courier — after which it is indistinguishable from a
+/// hand-written pattern.
+#[proc_macro]
+pub fn compose_pattern(input: TokenStream) -> TokenStream {
+    let comp = syn::parse_macro_input!(input as ComposeInput);
+    match expand_compose(&comp) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand_compose(comp: &ComposeInput) -> syn::Result<TokenStream2> {
+    let rt = runtime_target();
+    let name = &comp.name;
+    let modname = Ident::new(&snake(&name.to_string()), name.span());
+    let (head_inst, head_path) = &comp.instances[0];
+    let first_courier = courier_path(head_path)?;
+    let rest_pairs: Vec<TokenStream2> = comp.instances[1..]
+        .iter()
+        .map(|(inst, path)| {
+            let cp = courier_path(path)?;
+            Ok(quote!((#inst, #cp)))
+        })
+        .collect::<syn::Result<_>>()?;
+    let fusions = &comp.fusions;
+    // Emit ONLY the first hop; the chain carries the queue and the schemas
+    // collected so far. Brace-delimited: the invocation sits in item
+    // position (spike-pinned). Fusions stay opaque token soup until the
+    // final hop.
+    Ok(quote! {
+        #first_courier! {
+            (#rt::__compose_step ;
+                name = (#name)
+                mod = (#modname)
+                head = (#head_inst)
+                rest = ( #(#rest_pairs)* )
+                fusions = { #fusions }
+                collected = ()
+            )
+        }
+    })
+}
+
+/// `inst = (tokens)` fields out of a step payload tail.
+fn step_fields(ts: TokenStream2) -> Vec<(String, TokenStream2)> {
+    let mut out = Vec::new();
+    let mut it = ts.into_iter();
+    while let Some(proc_macro2::TokenTree::Ident(id)) = it.next() {
+        match it.next() {
+            Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '=' => {}
+            other => {
+                return vec![("__error__".into(), quote!(expected eq after #id, got #other))];
+            }
+        }
+        match it.next() {
+            Some(proc_macro2::TokenTree::Group(g)) => out.push((id.to_string(), g.stream())),
+            other => {
+                return vec![("__error__".into(), quote!(expected group for #id, got #other))];
+            }
+        }
+    }
+    out
+}
+
+fn step_field<'a>(
+    fields: &'a [(String, TokenStream2)],
+    name: &str,
+) -> syn::Result<&'a TokenStream2> {
+    fields
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, ts)| ts)
+        .ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("compose step payload missing `{name}`"),
+            )
+        })
+}
+
+/// `( ( inst , path )* )` — the remaining-courier queue.
+struct RestPair {
+    inst: Ident,
+    path: Path,
+}
+impl Parse for RestPair {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let inst = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let path = input.parse()?;
+        Ok(RestPair { inst, path })
+    }
+}
+
+fn parse_rest(ts: &TokenStream2) -> syn::Result<Vec<(Ident, Path)>> {
+    let mut out = Vec::new();
+    for tt in ts.clone() {
+        let proc_macro2::TokenTree::Group(g) = tt else {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "rest entry must be a parenthesized (instance, courier) pair",
+            ));
+        };
+        let p: RestPair = syn::parse2(g.stream())?;
+        out.push((p.inst, p.path));
+    }
+    Ok(out)
+}
+
+/// One hop of the composition chain. The invoking member courier has
+/// already wrapped its packaged schema around the payload; this appends it
+/// to the collected set and either forwards to the next member's courier
+/// or — queue empty — finishes the composition.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __compose_step(input: TokenStream) -> TokenStream {
+    match compose_step(TokenStream2::from(input)) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn compose_step(ts: TokenStream2) -> syn::Result<TokenStream2> {
+    // `{ packaged schema } ; <payload fields>` — the schema stays a raw
+    // group; only the final hop parses it.
+    let mut it = ts.into_iter();
+    let schema_group = match it.next() {
+        Some(proc_macro2::TokenTree::Group(g)) => g,
+        other => {
+            return Err(syn::Error::new(
+                other.map(|t| t.span()).unwrap_or_else(proc_macro2::Span::call_site),
+                "compose step: expected the member's packaged schema group \
+                 (is the instance a root single-arrow pattern? roots are \
+                 instantiated, not composed)",
+            ))
+        }
+    };
+    match it.next() {
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ';' => {}
+        other => {
+            return Err(syn::Error::new(
+                other.map(|t| t.span()).unwrap_or_else(proc_macro2::Span::call_site),
+                "compose step: expected `;` after the schema group",
+            ))
+        }
+    }
+    let fields = step_fields(it.collect());
+    if fields.iter().any(|(n, _)| n == "__error__") {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("compose step: malformed payload: {}", fields[0].1),
+        ));
+    }
+    let name: Ident = syn::parse2(step_field(&fields, "name")?.clone())?;
+    let modname: Ident = syn::parse2(step_field(&fields, "mod")?.clone())?;
+    let head: Ident = syn::parse2(step_field(&fields, "head")?.clone())?;
+    let mut rest = parse_rest(step_field(&fields, "rest")?)?;
+    let fusions = step_field(&fields, "fusions")?.clone();
+    let mut collected = parse_collected(step_field(&fields, "collected")?);
+    collected.push((head, schema_group));
+
+    let Some((next_inst, next_courier)) = rest.first().cloned() else {
+        return finish_compose(&name, &modname, fusions, collected);
+    };
+    rest.remove(0);
+    let rest_pairs: Vec<TokenStream2> = rest
+        .iter()
+        .map(|(inst, path)| quote!((#inst, #path)))
+        .collect();
+    let collected_pairs: Vec<TokenStream2> = collected
+        .iter()
+        .map(|(inst, group)| quote!((#inst, #group)))
+        .collect();
+    let rt = runtime_target();
+    Ok(quote! {
+        #next_courier! {
+            (#rt::__compose_step ;
+                name = (#name)
+                mod = (#modname)
+                head = (#next_inst)
+                rest = ( #(#rest_pairs)* )
+                fusions = { #fusions }
+                collected = ( #(#collected_pairs)* )
+            )
+        }
+    })
+}
+
+/// Collected entries in flight: `(inst, <packaged-schema paren group>)`.
+fn parse_collected(ts: &TokenStream2) -> Vec<(Ident, proc_macro2::Group)> {
+    let mut out = Vec::new();
+    for tt in ts.clone() {
+        if let proc_macro2::TokenTree::Group(g) = tt {
+            let mut inner = g.stream().into_iter();
+            if let (Some(proc_macro2::TokenTree::Ident(inst)), Some(proc_macro2::TokenTree::Punct(p)), Some(schema)) =
+                (inner.next(), inner.next(), inner.next())
+            {
+                if p.as_char() == ',' {
+                    out.push((inst, match schema {
+                        proc_macro2::TokenTree::Group(gg) => gg,
+                        _ => continue,
+                    }));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Final hop: all member schemas collected. Run the compose-time structural
+/// checks, then mint per-instance markers and emit the composed pattern's
+/// own courier — same markers-module layout, same courier rule, same
+/// path-derivation rule as a hand-written pattern, which is what makes
+/// `implement!` resolution configuration-free.
+fn finish_compose(
+    name: &Ident,
+    modname: &Ident,
+    fusions_ts: TokenStream2,
+    collected: Vec<(Ident, proc_macro2::Group)>,
+) -> syn::Result<TokenStream2> {
+    let mut members: Vec<(Ident, String, grammar::SchemaBody)> = Vec::new();
+    for (inst, group) in &collected {
+        let packaged: grammar::PackagedSchema = syn::parse2(group.stream()).map_err(|e| {
+            syn::Error::new(
+                e.span(),
+                format!("compose_pattern! `{name}`: member `{inst}` schema: {e}"),
+            )
+        })?;
+        members.push((inst.clone(), packaged.pkg, packaged.body));
+    }
+    let fusions: Vec<grammar::Fusion> = {
+        use syn::parse::Parser as _;
+        let parse_all = |input: syn::parse::ParseStream| {
+            let mut v = Vec::new();
+            while !input.is_empty() {
+                v.push(input.parse()?);
+            }
+            Ok(v)
+        };
+        parse_all
+            .parse2(fusions_ts.clone())
+            .map_err(|e| syn::Error::new(e.span(), format!("compose_pattern! `{name}`: {e}")))?
+    };
+
+    let composed = grammar::ComposedSchema {
+        instances: members.iter().map(|(i, _, _)| i.clone()).collect(),
+        members,
+        fusions,
+        pkg: std::env::var("CARGO_PKG_NAME").unwrap_or_default(),
+    };
+    compose::validate_composition(&composed)
+        .map_err(|e| syn::Error::new(e.span(), format!("compose_pattern! `{name}`: {e}")))?;
+
+    // ---- mint per-instance markers: fresh unit structs, never re-exports
+    // (re-exported shared markers would produce conflicting impls on fused
+    // handles; the diamond case is two markers, not a conflicting impl) ----
+    let mut marker_mods = TokenStream2::new();
+    for (inst, _, body) in &composed.members {
+        let markers: Vec<Ident> = body
+            .arrows
+            .iter()
+            .map(|a| grammar::marker_ty(&a.name))
+            .collect();
+        let arrow_docs: Vec<String> = body
+            .arrows
+            .iter()
+            .map(|a| format!("Marker for the `{inst}.{}` arrow instantiation.", a.name))
+            .collect();
+        marker_mods.extend(quote! {
+            #[doc = concat!("Per-arrow-instantiation markers of the `", stringify!(#inst), "` instance.")]
+            pub mod #inst {
+                #(
+                    #[doc = #arrow_docs]
+                    #[derive(Debug, Clone, Copy)]
+                    pub struct #markers;
+                )*
+            }
+        });
+    }
+
+    let schema_tokens = grammar::composed_schema_tokens(&composed);
+    let courier = format_ident!("__metagraph_pattern_{}", name);
+
+    Ok(quote! {
+        // The composed pattern is indistinguishable from a hand-written one:
+        // same markers-module layout, same courier rule, same
+        // path-derivation rule. Marker paths derive from the composed
+        // pattern's path by the M1 rule.
+        pub mod #modname {
+            /// Per-instance, per-arrow-instantiation markers.
+            pub mod markers {
+                #marker_mods
+            }
+            #[doc(hidden)]
+            #[macro_export]
+            macro_rules! #courier {
+                (($($fwd:tt)::+ ; $($rest:tt)*)) => {
+                    $($fwd)::+ ! { { #schema_tokens } ; $($rest)* }
+                };
+            }
+            #[doc(hidden)]
+            #[allow(unused_imports)]
+            pub use #courier;
+        }
+    })
+}
+
+
+
+// ---------------------------------------------------------------------------
 // implement!
 // ---------------------------------------------------------------------------
 
@@ -592,7 +995,7 @@ fn expand_implement(imp: &ImplementInput) -> syn::Result<TokenStream2> {
 /// [`resolve_schema_path`]); `metas` the tuples collected so far —
 /// `metas[i]` belongs to the i-th root of that order.
 pub(crate) struct ChainConfig {
-    pub(crate) schema: grammar::PackagedSchema,
+    pub(crate) schema: grammar::GenSchema,
     /// The pattern path as written in `implement!` (prefix + pattern name).
     pub(crate) pattern_path: Path,
     pub(crate) store: Ident,
@@ -603,20 +1006,17 @@ pub(crate) struct ChainConfig {
 
 enum GenInput {
     /// `{ ("pkg", { schema }) } ; @pattern { P } ; Store { bindings }` —
-    /// fresh from the schema courier: parse, validate, start the resolution
-    /// chain. (A composed pattern's courier forwards an `instances:`-headed
-    /// schema; that dispatch arrives with `compose_pattern!` in step 5.)
-    Stage1 { schema: grammar::PackagedSchema, pattern_path: Path, store: Ident, bindings: Vec<Binding> },
+    /// fresh from a pattern's schema courier (flat *or* composed — the
+    /// packaging wrapper's body keyword dispatches): parse, validate, start
+    /// the resolution chain.
+    Stage1 { schema: grammar::GenSchema, pattern_path: Path, store: Ident, bindings: Vec<Binding> },
     /// `{ meta tuple } ; @config { ... }` — one registration courier hop:
     /// the tuple just arrived; the config carries the remaining queue.
     ChainStep { meta: RootMeta, config: ChainConfig },
 }
 
-/// Parse the schema group riding a courier payload: a flat pattern's rides
-/// packaged as `("pkg", { body })`; peek the first token to tell. (Step 5
-/// extends this to composed schemas, headed `instances:`.)
-fn parse_schema_group(group: proc_macro2::Group) -> syn::Result<grammar::PackagedSchema> {
-    syn::parse2(group.stream())
+fn parse_schema_group(group: proc_macro2::Group) -> syn::Result<grammar::GenSchema> {
+    grammar::parse_gen_schema(group)
 }
 
 impl Parse for GenInput {
@@ -705,7 +1105,7 @@ fn parse_chain_config(input: ParseStream) -> syn::Result<ChainConfig> {
 /// it in the one delimiter group the courier grammar requires
 /// (`@config { .. }`).
 fn chain_config_tokens(config: &ChainConfig) -> TokenStream2 {
-    let schema_ts = grammar::packaged_schema_tokens(&config.schema);
+    let schema_ts = grammar::gen_schema_tokens(&config.schema);
     let mp = path_tokens(&config.pattern_path);
     let store = &config.store;
     let bindings_ts = grammar::bindings_tokens(&config.bindings);
@@ -759,11 +1159,28 @@ fn expand_gen(gen: GenInput) -> syn::Result<TokenStream2> {
 /// still carry the user's spans here), queue the unique root patterns, and
 /// emit the first registration-courier hop.
 fn expand_stage1(
-    schema: grammar::PackagedSchema,
+    schema: grammar::GenSchema,
     pattern_path: Path,
     store: Ident,
     bindings: Vec<Binding>,
 ) -> syn::Result<TokenStream2> {
+    match &schema {
+        grammar::GenSchema::Flat(_) => stage1_flat(schema, pattern_path, store, bindings),
+        grammar::GenSchema::Composed(c) => stage1_composed(c, pattern_path, store, bindings),
+    }
+}
+
+/// Flat branch of resolution start.
+fn stage1_flat(
+    schema: grammar::GenSchema,
+    pattern_path: Path,
+    store: Ident,
+    bindings: Vec<Binding>,
+) -> syn::Result<TokenStream2> {
+    let schema = match schema {
+        grammar::GenSchema::Flat(p) => p,
+        grammar::GenSchema::Composed(_) => unreachable!("dispatched above"),
+    };
     let body = &schema.body;
     if let Some(e) = body.entities.iter().find(|e| e.open) {
         // Spans have degraded to the call site by now; quote the tokens.
@@ -841,20 +1258,117 @@ fn expand_stage1(
     // crate lacks a direct dependency on every member's declaring crate).
     let roots = resolved_roots(&schema)?;
 
-    let config = ChainConfig { schema, pattern_path, store, bindings, roots, metas: Vec::new() };
+    let config = ChainConfig {
+        schema: grammar::GenSchema::Flat(schema),
+        pattern_path,
+        store,
+        bindings,
+        roots,
+        metas: Vec::new(),
+    };
+    advance_chain(config)
+}
+
+/// Composed branch of resolution start: bindings key by `instance.arrow`,
+/// and the root queue spans every member's arrows, each resolved against
+/// that member's declaring package (implement-time root-path resolution is
+/// keyed by member instance).
+fn stage1_composed(
+    c: &grammar::ComposedSchema,
+    pattern_path: Path,
+    store: Ident,
+    bindings: Vec<Binding>,
+) -> syn::Result<TokenStream2> {
+    let member_of = |inst: &str| c.members.iter().find(|(i, _, _)| i == inst);
+    for b in &bindings {
+        let key = b.key_str();
+        let Some(inst) = &b.instance else {
+            return Err(syn::Error::new(
+                b.arrow.span(),
+                format!(
+                    "binding `{}` is bare, but pattern `{}` is composed; key every backing as `instance.arrow`",
+                    b.arrow,
+                    pattern_name(&pattern_path)
+                ),
+            ));
+        };
+        let Some((_, _, body)) = member_of(&inst.to_string()) else {
+            return Err(syn::Error::new(
+                b.arrow.span(),
+                format!(
+                    "binding `{key}` names unknown instance `{inst}` (pattern `{}` instantiates: {})",
+                    pattern_name(&pattern_path),
+                    c.instances.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        };
+        match body.arrows.iter().find(|a| a.name == b.arrow) {
+            None => {
+                return Err(syn::Error::new(
+                    b.arrow.span(),
+                    format!("unknown arrow `{key}` in `implement!` bindings (not declared by instance `{inst}`)"),
+                ));
+            }
+            Some(a) if a.sum.is_some() => {
+                let (ua, ub) = a.sum.as_ref().unwrap();
+                return Err(syn::Error::new(
+                    b.arrow.span(),
+                    format!(
+                        "derived arrow `{key}` (`:= sum({}, {})`) is never bound to a backing",
+                        ua, ub
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Duplicate qualified keys.
+    let mut seen: Vec<String> = Vec::new();
+    for b in &bindings {
+        let key = b.key_str();
+        if seen.contains(&key) {
+            return Err(syn::Error::new(
+                b.arrow.span(),
+                format!("duplicate binding for arrow `{key}`"),
+            ));
+        }
+        seen.push(key);
+    }
+
+    // Queue the unique instantiation roots across all members, resolved per
+    // member package.
+    let mut roots: Vec<Path> = Vec::new();
+    for (_, pkg, body) in &c.members {
+        for a in &body.arrows {
+            let p = a.inst.as_ref().expect("members are instantiation patterns");
+            let ts = resolve_schema_path(p, pkg)?;
+            let key = ts.to_string();
+            if !roots.iter().any(|r| path_tokens(r).to_string() == key) {
+                roots.push(syn::parse2(ts).expect("resolver emits a parseable path"));
+            }
+        }
+    }
+
+    let config = ChainConfig {
+        schema: grammar::GenSchema::Composed(c.clone()),
+        pattern_path,
+        store,
+        bindings,
+        roots,
+        metas: Vec::new(),
+    };
     advance_chain(config)
 }
 
 /// Queue state machine: either bounce through the next root's registration
 /// courier, or — queue empty — run codegen with the collected tuples.
-fn advance_chain(mut config: ChainConfig) -> syn::Result<TokenStream2> {
-    match config.roots.is_empty() {
-        true => codegen::expand_flat(&config),
-        false => {
-            let next = config.roots.remove(0);
-            emit_hop(&next, config)
-        }
+fn advance_chain(config: ChainConfig) -> syn::Result<TokenStream2> {
+    if config.roots.is_empty() {
+        return codegen::expand(&config);
     }
+    let mut config = config;
+    let next = config.roots.remove(0);
+    emit_hop(&next, config)
 }
 
 fn emit_hop(root: &Path, config: ChainConfig) -> syn::Result<TokenStream2> {

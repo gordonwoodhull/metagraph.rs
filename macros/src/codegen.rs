@@ -33,8 +33,23 @@ struct ArrowInfo<'a> {
     backing: Option<String>,
 }
 
+/// Codegen entry: dispatch on the schema kind. Flat codegen is M1's;
+/// composed codegen (fusion classes, placement, path ids) is step 7.
+pub(crate) fn expand(config: &ChainConfig) -> syn::Result<TokenStream2> {
+    match &config.schema {
+        crate::grammar::GenSchema::Flat(_) => expand_flat(config),
+        crate::grammar::GenSchema::Composed(_) => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "composed-pattern codegen is not implemented yet (milestone-2 step 7)",
+        )),
+    }
+}
+
 pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
-    let schema = &config.schema;
+    let schema = match &config.schema {
+        crate::grammar::GenSchema::Flat(p) => p,
+        crate::grammar::GenSchema::Composed(_) => unreachable!("dispatched by expand"),
+    };
     let body = &schema.body;
     let store = &config.store;
 
