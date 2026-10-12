@@ -1,240 +1,256 @@
-# HANDOFF — M3 continuation: composed codegen, then steps 6–9
+# HANDOFF — M3 continuation: steps 6–9
 
-**Status when written:** steps 2 and the flat half of 3–5 are COMMITTED
-on `worktree-m3-implement` (worktree `.claude/worktrees/m3-implement`,
-branched at `9c3569c` = main). Tip `fd131ae`; commits this stretch:
-`f01d88e` (binding path form + backing-courier resolution + stdlib
-`src/backings.rs`), `710bca2` (`roles.rs` + flat codegen data-driven),
-`4ebf038` (the bounce gate — step 2's acceptance), `fd131ae` (plan
-ticks + this handoff's earlier draft). Full workspace green: 31 suites
-incl. trybuild and the two new downstream crates. Nothing merged; the
-user merges.
+**Status when written:** the fused steps-2–5 sequence is COMPLETE on
+`worktree-m3-implement` (worktree `.claude/worktrees/m3-implement`,
+branched at `9c3569c` = main). Tip `64de74a`; commits this stretch:
+`7b3202a` (prior handoff), `aab753f` (commit 3 — composed codegen
+data-driven over `backing!` declarations, see its message for the two
+recorded decisions and the two role-engine fixes), `64de74a` (commit 4 —
+fixed-table inspection, step-5 flat keyed test, plan ticks). Full
+workspace green: 33 suites incl. trybuild and the three new tests
+(`root_intrusive`, `flat_keyed`, the `impl_keyed_embedded_gap` compilefail
+pair). Steps 3–5 ticked in the plan; the milestone gate's fixed-table item
+ticked. Nothing merged; the user merges.
 
-**Scope:** the two remaining commits of the fused steps-2–5 sequence
-(composed codegen data-driven; delete the last fixed table — which
-closes steps 3–5), then steps 6–9 per the plan. Read the "Reality
-check" of `HANDOFF-m3-step2.md` (still in this directory) for why the
-sequence is shaped this way; this file supersedes it as the working
-contract.
+**Scope:** steps 6–9 per `plans/milestone-3-backings-and-stdlib.md` (the
+plan is the contract; this file is the working state and the traps). A
+step-6 start was attempted and reverted (tree is clean at tip) — its
+design work is written out under step 6 below so it doesn't have to be
+re-derived.
 
 ---
 
 ## What this stretch left behind
 
-- `macros/src/roles.rs` — the role-substitution engine. A `RoleBinding`
-  trait (one method per role: `rec`, `records`, `maps`, `host_of`,
-  `idx`, `arena_of`, `map_from`, `determining`, `handle`, `id_ty`,
-  `param`, `store`, `walk_ty`, `rename_field`, `is_walk_field`,
-  `walk_field_is_raw`) and a textual, outermost-first rewriter
-  (`roles::rewrite`) with: syntactic entity recovery (literal `a`/`b`/
-  `k`; `for v in records(E)` binds v→E; `for (owner, m) in maps(A)`
-  binds the map; `for (k, v) in m.iter()` binds K/B; ambient default B),
-  the `Walk { .. }` literal gaining the reserved `store` field (+
-  re-keyed fields), after-dot-only field renames, and the hygiene rules
-  under "Known traps" below. `FlatRoles` in `codegen.rs` is the flat
-  implementation — read it as the template for `ComposedRoles`.
-- `macros/src/codegen.rs` — flat codegen fully declaration-driven:
-  contributions with formula renames and the uniform init rule
-  (ctor_arg / `Option`→None / `Vec`+`HashMap`→default / else reject);
-  ctor args from `ctor_arg` clauses; `on_insert` hooks with authored
-  param spellings; `iter`/`iterate`/`advance` (Walk renamed to
-  `iter_ty(arrow)`, `w`→`self`, `Some(handle(id))` tails); `read`/
-  `lookup` trait impls + builder read view; `__validate_<arrow>`
-  methods summoned in binding order with the uniform `Option<id>` range
-  pre-pass and **early return** (so authored walks may `rec(x)` freely);
-  validate-variant selection by the arrow's membership facts; `set_`/
-  `insert_` ops derived from clauses; clean rejection of phased
-  backings until step 8. The flat fixed table is already gone.
-- `macros/src/lib.rs` — `ChainConfig` carries `backing_queue` +
-  `backing_decls`; `advance_chain` drains backing hops first, then
-  roots, then **synthesizes one hop per defaulted `one` arrow** (key =
-  binding key, courier = runtime `field`) before codegen —
-  `unbound_one_arrow_keys` is the helper; keep it in sync with the
-  codegens' meta lookups.
-- `src/backings.rs` — the five stdlib declarations with real bodies.
-  These are contract now: the composed port must make them emit at
-  every composed placement without editing them (if one genuinely
-  cannot, that's a finding to fold into the plan, not a body edit —
-  the one sanctioned exception so far was `Some(handle(id))`, already
-  applied).
-- Bounce gate: `tests/downstream/backing-provider` (user backing whose
-  `on_insert` names `note_push`, which exists only at the use site) +
-  `tests/downstream/backing-user` (depends on the provider renamed;
-  one `implement!` binding the user backing by path and `arena` by
-  bare ident; the helper's counter, traversal orders, and `validate()`
-  are the assertions). These two crates are the permanent step-2
-  evidence — keep them green.
+- `macros/src/roles.rs` — the role-substitution engine, now with
+  `walk_host()` on `RoleBinding`: the Walk's reserved `host` field at
+  embedded-target placements (the initializer a `Walk { .. }` literal
+  carries, and the anchor a raw `handle(x)` mints through; call-site
+  spans on both sides — only authored Walk FIELD names are mixed-site).
+  Two latent bugs fixed there (see traps 6–7): tuple-pattern binding and
+  the MapIter source scan. `FlatRoles` (flat) and `ComposedRoles`
+  (composed, in `codegen_composed.rs`) are the two bindings; read either
+  as the template for a new one.
+- `macros/src/codegen_composed.rs` — fully declaration-driven: field
+  contributions via the free fn `push_contribution` (naming formulas,
+  collision prefixing, the combined ctor rule, the uniform init rule),
+  hooks/read/lookup/iterate/advance from authored bodies, sums via
+  rewritten sibling iterate bodies (`sibling_iterate_expr`; the old
+  hand-inlined `sum_sibling_expr` is gone), per-arrow
+  `__validate_<inst>_<arrow>` methods with the uniform `Option<id>` range
+  pre-pass and early return, summoned from `validate()` in binding order.
+  Applicability checks are declaration-driven: phased (until step 8),
+  `CtorArg`/`OnAdd` orchestrator rule, One-cardinality-into-embedded
+  handle mint, declared `requires:` predicates (`direct_records` →
+  embedded self, `hosts_arena` → cross-host), validate-variant selection,
+  `by`-totality, and the keyed host-agreement gap (below). `rec_ref`
+  (store-token-parametrized record access) replaced `rec_ref_ts`/
+  `rec_ref_handle`; `rec_get`, `root_map_of`, and `ClassData.maps` are
+  gone — per-arrow registries (`field_of_arrow`, `map_of_arrow`) name
+  contributed fields instead.
+- `macros/src/codegen.rs` — flat codegen unchanged except its declaration
+  helpers are now `pub(crate)` and shared: `card_of_decl`,
+  `contributed_fields`, `on_clause`, `body_of`, `FieldInit`/`init_of`,
+  `scaffold_lets`.
+- Keyed decisions recorded: the **host-agreement gap** — `host_of(v) !=
+  owner` binds only where a self-side anchor of the host id type exists
+  (self record IS the host, or self shares the target's host); anywhere
+  else it is an implement!-time rejection quoting placement facts (folded
+  into the plan's Constraints section; pinned by
+  `tests/compilefail/impl_keyed_embedded_gap.*`). The **intrusive-at-
+  unfused-root relaxation** is emitted and driven by
+  `tests/root_intrusive.rs` (store-level head, self-less op, root-handle
+  read; the flat side was the r3 probe's).
+- `tests/fixtures` — three new patterns: `shapes::KeyedPlain` (flat
+  keyed, plain-self + store-level arrows; driven by
+  `tests/flat_keyed.rs`), `neg::AnchoredKey` (the gap fixture's key),
+  `neg::RootMany` (root-sourced many arrow; the relaxation driver).
+- The keyed live-key predicate (`__<inst>_<arrow>_key_live`, M4's pure
+  check form) is derived from the authored lookup body (`.is_some()`).
+- Arena iterators no longer emit the hand-rolled `size_hint` — the
+  advance body owns `next()` entirely, and nothing in the suites reads
+  size hints.
 
-## Commit 3 — composed codegen data-driven (closes nothing by itself,
-## keeps the tree green)
+## Step 6 — validate machinery + corruption fixtures
 
-Port `codegen_composed.rs` onto `RoleBinding` with a `ComposedRoles`,
-mirroring what flat did, under M2's placement machinery (union-find
-classes, `ClassLoc::Root/Embedded(host)`, the `<->` partner map,
-collision prefixing). The M2 suites are the gate: `hierarchy_subgraphs`
-(incl. the `should_panic` duplicate-key test), `edge_induced`,
-`edge_chain`, `compose_chain`, `validate_failures`, downstream
-`composed-renamed`. Every trybuild fixture that names a composed
-rejection pins its message byte-for-byte — keep texts stable (the
-cardinality message survives unchanged because decl name == binding
-spelling for the four stdlib names).
+Contract: the plan's "The validate contribution".
 
-Existing helpers to reuse (all in `codegen_composed.rs` today):
-`rec_ref_ts` (record access by id value), `rec_ref_handle` (through a
-handle binding), `enum_recs` (nested enumeration binding `self_id` +
-`srec`), `out_of_range` (short-circuit, path-aware bounds test),
-`rec_get` (safe `.get` walk access), `sum_sibling_expr`,
-`ClassData`/`FieldContribution`, `field_of_arrow`, `hosted`,
-`root_map_of`, `class_index_of`/`ent_index`, `arrow_name_users`,
-`iter_name`, `check_name`. The port replaces the string-keyed match
-arms with decl-driven emission; the collection/collision/naming logic
-stays.
+- **Box 1 is already done** — the `__validate_<arrow>` convention (per
+  arrow, doc-hidden, summoned in binding order) landed with the port in
+  both codegens; tick it first.
+- **Pre-pass fixtures (the new work).** The existing
+  `tests/validate_failures.rs` covers ghost keys, value-in-arena,
+  host-agreement, shared membership, cycles, and the by-contradiction +
+  coverage pair — all through public ops. What no fixture pins is the
+  **uniform range pre-pass and its early return**: the ops cannot put a
+  link out of range (hooks only ever insert live ids), so corrupt
+  directly. The generated records are private to the implement module —
+  put the `implement!` and the tests in ONE module inside
+  `validate_failures.rs` (`mod corrupt { use metagraph_exper::implement;
+  implement! { ... } #[test] fn ... }`) and the field damage is legal:
+  `s.inner_edge_arena[0].next_elems = Some(InnerEdgeId(99));`.
+  Pin both the message and the early return:
+  - message: `arrow `inst.arrow`: `next_elems` link of InnerEdgeId(0)
+    points at InnerEdgeId(99), which is not a live record` (the pre-pass
+    names the field, the owning record's id, and the dead target; the
+    head/store variants say `head` / `head of the store`);
+  - early return: assert the SAME report carries no `shared membership` /
+    `repeats` text — the authored partition walks never ran. This is the
+    deliberate pin of the joint-report change the handoff-before-last
+    flagged.
+- **The intrusive-into-embedded emission has no driver yet.** A Hierarchy
+  variant binding `sub.subedges: intrusive_list` (instead of `arena`)
+  drives it: path-id links, the nested `rec(id)` walk, the non-raw
+  `handle(id)` split (`{host: id.0, id: id.1}`), and `records(B)` as the
+  embedded host×leaf enumeration. Walk it through the fused handle
+  (`<OuterNode<'_> as EdgesOf<markers::sub::Subedges>>::subedges(&h)`)
+  beside the corruption tests. It also gives the **path-aware pre-pass
+  fixture**: corrupt a link's host component
+  (`s.sub_sub_edge_arena[0].next_sub = Some(SubEdgeId(OuterNodeId(99),
+  0))`) — host liveness must fire before leaf bounds are even computed
+  (the test's out-of-range-host case is otherwise in-bounds-looking).
+  NOTE: that Walk carries the reserved `host` field unread (the intrusive
+  recipe takes the host from the path id — r4-advance pinned the field as
+  reserved, not always read), so the field triggers a dead_code warning
+  in the test crate; harmless, but don't "fix" it by dropping the field.
+- **Field-name formula for damage:** `link_stem` strips one trailing
+  `_edges` — `out_edges` → `first_out`/`next_out`, `elems` →
+  `first_elems`/`next_elems`, `subedges` → `first_sub`/`next_sub`
+  (`subedges` → stem `sub` — easy to misguess; check with MG_DEBUG).
+- **Doc-contract box:** expand the canonical-inventory paragraph in
+  `src/lib.rs` crate docs (currently one paragraph predating the
+  pre-pass) to state the inventory per backing class and the pre-pass +
+  early-return semantics — the documented contract M4's flush runs.
+- Then tick box 1 and the corruption-fixture box (and the doc box).
 
-Role bindings per placement (decisions — do not relitigate):
+## Step 7 — constraint predicates + trybuild error tests
 
-- **Entity → class**: A/B/K map to classes via `class_index_of(i, e)`
-  (the partner map resolves open entities). `id_ty` is the class's
-  `id_name` — and `()` when the self is an unfused root (A slot).
-- **`rec(x)`** = `rec_ref_ts(class_of_ent(x), x)`; at an unfused-root
-  self, `rec(a)` folds to the store (flat already does this).
-- **`records(E)`**: ids-only enumeration — `enum_recs` shape minus the
-  `srec` binding, mapping to path ids (`#idt(#hid(hi), ri)`) when
-  embedded; `once(())` for an unfused-root self.
-- **`maps(A)`**: owner-yielding pairs whose shape must match
-  `host_of`: per-record map at a plain self → **owner = the vacuous
-  host `()`** (flat ids carry no host component; the authored
-  `host_of(v) != owner` must typecheck — this is the role table's
-  parenthetical, and it means the flat-style "on {:?}" self-id spelling
-  is gone at flat/plain placements; only composed tests pin messages,
-  all via `contains`, so this is safe); map on a host-embedded self →
-  one pair per host record, **owner = the host id**; store-level →
-  `once(((), &store.<map>))`.
-- **`host_of(v)`** by v's class loc: `()` at Root, `(v).0` at
-  Embedded. **`idx(v)`**: `.0 as usize` at Root, `.1 as usize` leaf at
-  Embedded.
-- **`arena_of(X, arg)`**: X's class Root → `store.<x_arena>`;
-  Embedded(hc) → the arg-indexed record of the HOST class, then
-  `.<x_arena>` (the arg names a host-class record — that is the only
-  shape the declarations use: `b_arena_of(a)` with A the host, and
-  `*_arena_of(host_of(v))`).
-- **`map_from(a)`**: per-record map via `rec(a)`; store-level fold at
-  an unfused-root self (`root_map_of`).
-- **`determining(x)`**: `rec(x).<det field>` with the det field from
-  `field_of_arrow` (the combined ctor rule already ran at collection).
-- **`handle(x, raw)`**: target Root → `{store, id: x}` / raw
-  `#Id(x)`; target Embedded → `{store, host: x.0, id: x.1}` / raw
-  `#Id(w.host, x)` — the Walk carries the reserved `host` field at
-  embedded placements, and only the index-mint recipe reads it
-  (r4-advance probe).
-- **Labels and names**: `arrow_label` = `` "arrow `inst.arrow`" ``;
-  hooks/validators instance-qualified (`__insert_<inst>_<arrow>`,
-  `__validate_<inst>_<arrow>`), summoned in binding order; public ops
-  take the instance prefix only on cross-instance arrow-name collision
-  (today's rule).
-- **Intrusive-at-unfused-root relaxation (the merge chore)**: drop the
-  `!classes[sc].owns_records` rejection for `intrusive_list` —
-  store-level head, self-less hook, root-handle read. KEEP the
-  `field`/ctor_arg rejection (`impl_unfused_root_field` fixture) and
-  the embedded-sourced intrusive rejection
-  (`impl_intrusive_at_embedded` fixture).
-- **Known gap to carry, not silently fix**: store-level self with an
-  *embedded* target class — today's codegen emits no host-agreement
-  arm there, and the uniform authored body cannot typecheck
-  (`host_of(v): HostId` vs `owner: ()`). Either reject at implement
-  time quoting the placement facts, or special-case the emission —
-  decide once, fold the choice into the plan's Constraints section,
-  and say so in the commit message.
+Contract: the plan's "Constraints and applicability" and its evaluation
+table.
 
-## Commit 4 — delete the fixed table (closes steps 3–5)
+- **Predicate evaluation with the pinned templates.** Cardinality exists
+  (both codegens, byte-pinned). To add: `existence` (a primitive `many`
+  arrow bound to a `membership: existence` backing is rejected — today
+  nothing reads `Clause::MembershipExistence`; also the duplicate case,
+  a second existence binding on one target naming both arrows),
+  `hosts_arena` and `direct_records` upgraded from commit 3's
+  plain-worded rejections to the table's template style (error names the
+  arrow, the computed placement facts — B's arena location, A's self
+  case, endpoint placements — and quotes the backing's tokens). The
+  evaluation hooks are already there in codegen_composed's applicability
+  loop; flat has the orchestrator check only — bring flat up to parity.
+- **`ctor_arg`/`on_add` orchestrator-rule rejection**: exists in both
+  codegens; the trybuild fixture (`impl_unfused_root_field`) is composed
+  — a flat fixture is owed.
+- **Trybuild fixtures for step 1's grammar rejections** (unknown clause,
+  bad store label, closed annotation sets, repetition): today they are
+  unit tests in `backing.rs` via `parse_str`; add compilefail fixtures
+  with real declaration-site spans (one `backing!` per rejection in
+  `tests/compilefail/`, `.stderr` via `TRYBUILD=overwrite`).
+- **The open fixture debts (from the prior handoff):**
+  1. backing **re-export routing** rejection — mirror the pattern side's
+     `tests/downstream/reexporter`: a middle crate re-exports the
+     declaring module, the implement site depends only on the middle
+     crate → the resolver's clean direct-dependency error. The mechanism
+     fires in `GenInput::BackingStep` via `declaring_crate_root`.
+  2. **Reserved-set shadowing** (hygiene caveat 3's grammar rule): the
+     engine rewrites reserved heads unconditionally, so a body defining a
+     local named `rec`/`handle`/`maps`/… is silently captured. Add a
+     validation pass — e.g. `check_reserved_bindings(body) ->
+     syn::Result<()>` in `roles.rs` rejecting `let`/`fn`/`struct`
+     bindings of the reserved idents with the closed set quoted — called
+     once per authored body before `roles::rewrite` (or per declaration
+     at collection, cheaper). A trybuild fixture pins it.
+  3. `hosts_arena`/`direct_records`/`existence` parse but are not
+     evaluated — this step's main work (above).
+- Also tick step 4's remaining box (the hygiene caveats as grammar
+  rules) when the shadowing rejection lands — mixed_site scaffolds and
+  absolutized paths are already emitted; shadowing is the missing third.
 
-After commit 3 the composed `["arena","field","intrusive_list",
-"hash_index"]` membership checks and name-keyed arms are dead; delete
-them (grep the macros crate for the four names — `src/lib.rs`'s doc
-table is prose, reword it in step 9's doc pass, not here). Then tick:
-step 3's table box, step 5's boxes (the three self placements — plain,
-host-embedded, store-level — emitted from declarations; M2 keyed tests
-green in both M2 placements plus the plain-self placement, which needs
-a new flat keyed test since M2's keyed tests are all composed; the
-`should_panic` duplicate-key test stays green), and the overall gate's
-"fixed table gone / no hidden fixed table" inspection item. Step 5's
-plain-self test: a small flat keyed pattern (m2-fixtures `Subgraph`
-shape implemented flat, per-self map) added to the runtime's test
-suite — the placement exists in code but no test drives it.
+## Step 8 — `csr_adjacency` + type-state
 
-## Then steps 6–9 (the plan is the contract; highlights only)
+- The declaration rides in `src/backings.rs` (bodies may be refined when
+  emission lands — say so in the commit). `arena_len(A)` appears in its
+  validate body and is NOT yet a role the engine rewrites — either grow
+  the engine (a `records`- sibling role) or refine the body to the
+  `b_arena_of`/`records` vocabulary; decide once and keep the closed
+  vocabulary honest.
+- `on store build`/`on store frozen` partition; the store type parameter
+  emitted only when a phased backing is bound; the store parameter only
+  in phased signatures; `compact` at the single `freeze()` in binding
+  order; the three compile-fail proofs (insert-after-freeze,
+  frozen-as-builder, no accumulators on the frozen type);
+  applicability rejections (entity arrow, unfused-root self); the
+  fused-root emission attempted against the frontier note — emit it or
+  record exactly what breaks.
+- The pre-pass applicability checks already reject phased declarations
+  cleanly (flat and composed); removing that rejection is step 8's first
+  act.
 
-- **Step 6** — corruption fixtures per spike 4 against the new
-  `__validate_*` surface: ghost keys, out-of-range and cross-host
-  values, chain corruption in both partition shapes (shared membership
-  vs cycle, distinguished in the report). The early-return pre-pass
-  changes joint-report behavior for corrupt links — fixtures should
-  pin the new behavior deliberately.
-- **Step 7** — predicate evaluation with the pinned error templates
-  (cardinality, `existence`, `hosts_arena`, `direct_records`), the
-  `ctor_arg`/`on_add` orchestrator-rule rejection, trybuild fixtures
-  for each predicate and for step 1's grammar rejections. Fold the
-  open fixture debts (below) here.
-- **Step 8** — `csr_adjacency` + type-state: the declaration already
-  rides in `src/backings.rs` (bodies may be refined when emission
-  lands — say so in the commit); `on store build/frozen` partition,
-  the store parameter emitted only when a phased backing is bound,
-  `compact` at the single `freeze()` in binding order, the three
-  compile-fail proofs, applicability rejections.
-- **Step 9** — promote M2's discovered roots into the stdlib (names as
-  M2 resolved them; criterion = M2 suites unchanged modulo import
-  paths), then the doc pass to M1 step-11's standard (generated-code
-  doc comments carry the arrow that produced each item).
+## Step 9 — stdlib promotion + doc pass
 
-## Open fixture debts (small; fold into step 7)
-
-- No fixture pins backing **re-export routing** rejection — the
-  mechanism fires in `GenInput::BackingStep` via `declaring_crate_root`
-  (a middle crate re-exporting the declaration is the dep, the
-  declarer is not → the resolver's clean error). Mirror the pattern
-  side's `reexporter` downstream crate.
-- **Reserved-set shadowing** (hygiene caveat 3's grammar rule) is not
-  checked — the engine rewrites reserved heads unconditionally. A body
-  defining a local named `rec`/`handle`/… is silently captured.
-- `hosts_arena`/`direct_records`/`existence` parse but are not
-  evaluated anywhere yet.
+- Promote M2's discovered roots into the stdlib (names as M2 resolved
+  them; criterion = M2 suites unchanged modulo import paths): `EdgesOf`,
+  the `main_*` one-arrows, the keyed pair. `m2-fixtures` keeps local
+  declarations re-pointing at the stdlib, or the fixtures thin out —
+  whichever the criterion prefers.
+- The doc pass to M1 step-11's standard (generated-code doc comments
+  carry the arrow that produced each item — the port already emits
+  per-contribution docs naming `inst.arrow`; audit flat too).
+- The doc-table prose in `macros/src/lib.rs` (the four built-in names in
+  `implement!`'s docs) is step 9's reword, deliberately not commit 4's.
 
 ## Verification commands
 
-- `cargo test --workspace` — must be fully green at every commit
-  (31 suites at tip `fd131ae`; grows with the step-5 plain-self test).
+- `cargo test --workspace` — must be fully green at every commit (33
+  suites at tip `64de74a`; grows with step 6's fixtures).
 - `cargo test -p metagraph-exper --test koenigsberg` — byte-sensitive
   traversal-order assertions.
-- `cargo test -p metagraph-exper --test validate_failures` — the
-  pinned failure-message tails.
-- `MG_DEBUG=1 cargo test -p metagraph-exper --test koenigsberg` — dump
-  `implement!` / `__implement_gen` emissions when debugging courier
-  hops.
+- `cargo test -p metagraph-exper --test validate_failures` — the pinned
+  failure-message tails.
+- `cargo test -p metagraph-exper --test compilefail` — pinned stderr;
+  regenerate with `TRYBUILD=overwrite`.
+- `MG_DEBUG=1 cargo test -p metagraph-exper --test <t>` — dump
+  `implement!` / `__implement_gen` emissions when debugging.
 
-## Known traps (three cost a debug cycle this stretch; all fixed,
-all repeatable)
+## Known traps (two cost a debug cycle this stretch; all repeatable)
 
-- **Courier hops are brace-invoked with the paren group nested**:
-  `courier! { ( tgt ; rest ) }`. Emitting `courier!(tgt ; rest)` makes
-  the parens the invocation delimiter, the matcher then sees `tgt`'s
-  first token where it expects `(` — "no rules expected", plus a
-  misleading "macros that expand to items" error. Every hop emitter in
-  `lib.rs` is the reference shape.
-- **`Span::mixed_site()` must pair on BOTH sides**: the emitted
-  binding (hook params `a`/`b`/`k`, Walk struct fields, scaffold
-  `let`s) AND the engine's re-emitted body mentions. One-sided
-  mixed_site (or plain call-site on either) breaks resolution with
-  E0425 against a *correct-looking* expansion. Meanwhile loop-bound
-  locals (`for ra in …`, tuple destructuring) must keep the body's own
-  courier spans so pattern and uses pair — `roles.rs` checks the scope
-  before re-spanning.
-- **`handle(x)` mints bare; bodies author `Some(handle(id))`** where
-  the tail must be `Option` (intrusive walk). The `.then(|| …)` recipes
-  stay unwrapped. Pinned by the r4-advance probe; the stdlib
-  declarations already spell it.
-- Flat `maps(A)` owner is `()` at plain-self too — the authored
-  value-in-arena message gains `on ()` there. Only composed spellings
-  are test-pinned (`contains` assertions); do not "restore" the self
-  id without making `host_of(v) != owner` typecheck.
-- A `backing!` invocation cannot carry doc comments before the
-  declaration name (the parser expects the ident) — use `//` comments.
-  Same E0255-avoidance as patterns: declare in a named module.
+1. **Courier hops are brace-invoked with the paren group nested**:
+   `courier! { ( tgt ; rest ) }`. Emitting `courier!(tgt ; rest)` makes
+   the parens the invocation delimiter and the matcher mis-reads — "no
+   rules expected" plus a misleading item-position error. Every hop
+   emitter in `lib.rs` is the reference shape.
+2. **`Span::mixed_site()` must pair on BOTH sides** — emitted bindings
+   (hook params, scaffold lets, Walk struct FIELDS) and the engine's
+   re-emitted mentions. One-sided mixed_site breaks resolution with
+   E0425 against a *correct-looking* expansion. Corollary (how the bug
+   class manifests): a local the engine FAILS to scope-bind gets
+   silently re-emitted mixed-site and stops pairing with its verbatim
+   binder — if a body local "cannot be found", suspect a missed scope
+   binding first (see trap 7).
+3. **`handle(x)` mints bare; bodies author `Some(handle(id))`** where
+   the tail must be `Option`. The `.then(|| …)` recipes stay unwrapped.
+4. Flat/composed `maps(A)` owner is `()` at plain and store-level
+   placements — the "on {:?}" message tail shows `()`. Only composed
+   tests pin messages, all via `contains`; don't "restore" a self id
+   without making `host_of(v) != owner` typecheck.
+5. A `backing!` invocation cannot carry doc comments before the
+   declaration name; use `//` comments. Declare in a named module
+   (E0255-avoidance, same as patterns).
+6. **`rw_for`'s source scan counts call parens**: `m.iter()` scans as
+   FOUR tokens (`m . iter ()`) — the MapIter arm matches
+   `src.get(0..=3)` with an optional trailing EMPTY paren group. Any new
+   source-shape match must account for the empty call parens riding
+   along. (The original `len == 3` arm never fired; keyed validate was
+   simply never run through the engine before this stretch.)
+7. **Tuple loop patterns keep their idents inside the paren group** —
+   `pat_idents` flattens exactly one level, so `for (k, v) in …` binds
+   k/v like `for v in …` binds v. Deeper nesting would need more; none
+   of the declarations use it.
+8. **Debugging hygiene bugs**: the MG_DEBUG emission dump stringifies
+   spans away — a hygiene bug reproduces CLEAN when the dump is compiled
+   standalone (the /tmp probe trick), which proves it's span-sensitive.
+   Then `cargo +nightly rustc -p metagraph-exper --test <t> --
+   -Zmacro-backtrace` names the expansion the bad token lives in; from
+   there, temporary `eprintln!`s inside `rw_for` (bindings firing per
+   loop) localize it in one run. Remove the eprintlns after.
