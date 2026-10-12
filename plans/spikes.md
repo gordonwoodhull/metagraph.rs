@@ -178,7 +178,11 @@ on the host record beside the embedded arena; the insert hook takes
 `<->` collapses the key type to the partner's plain id. Key uniqueness
 looked free with `HashMap` (corrected below: a plain insert silently
 overwrites, which made duplicate-key rejection an insert-time rule in
-M2/M4); validate() checks key existence and value-in-arena. One
+M2/M4); validate() checks key existence, value-in-arena, and
+value-host agreement (a value whose host component names a different
+host's arena is reported as such, src/main.rs `target.0 != host` — the
+code implements all three inventory checks; the report's finding 5
+under-counted them, corrected here in review 3). One
 codegen rule pinned: handles hand-write `Eq`/`Hash`
 forwarding to (store pointer, id) — a derive would bound
 `Store: Eq`/`Hash`, and id-only forwarding would equate handles across
@@ -228,6 +232,10 @@ as the addendum to spike 11's entry, above.)
 | Poly-placement validate (M3 review 2) | `/tmp/m3-probe-poly-validate` | 7/7 tests. One authored hash_index validate body emitted unchanged at store-level and host-embedded placements; only three bound roles differ (the map iterator, key-containment, value-containment). Honest limits: no per-map owner context in error messages; compound path-id containment yields coarse messages |
 | Instance-prefixed merged constructor (M3 review 2) | `/tmp/m3-probe-ctor-merge` | 2/2 tests + E0063 negcheck. The merged constructor of a two-instance colocation class takes the union of both members' `ctor_arg` arguments, instance-prefixed on collision (`outer_source`/`inner_source`), routing by name via field-init shorthand — the differing-target-classes case. Spike 1's "silently deduped (keeps first)" is unemittable for required fields. The shared-argument case (targets agree via `<->`) is pinned in M2's constructor-merging rule but not probe-covered |
 | Mixed-binding phased store (M3 review 2) | `/tmp/m3-probe-mixed-phase` | 5/5 tests + E0599 negcheck. CSR (`out_edges`) + intrusive (`in_edges`) coexist on one `GraphStore<P>`: per-record links cross the build/frozen boundary untouched, freeze finalizes only CSR's store-level state, two validate functions summoned in binding order catch their own backing's damage. Hazard pinned: an undifferentiated field list lets a forgetful freeze carry stale accumulators into the frozen store — the motivation for phase-attributed contributions |
+| hash_index at three self placements (M3 review 3) | `/tmp/m3-probe-r3-hashindex` | 11/11 tests. Plain self record (first emission anywhere), host-embedded, and store-level placements; duplicate-key panics and ghost-naming per placement. Central result: value-host agreement is NOT expressible through the bare-map role set as written — a real host-1 subnode poked into host 0's map passes the role-expressible validate and is caught only by a hand-written hostcheck. Also recorded: the field-name rule's ambiguity (`subnode` per the single-field rule vs `subnode_index` per every artifact) and free-function validate-name collisions across stores |
+| Value-host-agreement role fix (M3 review 3) | `/tmp/m3-probe-r3-hostagree` | 5/5 tests. `maps(A)` as (owner, map) pairs plus a `host_of(v)` role expresses the third check in ONE body at both placements (store-level arm vacuously true through a vacuous owner); `records(A)`-yields-ids + `map_from(ra)` also works at the host-embedded placement but does not extend to store level. E0428 pinned: one `host_of` definition per placement (no overloading) |
+| Store-level intrusive head (M3 review 3) | `/tmp/m3-probe-r3-root-intrusive` | 5/5 tests. Retires the "owed a probe" debt: intrusive_list sourced at a root-marked unfused self — head on the store, self-less 1-arg hook, op as a store-level method (never a root-handle method — the handle wraps a shared `&Store`), GAT read on the root handle, partition validators distinguishing cycle from shared membership, coexisting with per-record lists on one store |
+| Combined-rule sharing half (M3 review 3) | `/tmp/m3-probe-r3-ctor-share` | 4/4 tests. Retires the probe queued in main's ledger: one fused record, one shared-arg constructor (targets agree via `<->` — one argument feeds both instance-prefixed fields, routing by explicit init; shorthand cannot express it), and the prefixed constructor (targets differ) in the same crate. Together with /tmp/m3-probe-ctor-merge both halves of the combined rule are probe-covered |
 
 ## Sequencing rules (from the original brief)
 
