@@ -1,75 +1,259 @@
 # HANDOFF — M4 implementation (write-side builders)
 
 Branch `worktree-m4-implement`, worktree `.claude/worktrees/m4-implement`,
-cut from main 4904680. Plan: plans/milestone-4-builders.md (the contract).
-This file: running notes, decisions, step log. Retires to .handoffs/ with
-the worktree.
+based on main 4904680 + steps 1–2. Plan: plans/milestone-4-builders.md
+(the contract — checklist § "Implementation checklist", dependency line
+1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 12); 9 → 11; (8, 11) → 10).
+This file: state, settled decisions, and the per-step continuation guide.
+Retires to .handoffs/ with the worktree.
+
+## Where things stand
+
+Done and committed:
+
+- **Step 1** (14a19f1): runtime `src/tx.rs` (TxToken/atomic mint,
+  `RefKind<I>`/`Ref<I>` with eager `check_stamp`, marker-generic
+  `HandleToRef<M>`); `macros/src/tx.rs` — the ONE Tx emitter, driven by
+  a normalized `TxModel` (entities with ctor args + on_add hooks);
+  flat codegen builds the model under a shape gate; emitted per
+  implement!: ref aliases, per-entity `Into<Ent>Arg` (ref: stamp-checked;
+  raw id: unstamped Existing; handle: hard store-identity assert), `Op`
+  enum (Add/Remove per entity), `add_*`/`remove_*` staging
+  (Pending-removal panics), `edit()`, `old()`.
+  Tests: tests/tx_stage1.rs (3), compilefail/read_on_ref.rs (E0599).
+- **Step 2** (this commit): tests/tx_staging_panics.rs — 4 should_panic
+  tests (foreign stamp, stale stamp, Pending removal, foreign handle).
+  Suite green at every commit.
+
+Step 2 notes: the plan's four-panic surface is split by verb
+availability — `set_` of a Pending ref lands with step 7's set_ staging,
+keyed-insert-on-live-key with keyed staging (steps 8/11); a panic can't
+be exercised before its staging call exists. Recorded here per the plan's
+"note it in the step notes".
+
+Not started: steps 3–14.
+
+## Architecture decisions (settled in the survey, keep unless forced)
+
+1. **Generic tx pieces in the runtime crate** (`src/tx.rs`, landed):
+   token, Ref, stamp check, `HandleToRef<M>`. Everything pattern-specific
+   — `Tx<'a>`, `Op`, staging, `flush`, error/report types, write-trait
+   impls — is emitted by `macros/src/tx.rs` from a `TxModel` built by
+   BOTH flat and composed codegen, so the flush pipeline exists in
+   exactly one place. Grow the model per step (set ops → 7, primitive
+   inserts → 6, paths/nesting → 9, keyed carry → 11, phased → 12).
+2. **Shape gate**: `tx::emit` supports flat ∧ non-phased ∧ keyless
+   today; other shapes emit no `Tx` (no `edit()`) until their step
+   lands. Main's tests never call `edit()` on those shapes
+   mid-milestone, so the suite stays green. Final state: all shapes.
+3. **Flush skeleton copy bypasses constructors** (the probes' shape):
+   kept records pushed as raw record literals — ctor-arg id fields
+   remapped through the compaction maps, `Option` links `None`,
+   Vec/HashMap `Default` — then `on_add` hooks fired manually, then
+   per-backing carry (intrusive: rebuild-by-walk; keyed: filter+remap
+   carry, never rebuilt; csr: walk old frozen ranges feeding `__insert_`
+   hooks), then staged ops replayed through the REAL constructors/hooks
+   in submission order. validate() at the end (defensive Err arm
+   `ValidateFailed`, D4).
+4. **Induction (step 10) via a generated escape hatch** (my design, not
+   yet probed): `Op::Custom(Box<dyn FnOnce(&mut Store, &Resolve<'_>)>)`
+   + doc-hidden `Tx::__stage_custom` + `__reserve_keys(Vec<ReservedKey>)`
+   where `ReservedKey` is a generated one-variant-per-keyed-arrow enum
+   carrying the (host-,)key refs. User writes `impl Tx<'_> { add_subedge
+   }` in the same crate (works — the store/Tx types are generated into
+   the user's module; today's edge_induced.rs already extends the STORE
+   this way), computing induced keys from `old()` + a doc-hidden
+   ops-readonly accessor, staging the closure for replay. This keeps
+   induction undeclared (plan's Induction section) while the live-key
+   staging check still sees induced keys (the induct-flush probe's
+   sharpened reading). Cost: Custom ops are not inspectable — note in
+   step-10 notes. If review rejects the closure, the alternative is an
+   optional `implement!` induction clause — but that contradicts
+   "undeclared is the normal case"; the closure is the faithful reading.
+5. **Step 9's decision obligation (replay-table miss)**: decided —
+   same-crate unit test in the runtime crate (an in-crate `implement!`
+   can forge a stamped ref against module-private Tx internals; a
+   downstream tests/ crate cannot — probe 2's miss test forged
+   same-crate). Emission: bounds-checked `get` + internal-bug panic
+   message.
+6. **csr × set_ residual question**: plan says "a phased backing needs
+   nothing" for the set_ orchestration's derivative relink. Emission
+   follows that (no unlink, no relink for phased derivatives — the field
+   write only), leaving carried buckets stale if a set_ re-points a
+   determinant of a by-derived csr arrow. No current test binds that
+   combination (csr.rs binds out_edges: csr on Digraph — set_source
+   exists there! Check tests/csr.rs when doing step 7; if the builder
+   set_ on that store is exercised, revisit: either bucket-splice via a
+   new on_unlink in csr's declaration, or an implement-time rejection
+   naming the combination).
+7. **Error/report surface, generated per store** (probes' shapes):
+   `Violation` enum — UnknownOldId{op,arena,id}, DoubleRemoval{op,arena,id},
+   DanglingEndpoint{op, record: Kept(u32)|Staged(op), endpoint_arena, endpoint},
+   SetOfRemoved{op,arena,id,removed_by} (step 7), RemovedPathHost{ops
+   asc, host, removed_by} (step 9), KeyRemovedWithLiveEntries{op,key,
+   entries sorted} + keyed coherence (step 11), ValidateFailed(String).
+   Deterministic order: step order then op index; anything derived from
+   a HashMap gets collected+sorted (probe 4's byte-identical Display
+   test, step 4). `FlushOutcome { store, report }`; report = per-arena
+   `Vec<Option<u32>>` (old-id-indexed; embedded arenas gain per-old-host
+   sub-maps at step 9, composed remap = host map ∘ per-host sub map).
+   `check(&self)` = steps 1–2 factored pure (same analysis struct flush
+   consumes); committed-mode contract: green check → into_edit flush
+   commits (step 4).
+8. **Write traits (step 6)**: arrow-named verbs root-emitted — pattern!
+   root emission grows the write trait beside the read trait
+   (Insert<Arrow> for many/keyed roots, Set<Arrow> for one roots) and
+   the courier metadata tuple gains the SIXTH, braced element
+   `{ Trait, method, ARef, KRef?, BRef }` (ref assoc names = `<Entity>Ref`,
+   spike 8's de facto contract: AddNode/RemoveNode/InsertOutEdges with
+   NodeRef/EdgeRef assoc types; AddEdge = per-pattern constructor trait
+   with ctor-arg assoc types per arrow: type Edge; type Source; type
+   Target; fn add_edge(...) -> Self::Edge). Existence traits are
+   DECLARING-BLOCK-owned: pattern! (and compose re-mint) emits
+   Add<E>/Remove<E> per NON-ROOT entity + a per-entity marker in the
+   same markers module (entity name verbatim; add a pattern!-time
+   collision check against camel(arrow) markers). Canonical arity: self
+   ref always present in the trait method; unfused-root forms are
+   inherent-only on Tx (no trait impl emitted). `HandleToRef<M>` impls
+   per entity under per-entity markers. impl! emits Tx trait impls only
+   where the verb is real (existence many → no Insert impl; by-derived →
+   none; keyed → Insert with key).
+
+## Per-step continuation guide (3–14)
+
+Acceptance instruments: probe crates under /tmp are the reference
+implementations — reproduce their tests against GENERATED code.
+Spike-7's 32 tests live in /tmp/spike7-tx (src/tx.rs + tests); spike 8
+at /tmp/spike8-transform (src/write.rs = the name contract,
+src/transform.rs = the two scenarios).
+
+- **3. Flush (flat, non-phased)** — the big one. Extend TxModel with
+  arrows: per bound arrow a `TxCarry` classification (Existence |
+  FieldOne{field, a_ent, b_ent} | Intrusive{head owner (record/store) +
+  head field, link field on B, insert/unlink hooks, det} | Keyed | Csr —
+  last two rejected at build until steps 11/12). Emit `flush(self) ->
+  Result<FlushOutcome, FlushError>` following /tmp/spike7-tx/src/tx.rs
+  and /tmp/m4-probe-set-unlink/src/main.rs (the pipeline WITH honor
+  semantics — read its flush once before emitting): step 1 removals +
+  range-guarded Existing validation (range-guard EVERY old-id read —
+  spike7-oob-repro's bug: step 1 flags but doesn't return before step 2
+  indexes); step 2 danglers over kept records per one-arrow field
+  (Kept, attributed to the removal op) + staged adds naming removed
+  endpoints (Staged, attributed to the naming op); step 3 compaction
+  maps; step 4 skeleton (records with remapped id fields, on_add hooks,
+  intrusive rebuild-by-walk per binding — head at record vs store) then
+  submission-order replay through constructors with a per-entity
+  pending table (`pending[i].expect("internal bug")`); step 7
+  validate(). Dangler detection generalizes spike 7's source/target
+  loop: for EVERY bound one-arrow, kept records whose field target was
+  removed. Königsberg signature-equality test: port from spike 7's
+  tests (tx-built vs directly-built). Out-of-range Existing → the
+  listed error, never a panic — port /tmp/spike7-oob-repro's test.
+- **4. check() + determinism** — factor steps 1–2 into
+  `fn analyze(old, ops) -> Result<Analysis, FlushError>`; `pub fn
+  check(&self)` calls it; flush consumes. Byte-identical Display across
+  runs (probe 4's error_display_is_deterministic pattern: six
+  independent builds). Committed-mode contract test (check green →
+  flush commits) can only be exercised fully at step 5 (into_edit);
+  test the check-then-flush path via edit() now and note it.
+- **5. into_edit()** — `OldStore` enum shape from spike 7: Borrowed(&) |
+  Owned(Box<Store>); derive-before-write, forward writes (write slot ≤
+  read slot), the walk arrays computed before any in-place write. Port
+  spike 7's into_edit tests. Note: with carried Vec<Op> closures (step
+  10) into_edit stays fine — closures are FnOnce over the new store.
+- **6. Write-trait codegen** — decision 8 above. Changes: grammar.rs
+  (RootMeta gains the write slot, parse/emit + round-trip tests),
+  macros/lib.rs expand_root_pattern (emit write traits + slot),
+  per-entity traits in expand_instantiation_pattern + finish_compose
+  (markers re-mint), TxModel gains per-arrow/per-entity trait-impl data
+  (trait path from courier meta; marker path like read impls), and the
+  staging verbs: insert_<arrow> for primitive many (queue Insert op),
+  so spike 8's copy (AddNode+AddEdge) and replace_node (full web incl.
+  HandleToRef) compile at two marker instantiations against generated
+  code (tests/tx_write_traits.rs, modeled on spike8's tests/transform.rs
+  with the recast bounds the plan names). Keyed insert staging can land
+  here or with 8/11 — needs __key_live predicates in the FLAT codegen
+  (composed already emits them; copy that emission).
+- **7. set_ + grown hooks** — set_ staging (panic on Pending self, step
+  2's deferred test), Op::Set<Arrow>, honor semantics in flush steps
+  1–2 (eff overrides last-wins; SetOfRemoved; set_-naming-removed
+  attributed to the set op; set_ cannot cure the far side), skeleton
+  born-unlinked honor case with Pending prediction (kept + preceding
+  adds of the target entity, asserted at replay). Grow `__set_<arrow>`
+  (M2's field-write hook) into the re-point orchestration in BOTH
+  codegens: for each by-derived arrow on this field, unlink(old_host,
+  rec) if its backing authors on_unlink, write, insert(new_host, rec)
+  if it authors on_insert — SKIP phased derivatives entirely (decision
+  6). tests/unlink.rs's by_derived test already drives the trio
+  manually — after step 7 the builder set_source does it in one call;
+  update that test? NO — keep it (it pins the hooks); add probe 3's
+  tests as tests/tx_set_unlink.rs (head/middle/tail, honor, double
+  set_ last-wins, same-verbs-in-order normalization, pending-new-source
+  honor case).
+- **8. Unfused-root forms** — self-less insert staging (primitive:
+  insert_<arrow>(member_ref); keyed: insert_<arrow>(key_ref, target))
+  at unfused-root selves, store-level ops; no trait impls for those
+  verbs (canonical arity unemittable). Acceptance: m3-probe-r3-root-
+  intrusive + m2-probe-edge-induced tests as generated equivalents —
+  the latter needs the COMPOSED codegen to build a TxModel (extend
+  codegen_composed.rs with the same model construction; placements via
+  ClassData). This is where composed Tx emission starts; flush for
+  composed root-level-only stores (edge-induced: keyed at unfused root,
+  flat arenas) needs keyed carry → may pull step 11's keyed-carry work
+  forward for the store-level map case (filter+remap through two maps —
+  no host composition at root level). Sequence 8 → 11 per the plan.
+- **9. Nested stores** — `within(host_ref) -> SubTx{token, prefix}` (no
+  borrow; nested calls thread `&mut Tx`, token re-checked), ops gain
+  `path: Vec<Ref<HostId>>` (or a Path struct; codegen knows the one
+  embedding depth — emit the fixed-shape path), per-old-host sub maps,
+  RemovedPathHost violation (staged ops' indices ascending + removal
+  op), root-before-nested replay grouping, per-level Pending resolution
+  (Existing through per-level maps, Pending through the root pass's
+  op-index replay table — bounds-checked get, decision 5's same-crate
+  miss test in src/stdlib.rs tests or a new in-crate tests module).
+  Acceptance: m4-probe-nested-pending's 10 tests. Read its REPORT first.
+- **10. Induction** — decision 4's escape hatch; the induct-flush probe
+  (/tmp/m4-probe-induct-flush, 17 tests — REPORT has the full inventory
+  and the three fixed failures' lessons: standalone = record + keyed
+  insert BOTH; live-key check counts induced keys in submission space)
+  + edge_induced.rs's tests as generated equivalents. Extend
+  edge_induced.rs (or a new test file) with the Tx extension impl.
+- **11. Removal + keyed carry** — report exposure, survivors-only
+  cascade ("live" = surviving the change set, all three reference
+  sites — doomed-host entries cascade-covered; staged insert keyed by a
+  removed key counts live and errors), keyed maps carried never rebuilt,
+  composed remap at carry AND staged-insert replay, Existing-only
+  keyed host/target for path-id targets (staging panic), cascade
+  through keyed maps on removal (induct-flush's keyed cascade).
+  Acceptance: m4-probe-keyed-carry's 15 + spike 7's 14 removal tests.
+- **12. Phased** — Tx borrows `Store<Frozen>`, flush builds through
+  `Store<Build>` (skeleton via raw pushes + on_add bucket growth; csr
+  carry walks old frozen ranges feeding `__insert_` hooks; replay;
+  `finish()` = freeze + validate). Acceptance: m4-probe-phased-flush's
+  12 tests. Its REPORT pins: 4a–4d sub-order, old-store reads are
+  Frozen-phase reads only, per-field remap is WRONG (rebuild-by-walk),
+  validate cannot backstop semantic truncation.
+- **13. Negative suite** — trybuild fixtures (read-on-ref done; add
+  wrong-marker bounds, handle survival under into_edit), collect the
+  staging should_panics in one place, downstream-crate transform
+  portability test (M1 step 9's pattern — a new tests/downstream crate
+  or extend an existing one).
+- **14. Doc pass** — crate-root docs (transaction/flush/pass
+  discipline), macro docs (implement! gains the write side), the
+  backing! doc for on_unlink already landed with M3.
+
+Rules of engagement (from the handing-off session): no subagents; the
+plan's checklist is the queue; tick a step's boxes in the same commit as
+the work; full workspace suite (trybuild + downstream included) green
+before each commit; new probe/scratch crates under /tmp only, never
+committed; spikes.md row if a probe earns one; landed code wins over
+plan text, note disagreements in step notes; do not merge to main —
+leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
-- 2026-10-12: survey complete (repo codegen, all five probes + spike 7/8).
-  Baseline suite green. Starting step 1.
-- Step 1 DONE (commit follows): runtime `src/tx.rs` (TxToken/Ref/
-  check_stamp/HandleToRef), `macros/src/tx.rs` emitter (TxModel →
-  Tx/Op/IntoArg/staging/edit), flat codegen wired with the stage-1
-  shape gate (flat ∧ non-phased ∧ no keyed → Tx; else no Tx yet).
-  tests/tx_stage1.rs (3) + compilefail/read_on_ref.rs. Suites green.
-
-## Architecture decisions (settled up front, revisit only if forced)
-
-1. **Generic tx pieces live in the runtime crate** (`src/tx.rs`): `TxToken`
-   (atomic mint), `RefKind<I>` / `Ref<I>` (stamp + kind, both fields
-   readable — generated staging code lives in user modules), a
-   `check_stamp` helper, and the marker-generic `HandleToRef<M>` trait
-   (step 6's D7 pin). Everything pattern-specific — `Tx<'a>`, `Op`,
-   staging methods, `flush`, error/report types, write-trait impls — is
-   emitted per `implement!` by a new `macros/src/tx.rs` emitter driven by
-   a normalized **TxModel** built by both flat and composed codegen. This
-   keeps the flush emission in exactly one place; the model grows per
-   step (set ops → step 7, paths → step 9, keyed carry → step 11, phased
-   → step 12).
-2. **Shape gating during stages 1–3**: `tx::emit` currently supports
-   flat, non-phased stores with no keyed and no csr bindings; other
-   shapes emit no `Tx` (no `edit()`) until their step lands. Main's tests
-   never call `edit()` on those shapes mid-milestone, so the suite stays
-   green. Final state: all shapes.
-3. **Flush skeleton copy bypasses constructors** (probes' shape): kept
-   records are pushed as raw record literals — id fields remapped,
-   `Option` links `None`, containers `Default` — then `on_add` hooks fire
-   manually, then per-backing carry (walk-rebuild for intrusive lists,
-   map carry for keyed, bucket-feed for csr), then staged ops replay
-   *through the real constructors / grown hooks* in submission order.
-4. **Induction (step 10) via a generated escape hatch**: undeclared
-   constructor logic runs at replay through a doc-hidden `Op::Custom(Box<
-   dyn FnOnce(&mut Store, &Resolve)>)` variant plus a doc-hidden
-   `__stage_custom` staging method on `Tx` (user code writes `impl Tx` in
-   the same crate — the store type is generated into the user's module,
-   so inherent-impl extension works, exactly like today's hand-written
-   `impl EdgeInducedStore { add_subedge }`). The live-key staging check
-   gains a generated `ReservedKey` enum (one variant per keyed arrow,
-   carrying the (host-,)key refs) fed by a `__reserve_keys` helper, so a
-   standalone keyed add after a staged inducing op still panics at
-   staging (the induct-flush probe's reading). Cost: Custom ops are not
-   inspectable; noted as the price of undeclared semantics.
-5. **Replay-miss coverage (step 9 decision obligation)**: decided —
-   same-crate unit test (runtime crate `src/stdlib.rs` tests or
-   `src/tx.rs` tests driving an in-crate `implement!`), because the
-   forged-stamped-ref trick needs module-private access the generated
-   code does not grant downstream. Recorded here per the plan.
-6. **csr × set_ interaction** (by-derived csr membership vs a `set_` on
-   the determinant): plan says "a phased backing needs nothing". Emission
-   follows that (no unlink, no relink for phased derivatives); the
-   residual stale-bucket question is noted in step-7 notes, and if a test
-   binds that combination we revisit.
-
-## Step notes
-
-### Step 1 — change-set data model — DONE
-
-Acceptance: refs expose no read methods (compile-fail fixture
-`read_on_ref.rs`, E0599 pinned); the change set is a plain struct (Tx
-holds `Vec<Op>`; op indices count every op — asserted in
-`pending_refs_count_every_queued_op`). Notes: refs' `token`/`kind`
-fields are public (generated staging code in user modules must read
-them; forging cross-tx Pending is the stamp-panic we want).
-`Tx::old()` exposed for pass-discipline reads.
+- 2026-10-12: survey (repo codegen, five probes, spike 7/8, D1–D8 fold
+  diffs); baseline green.
+- Step 1 DONE 14a19f1; step 2 DONE (this commit).
+- Handed off after step 2 per Gordon: rest of the plan continues from
+  the guide above.

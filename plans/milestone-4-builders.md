@@ -696,7 +696,7 @@ the probe crate under `/tmp` as the reference implementation.
       queue whose indices count every op, staging methods with local
       spellings. Acceptance: refs expose no read methods (compile-fail
       fixture); the change set is a plain struct.
-- [ ] 2. Staging panics: foreign/stale stamp, removal of a `Pending`
+- [x] 2. Staging panics: foreign/stale stamp, removal of a `Pending`
       ref, `set_` of a `Pending` ref, keyed insert onto a live key
       (two arms: existing entry or staged insert, same host).
       Acceptance: one `should_panic` test each.
