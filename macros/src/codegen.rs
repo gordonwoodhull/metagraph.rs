@@ -242,6 +242,22 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     #next: ::core::option::Option<#tid>,
                 ));
             }
+            // hash_index: per-self-object map from key id to target id,
+            // maintained by the insert hook. A root-marked self owns no
+            // record, so its map is a store-level field (the store-level
+            // contribution site).
+            Some("hash_index") => {
+                let arrow_doc_name = &d.name;
+                let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
+                let tid = id_ty(&d.target);
+                let idx = format_ident!("{}_index", d.name);
+                if !is_root(&d.source) {
+                    field_decls.get_mut(&d.source.to_string()).unwrap().push(quote!(
+                        #[doc = concat!("hash_index map of arrow `", stringify!(#arrow_doc_name), "`")]
+                        #idx: ::std::collections::HashMap<#kid, #tid>,
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -402,11 +418,92 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         }
     }
 
+    // Keyed insert hooks, factored check-then-write: the live-key predicate
+    // is callable without performing the write (M4's staging needs it as a
+    // pure check over old store + staged ops); the hook panics on a live
+    // key — a keyed arrow is a function, and the plain-HashMap overwrite
+    // the probe reproduced would orphan the old target silently.
+    for info in &infos {
+        if info.backing.as_deref() != Some("hash_index") {
+            continue;
+        }
+        let d = info.decl;
+        let arrow_doc_name = &d.name;
+        let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
+        let tid = id_ty(&d.target);
+        let idx = format_ident!("{}_index", d.name);
+        let pred = format_ident!("__{}_key_live", d.name);
+        let hook = format_ident!("__insert_{}", d.name);
+        let insert_name = format_ident!("insert_{}", d.name);
+        if is_root(&d.source) {
+            // Unfused-root self: exactly one self, no id to pass; the map is
+            // a store-level field.
+            hook_impls.extend(quote! {
+                #[doc(hidden)]
+                #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc_name), "` (store-level map)")]
+                fn #pred(&self, key: #kid) -> bool {
+                    self.#idx.contains_key(&key)
+                }
+                #[doc(hidden)]
+                #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc_name), "` (store-level map)")]
+                fn #hook(&mut self, key: #kid, target: #tid) {
+                    if self.#pred(key) {
+                        ::core::panic!("duplicate key {:?} for arrow `{}`: a keyed arrow is a function", key, stringify!(#arrow_doc_name));
+                    }
+                    self.#idx.insert(key, target);
+                }
+            });
+            ctor_impls.extend(quote! {
+                #[doc = concat!("Map `key` to `target` in the `", stringify!(#arrow_doc_name), "` index (root-sourced keyed arrow; no self id).")]
+                pub fn #insert_name(&mut self, key: #kid, target: #tid) {
+                    self.#hook(key, target);
+                }
+            });
+        } else {
+            let sid = id_ty(&d.source);
+            let s_arena = arena_fld(&d.source);
+            hook_impls.extend(quote! {
+                #[doc(hidden)]
+                #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc_name), "` on one self object")]
+                fn #pred(&self, self_id: #sid, key: #kid) -> bool {
+                    self.#s_arena[self_id.0 as usize].#idx.contains_key(&key)
+                }
+                #[doc(hidden)]
+                #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc_name), "`")]
+                fn #hook(&mut self, self_id: #sid, key: #kid, target: #tid) {
+                    if self.#pred(self_id, key) {
+                        ::core::panic!("duplicate key {:?} for arrow `{}` on {:?}: a keyed arrow is a function", key, stringify!(#arrow_doc_name), self_id);
+                    }
+                    self.#s_arena[self_id.0 as usize].#idx.insert(key, target);
+                }
+            });
+            ctor_impls.extend(quote! {
+                #[doc = concat!("Map `key` to `target` in `self_id`'s `", stringify!(#arrow_doc_name), "` index.")]
+                pub fn #insert_name(&mut self, self_id: #sid, key: #kid, target: #tid) {
+                    self.#hook(self_id, key, target);
+                }
+            });
+        }
+    }
+
     // ---- store struct ----
     let arena_fields = elements.iter().map(|e| {
         let f = arena_fld(&e.name);
         let dat = data_ty(&e.name);
         quote!(#f: ::std::vec::Vec<#dat>,)
+    });
+    // Store-level hash_index maps: keyed arrows sourced at the root-marked
+    // entity (an unfused root owns exactly one self per store and no record,
+    // so the per-self-object map is a field of the store itself).
+    let root_maps = infos.iter().filter_map(|info| {
+        if info.backing.as_deref() != Some("hash_index") || !is_root(&info.decl.source) {
+            return None;
+        }
+        let d = info.decl;
+        let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
+        let tid = id_ty(&d.target);
+        let idx = format_ident!("{}_index", d.name);
+        Some(quote!(#idx: ::std::collections::HashMap<#kid, #tid>,))
     });
     let count_fns = elements.iter().map(|e| {
         let ent_doc_name = &e.name;
@@ -432,6 +529,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         #[derive(Default, Debug)]
         pub struct #store {
             #(#arena_fields)*
+            #(#root_maps)*
         }
 
         impl #store {
@@ -700,6 +798,28 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                                 store: self.store,
                                 id: self.store.#self_arena[self.id.0 as usize].#f,
                             }
+                        }
+                    }
+                });
+            }
+            // Keyed partial: one hash lookup; the associated-type bindings
+            // name the impl lifetime ('g — the E0637-pinned emission).
+            Some("hash_index") => {
+                let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
+                let key_assoc = meta.key.as_ref().expect("keyed roots publish the key assoc name");
+                let idx = format_ident!("{}_index", d.name);
+                let lookup = if is_root(self_h) {
+                    quote!(self.store.#idx.get(&key).copied())
+                } else {
+                    let self_arena = arena_fld(self_h);
+                    quote!(self.store.#self_arena[self.id.0 as usize].#idx.get(&key).copied())
+                };
+                trait_impls.extend(quote! {
+                    impl<'g> #trait_path<#marker_path> for #self_h<'g> {
+                        type #assoc = #tgt_h<'g>;
+                        type #key_assoc = #kid;
+                        fn #m(&self, key: #kid) -> ::core::option::Option<#tgt_h<'g>> {
+                            #lookup.map(|id| #tgt_h { store: self.store, id })
                         }
                     }
                 });

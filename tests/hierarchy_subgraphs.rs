@@ -21,7 +21,7 @@ mod comp {
             instances:
                 outer: metagraph_exper::stdlib::Digraph,
                 inner: metagraph_exper::stdlib::Digraph,
-                sub:    m2_fixtures::shapes::SubPlain;
+                sub:    m2_fixtures::shapes::Subgraph;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;
             outer.Node  <=> sub.Subgraph;
@@ -41,6 +41,8 @@ implement! {
         inner.in_edges:  intrusive_list,
         sub.subnodes:    arena,
         sub.subedges:    arena,
+        sub.subnode:     hash_index,
+        sub.subedge:     hash_index,
     }
 }
 
@@ -75,6 +77,14 @@ fn store() -> HierarchyStore {
     assert_eq!(s1, SubNodeId(o0(), 1));
     assert_eq!(s2, SubNodeId(o1(), 0));
     let _se = s.add_sub_edge(a, ie0);
+    // Keyed arrows: explicit inserts through the hash_index hooks. The
+    // self argument is the fused class's id (o0 — every outer node is-also
+    // a subgraph); the key is the partner's plain inner id (reference
+    // fusion collapses `MainNode` to `InnerNodeId`, no wrapper).
+    s.insert_subnode(o0(), i0, s0);
+    s.insert_subnode(o0(), i1, s1);
+    s.insert_subnode(o1(), i2, s2);
+    s.insert_subedge(o0(), ie0, _se);
     s
 }
 
@@ -184,4 +194,61 @@ fn trait_impls_under_instance_markers() {
         1
     );
     let _ = e.source().id();
+}
+
+#[test]
+fn keyed_lookups_round_trip() {
+    use m2_fixtures::roots::{SubEdgeOf, SubNodeOf};
+    let s = store();
+    let og = s.outer_graph();
+    let a = og.nodes().next().unwrap();
+    let b = og.nodes().nth(1).unwrap();
+
+    // Keyed reads through the fused handle: `<->` collapses the key type to
+    // the partner's plain id (`InnerNodeId`, no wrapper).
+    let sn0 = <OuterNode<'_> as SubNodeOf<markers::sub::Subnode>>::subnode(&a, InnerNodeId(0))
+        .expect("i0 is a member of o0's subgraph");
+    assert_eq!(sn0.id(), SubNodeId(o0(), 0));
+    assert_eq!(sn0.main_node().id(), InnerNodeId(0));
+
+    // Runtime multiplicity is unconstrained by reference fusion: one inner
+    // node keys into two different hosts' maps.
+    let from_b =
+        <OuterNode<'_> as SubNodeOf<markers::sub::Subnode>>::subnode(&b, InnerNodeId(2))
+            .expect("i2 is a member of o1's subgraph");
+    assert_eq!(from_b.id(), SubNodeId(o1(), 0));
+
+    // Non-members and cross-host misses are None (the map is per self).
+    assert!(
+        <OuterNode<'_> as SubNodeOf<markers::sub::Subnode>>::subnode(&a, InnerNodeId(2)).is_none()
+    );
+    assert!(
+        <OuterNode<'_> as SubNodeOf<markers::sub::Subnode>>::subnode(&b, InnerNodeId(99))
+            .is_none()
+    );
+
+    // The keyed subedge read dispatches through its own marker.
+    let se = <OuterNode<'_> as SubEdgeOf<markers::sub::Subedge>>::subedge(&a, InnerEdgeId(0))
+        .expect("ie0 is a member of o0's subgraph");
+    assert_eq!(se.id(), SubEdgeId(o0(), 0));
+    assert_eq!(se.main_edge().id(), InnerEdgeId(0));
+    assert!(
+        <OuterNode<'_> as SubEdgeOf<markers::sub::Subedge>>::subedge(&b, InnerEdgeId(0))
+            .is_none()
+    );
+}
+
+#[test]
+#[should_panic(expected = "duplicate key")]
+fn duplicate_key_rejected_at_the_insert_call() {
+    let mut s = HierarchyStore::new();
+    let a = s.add_outer_node();
+    let i0 = s.add_inner_node();
+    let s0 = s.add_sub_node(a, i0);
+    let s1 = s.add_sub_node(a, i0);
+    s.insert_subnode(o0(), i0, s0);
+    // Inserting onto a live key panics (check-then-write: the hook's
+    // live-key predicate is callable without performing the write — M4's
+    // staging needs the pure form).
+    s.insert_subnode(o0(), i0, s1);
 }

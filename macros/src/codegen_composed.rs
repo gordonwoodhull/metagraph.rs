@@ -73,6 +73,9 @@ struct ClassData {
     arena_fld: Ident2,
     /// Field contributions to this class's record, in collection order.
     fields: Vec<FieldContribution>,
+    /// hash_index map fields on this class's record (keyed arrows sourced
+    /// here): per-self-object key->target maps, hook-maintained.
+    maps: Vec<(Ident2, Ident2, Ident2)>,
 }
 
 /// One field contribution to a class's record: what the record stores and
@@ -232,6 +235,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     data_name: Ident2::new("_pending", proc_macro2::Span::call_site()),
                     arena_fld: Ident2::new("_pending", proc_macro2::Span::call_site()),
                     fields: Vec::new(),
+                    maps: Vec::new(),
                 });
                 classes.len() - 1
             });
@@ -519,6 +523,26 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             }
                         }
                     }
+                    // hash_index map on the self record (per-self-object
+                    // map; a pure-root self contributes at store level
+                    // instead — handled with the store fields below).
+                    Some("hash_index") if members[i].2.entities[e].name == d.source => {
+                        let kid = classes
+                            [class_index_of(i, ent_index(i, d.key.as_ref().unwrap())?)]
+                        .id_name
+                        .clone();
+                        let vt = classes
+                            [class_index_of(i, ent_index(i, &d.target)?)]
+                        .id_name
+                        .clone();
+                        let base = format_ident!("{}_index", d.name);
+                        let idx = if classes[ci].maps.iter().any(|(f, _, _)| *f == base) {
+                            format_ident!("{}_{}", snake(&members[i].0.to_string()), base)
+                        } else {
+                            base
+                        };
+                        classes[ci].maps.push((idx, kid, vt));
+                    }
                     _ => {}
                 }
             }
@@ -577,12 +601,9 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     }
                 }
                 Some("hash_index") => {
-                    return Err(syn::Error::new(
-                        proc_macro2::Span::call_site(),
-                        format!(
-                            "backing `hash_index` for arrow `{named}` is not implemented yet (milestone-2 step 8)"
-                        ),
-                    ));
+                    // Hook-maintained derived lookup state: exempt from the
+                    // self-record home rule (a root-marked self contributes
+                    // at store level; spike 11 pinned path-id values legal).
                 }
                 _ => {}
             }
@@ -647,7 +668,8 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 fields.extend(quote!(#f: ::core::option::Option<#ty>,));
             }
         }
-        // Embedded arenas contributed by instances placed in this class.
+        // Embedded arenas contributed by instances placed in this class,
+        // and the class's hash_index maps.
         for d in classes.iter() {
             if let ClassLoc::Embedded(h) = d.loc {
                 if h == ci {
@@ -656,6 +678,9 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     fields.extend(quote!(#a: ::std::vec::Vec<#dat>,));
                 }
             }
+        }
+        for (f, k, v) in &classes[ci].maps {
+            fields.extend(quote!(#f: ::std::collections::HashMap<#k, #v>,));
         }
         let dat = &classes[ci].data_name;
         let doc_name = &classes[ci].name;
@@ -676,6 +701,49 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             quote!(#a: ::std::vec::Vec<#dat>,)
         })
         .collect();
+    // Store-level hash_index maps: a keyed arrow whose self is an unfused
+    // root contributes its map here (exactly one self per store, no record
+    // to hold it — the store-level contribution site). The field name rides
+    // in `root_map_of` so the hooks and read impls name the same field;
+    // colliding arrow names across instances take the instance prefix.
+    let mut root_map_of: HashMap<(usize, String), Ident2> = HashMap::new();
+    {
+        let mut used: Vec<String> = Vec::new();
+        for i in 0..n_inst {
+            for info in &inst_infos[i] {
+                if info.backing.as_deref() != Some("hash_index") {
+                    continue;
+                }
+                let d = info.decl;
+                let sc = class_index_of(i, ent_index(i, &d.source)?);
+                if classes[sc].owns_records {
+                    continue; // per-self-object maps ride on the record
+                }
+                let base = format_ident!("{}_index", d.name);
+                let f = if used.contains(&base.to_string()) {
+                    format_ident!("{}_{}", snake(&members[i].0.to_string()), base)
+                } else {
+                    base
+                };
+                used.push(f.to_string());
+                root_map_of.insert((i, d.name.to_string()), f);
+            }
+        }
+    }
+    let mut root_maps: Vec<TokenStream2> = Vec::new();
+    for i in 0..n_inst {
+        for info in &inst_infos[i] {
+            let d = info.decl;
+            let Some(f) = root_map_of.get(&(i, d.name.to_string())) else {
+                continue;
+            };
+            let kid = classes[class_index_of(i, ent_index(i, d.key.as_ref().unwrap())?)]
+                .id_name
+                .clone();
+            let vt = classes[class_index_of(i, ent_index(i, &d.target)?)].id_name.clone();
+            root_maps.push(quote!(#f: ::std::collections::HashMap<#kid, #vt>,));
+        }
+    }
     let store_pattern_name = config
         .pattern_path
         .segments
@@ -687,6 +755,7 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
         #[derive(Default, Debug)]
         pub struct #store {
             #(#root_arenas)*
+            #(#root_maps)*
         }
 
         impl #store {
@@ -770,6 +839,11 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     record_fields.extend(quote!(#a: ::std::vec::Vec::new(),));
                 }
             }
+        }
+        // hash_index maps on this class's record start empty; inserts go
+        // through the keyed hook.
+        for (f, _, _) in &classes[ci].maps {
+            record_fields.extend(quote!(#f: ::std::collections::HashMap::new(),));
         }
         // `by`-derived hooks firing at construction of this class: the
         // determinant `one` arrow originates at a member entity.
@@ -947,6 +1021,80 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             self.#hook(self_id, value);
                         }
                     });
+                }
+                Some("hash_index") => {
+                    let sc = class_index_of(i, ent_index(i, &d.source)?);
+                    let kid = id_ty_of(i, ent_index(i, d.key.as_ref().unwrap())?);
+                    let vt = id_ty_of(i, ent_index(i, &d.target)?);
+                    let arrow_doc = &d.name;
+                    let pred = format_ident!("__{}_{}_key_live", inst_snake, d.name);
+                    let hook = format_ident!("__insert_{}_{}", inst_snake, d.name);
+                    let op = if arrow_users > 1 {
+                        format_ident!("insert_{}_{}", inst_snake, d.name)
+                    } else {
+                        format_ident!("insert_{}", d.name)
+                    };
+                    op_names.push(op.to_string());
+                    if !classes[sc].owns_records {
+                        // Unfused-root self: exactly one self per store and
+                        // no id to pass; the map is store-level and the op
+                        // omits the self argument (the review probe's shape).
+                        let map = root_map_of[&(i, d.name.to_string())].clone();
+                        store_impl.extend(quote! {
+                            #[doc(hidden)]
+                            #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; store-level map)")]
+                            fn #pred(&self, key: #kid) -> bool {
+                                self.#map.contains_key(&key)
+                            }
+                            #[doc(hidden)]
+                            #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "; store-level map)")]
+                            fn #hook(&mut self, key: #kid, target: #vt) {
+                                if self.#pred(key) {
+                                    ::core::panic!("duplicate key {:?} for arrow `{}`: a keyed arrow is a function", key, stringify!(#arrow_doc));
+                                }
+                                self.#map.insert(key, target);
+                            }
+                            #[doc = concat!("Map `key` to `target` in the `", stringify!(#arrow_doc), "` index (root-sourced keyed arrow; no self id).")]
+                            pub fn #op(&mut self, key: #kid, target: #vt) {
+                                self.#hook(key, target);
+                            }
+                        });
+                    } else {
+                        // Per-self-object map on the fused record; the
+                        // insert hook takes `&mut` store state and addresses
+                        // through the nesting (the arena append and the map
+                        // insert cannot share one `&mut` host-record borrow).
+                        let sid = classes[sc].id_name.clone();
+                        let map = classes[sc]
+                            .maps
+                            .iter()
+                            .find(|(f, k, v)| {
+                                *k == kid && *v == vt
+                                    && f.to_string().starts_with(&format!("{}_index", d.name))
+                            })
+                            .map(|(f, _, _)| f.clone())
+                            .unwrap_or_else(|| format_ident!("{}_index", d.name));
+                        let sref = rec_ref_ts(&classes, sc, quote!(self_id));
+                        store_impl.extend(quote! {
+                            #[doc(hidden)]
+                            #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ") on one self object")]
+                            fn #pred(&self, self_id: #sid, key: #kid) -> bool {
+                                #sref.#map.contains_key(&key)
+                            }
+                            #[doc(hidden)]
+                            #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), ")")]
+                            fn #hook(&mut self, self_id: #sid, key: #kid, target: #vt) {
+                                if self.#pred(self_id, key) {
+                                    ::core::panic!("duplicate key {:?} for arrow `{}` on {:?}: a keyed arrow is a function", key, stringify!(#arrow_doc), self_id);
+                                }
+                                #sref.#map.insert(key, target);
+                            }
+                            #[doc = concat!("Map `key` to `target` in `self_id`'s `", stringify!(#arrow_doc), "` index.")]
+                            pub fn #op(&mut self, self_id: #sid, key: #kid, target: #vt) {
+                                self.#hook(self_id, key, target);
+                            }
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -1354,6 +1502,54 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                                     store: self.store,
                                     id: #src_ref.#field,
                                 }
+                            }
+                        }
+                    });
+                }
+                // Keyed partial: one hash lookup; the associated-type
+                // bindings name the impl lifetime ('g — the E0637-pinned
+                // emission), and a `<->`-closed key is the partner's plain
+                // id (no wrapper newtype).
+                Some("hash_index") => {
+                    let kid = id_ty_of(i, ent_index(i, d.key.as_ref().unwrap())?);
+                    let key_assoc = meta
+                        .key
+                        .as_ref()
+                        .expect("keyed roots publish the key assoc name");
+                    let lookup = if !classes[sc].owns_records {
+                        let map = root_map_of[&(i, d.name.to_string())].clone();
+                        quote!(self.store.#map.get(&key).copied())
+                    } else {
+                        let src_ref = rec_ref_handle(sc, quote!(self));
+                        // The map field on the self record: name matches the
+                        // arrow's `<arrow>_index` (instance-prefixed when it
+                        // collided at collection).
+                        let map = classes[sc]
+                            .maps
+                            .iter()
+                            .find(|(f, _, _)| {
+                                let want = format_ident!("{}_index", d.name);
+                                let prefixed = format_ident!(
+                                    "{}_{}",
+                                    snake(&members[i].0.to_string()),
+                                    want
+                                );
+                                *f == want || *f == prefixed
+                            })
+                            .map(|(f, _, _)| f.clone())
+                            .expect("hash_index map contributed at collection");
+                        quote!(#src_ref.#map.get(&key).copied())
+                    };
+                    let mk_handle = match classes[tc].loc {
+                        ClassLoc::Root => quote!(#tgt_h { store: self.store, id }),
+                        ClassLoc::Embedded(_) => quote!(#tgt_h { store: self.store, host: id.0, id: id.1 }),
+                    };
+                    trait_impls.extend(quote! {
+                        impl<'g> #trait_path<#marker_path> for #self_h<'g> {
+                            type #assoc = #tgt_h<'g>;
+                            type #key_assoc = #kid;
+                            fn #m(&self, key: #kid) -> ::core::option::Option<#tgt_h<'g>> {
+                                #lookup.map(|id| #mk_handle)
                             }
                         }
                     });
