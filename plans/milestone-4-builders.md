@@ -73,7 +73,8 @@ tx.add_edge(a, b);                   // provisional refs
 tx.add_edge(old_node, a);            // old-store elements by handle or id
 tx.remove_edge(e);                   // removal: staged, applied at flush
 tx.set_payload(e, w);                // re-point an optional/payload arrow
-let new_store = tx.flush()?;         // validate + rebuild; old store
+let out = tx.flush()?;               // validate + rebuild -> FlushOutcome
+                                     // { store, report }; old store
                                      // untouched, old handles still valid
 ```
 
@@ -192,7 +193,11 @@ continue with the new metagraph. Two entry points support this:
      `set_` then links it at replay (the delete hook's absence answer
      is legitimate; Interactions below). A `Pending` effective
      endpoint is predicted from kept counts plus preceding adds and
-     *asserted* at replay, never trusted. Staged ops then
+     *asserted* at replay, never trusted — the count covers every
+     record a preceding op appends, including any its constructor
+     induces (Induction below); in the stdlib patterns the
+     `set_`-targetable arenas and the induced arenas are disjoint, so
+     the formula degenerates to kept counts plus preceding adds. Staged ops then
      replay against that rebuilt state, in submission order — a `set_`
      un-links and re-links against the *rebuilt* lists, never the old
      ones. Replay order is observable: a re-pointed membership takes
@@ -209,7 +214,10 @@ continue with the new metagraph. Two entry points support this:
      same constructors as direct construction.
   6. **Backing finalization.** Backings with a build phase (CSR-style
      range adjacency, M3) compact here — accumulate structures are
-     frozen into their read form, per store, once, after all replay;
+     frozen into their read form, per store, once, after all replay —
+     *per store* is the one root store, nested stores being
+     `Vec<Data>` fields on host records, never nested `Store`
+     structs, and the single freeze runs after every level's replay;
      several phased backings on one store compact in the `implement!`
      block's binding order at that single freeze (M3's pin, inherited —
      "CSR and phase representation"). Read access to such backings is
@@ -245,7 +253,8 @@ continue with the new metagraph. Two entry points support this:
   rules above are load-bearing, not backstopped (demonstrated in
   /tmp/m4-probe-phased-flush).
 - **Flush consumes the transaction, and errors are pre-destruction.**
-  `flush(self) -> Result<Store, FlushError>` (spike 7's shape): every
+  `flush(self) -> Result<FlushOutcome, FlushError>` (spike 7's shape —
+  the store plus the id-remap report, Removal below): every
   violation in the surface below is detected in steps 1–2, before any
   destructive work, so a failed flush has touched nothing. Recovery
   differs by entry point, deliberately. Under `edit()` the old store
@@ -257,9 +266,12 @@ continue with the new metagraph. Two entry points support this:
   `tx.check(&self) -> Result<(), FlushError>` (the same
   check-then-write factoring M2 applies to the keyed insert hook), so
   a change set can be verified before `into_edit()`'s flush commits.
-  A `validate()` failure at step 7 after a green `check()` is a codegen
-  bug (a panic), not an `Err`: the error surface is exactly the
-  steps 1–2 violations.
+  A `validate()` failure at step 7 after a green `check()` indicates a
+  codegen bug, but it surfaces as a defensive `Err` arm
+  (`ValidateFailed`), not a panic — unreachable in correct generated
+  code, and strictly easier to debug than a panic when it isn't (all
+  four flush probes carry the arm). Apart from that arm, the error
+  surface is exactly the steps 1–2 violations.
 - **Flush errors are runtime data**, not compile errors: a `FlushError`
   lists each violation (dangling endpoint) by change-set
   op index. No spans; the op index is the debugging handle. The full
@@ -267,6 +279,8 @@ continue with the new metagraph. Two entry points support this:
   old id, `set_` or `remove` of a removed element, double removal, and
   ops staged under a nested path whose record was removed (the change
   set must be coherent; a silent discard would hide staging bugs). The
+  defensive step-7 `ValidateFailed` arm (above) rides alongside the
+  surface, unreachable in correct code. The
   removed-path violation names both sides — the staged ops' own
   indices, ascending, and the removal op's index — and a `remove`
   staged under a doomed path counts among them ("remove of a removed
@@ -298,40 +312,74 @@ continue with the new metagraph. Two entry points support this:
 ## Write traits mirror read traits
 
 `implement!` gains a write side: per arrow instantiation, a marker-generic
-trait implemented by the store's transaction type.
+trait implemented by the store's transaction type. One `Tx` per
+`implement!` call: the transaction names the store type, entity ids, and
+hooks, so only `implement!` codegen can emit it — on a phased store the
+same one `Tx` borrows the frozen old store and rebuilds through
+`GraphStore<Build>`, on a nested store it serves every level through
+`within()` (below).
 
-**Write-trait identity mirrors read-trait identity (M1): traits are
-root-sourced, with default names.** The root pattern that declares an
-arrow owns its write traits as it owns its read trait, and the
-registration courier's metadata gains a write slot (trait name, method
-name, ref associated-type names) alongside the read tuple, so
-`implement!` resolves write traits the same way it resolves read
-traits. Default names derive mechanically from the declared thing the
-op writes, fixed by the root: **existence ops name after the entity**
-— `AddNode<M>`, `RemoveNode<M>`, method `add_node()` — while **link
-and payload ops name after the arrow** — `InsertOutEdges<M>`,
-`SetSource<M>`, methods `insert_out_edges()` / `set_source()`. One
-trait per verb, so a copy transform bounds on `AddNode +
-InsertOutEdges` without dragging in `Remove`. Method names are
-root-fixed like read-side methods; instantiation-local spellings
-(`add_subnode`) are inherent methods on the transaction, exactly as a
-distinct read spelling would be (M1's inherent-alias rule). No override
-clause exists in v1 — defaults cannot collide (arrows are unique per
-pattern; traits live under the pattern's marker module). `backing!`
+**Write-trait identity mirrors read-trait identity (M1), with one named
+exception.** Arrow-named write traits are root-sourced like read traits:
+the root pattern that declares an arrow owns its write traits as it owns
+its read trait and emits the write trait items where it emits the read
+trait, and the registration courier's metadata gains a write slot — per
+arrow-named write trait, its (trait name, method name, ref associated-type
+names) — alongside the read tuple, so `implement!` resolves write traits
+the same way it resolves read traits. Mechanically the slot is a sixth,
+braced element on M1's metadata tuple — the same kind of extension M2's
+key slot was; the courier rule and channel are unchanged. The exception
+is the existence ops: `Add`/`Remove` traits name an *entity*, and no
+arrow root can name a pattern's entities, so they are owned by the
+pattern block that declares the entity. The declaring block emits
+`Add<Entity>`/`Remove<Entity>` trait items per non-root entity —
+unconditionally, whether or not an entity arrow targets it (constructors
+are emitted per entity unconditionally, and a generic transform needs the
+same reach: Digraph's Edge has no entity arrow, yet spike 8's
+`replace_node` bounds on `RemoveEdge`) — plus one per-entity marker in
+the same markers module, minted and re-minted per composition instance
+exactly like the per-arrow markers, so two instances of one pattern give
+two `AddNode` impls on one `Tx` under two markers, never a conflict.
+Default names derive mechanically from the declared thing the op writes:
+**existence ops name after the entity** — `AddNode<M>`, `RemoveNode<M>`,
+method `add_node()` — while **link and payload ops name after the
+arrow** — `InsertOutEdges<M>`, `SetSource<M>`, methods
+`insert_out_edges()` / `set_source()`. One trait per verb, so a copy
+transform bounds on `AddNode + AddEdge` without dragging in `Remove`.
+Method names are root-fixed like read-side methods; instantiation-local
+spellings (`add_subnode`) are inherent methods on the transaction,
+exactly as a distinct read spelling would be (M1's inherent-alias rule).
+No override clause exists in v1 — defaults cannot collide (arrows are
+unique per pattern; traits live under the pattern's marker module).
+**Canonical arity.** Every write-trait method takes the self ref —
+`insert_<arrow>(Ref<A>, …)`, `set_<arrow>(Ref<A>, Ref<B>)` — because
+the trait item is emitted by the root, which cannot know placement
+(root-marking does not propagate through instantiation; placement is a
+composition fact). Where the computed placement leaves no self id (an
+unfused-root self), the canonical form is unemittable and `implement!`
+emits no trait impl for that verb: the op exists only as the
+transaction's inherent method in its placement-pinned self-less form —
+M3's pin that unfused-root ops are store-level methods, probe-pinned —
+so generic transforms see exactly the canonical forms. `backing!`
 contributes the hook mechanics each verb lowers into, never names;
-`compose_pattern!` re-mints markers and prefixes inherent aliases,
-never traits — both forced by epic invariant 2 (trait identity comes
-from the arrow pattern, not the store).
+`compose_pattern!` re-mints markers (per-arrow and per-entity alike)
+and prefixes inherent aliases, never traits — both forced by epic
+invariant 2 (trait identity comes from the declaring pattern, not the
+store).
+
+The write-side column names trait methods in their canonical arity;
+the placement-variant forms are inherent methods on the transaction
+(the canonical-arity rule above), never trait impls.
 
 | arrow shape | read side | write side (on the transaction) |
 |---|---|---|
-| entity | root accessor, handles | `Add<Entity>`/`Remove<Entity>` (root-sourced traits; local spelling `add_<entity>(<total one-arrow args>) -> Ref<E>`, `remove_<entity>(Ref<E>)`) |
+| entity | root accessor, handles | `Add<Entity>`/`Remove<Entity>` (declaring-block-owned traits, per-entity marker; local spelling `add_<entity>(<total one-arrow args>) -> Ref<E>`, `remove_<entity>(Ref<E>)`) |
 | total `one` | `e.target()` | constructor argument of `add_<entity>`; and `Set<Arrow>` — `set_<arrow>(Ref<A>, Ref<B>)`, re-pointing in place (the `by`-derived rows depend on this) |
 | optional `one` | `e.payload() -> Option<_>` | `Set<Arrow>` — `set_<arrow>(Ref<A>, Ref<B>)` |
-| `many`, primitive | `p.tags()` | `Insert<Arrow>` — `insert_<arrow>(Ref<A>, Ref<B>)`, membership asserted directly; `insert_<arrow>(Ref<B>)` when the self entity is an unfused root (no self id exists — M2's general rule) |
+| `many`, primitive | `p.tags()` | `Insert<Arrow>` — `insert_<arrow>(Ref<A>, Ref<B>)`, membership asserted directly; at an unfused-root self the trait impl is not emitted and the op is inherent-only and self-less: `insert_<arrow>(Ref<B>)` (no self id exists — M2's general rule) |
 | `many`, existence-derived | `g.nodes()` | none beyond `Add<Entity>`/`Remove<Entity>` — membership is record existence |
 | `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
-| keyed partial | `sg.subnode(mn)` | `Insert<Arrow>` — `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is an unfused root (one self, no id — the edge-induced composition, M2); `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — for a colocated-root self `Ref<A>` is the host class's ref (spike 11's shape), for a non-root self the entity's own — function semantics; a live key is rejected at the staging call, like a foreign ref |
+| keyed partial | `sg.subnode(mn)` | `Insert<Arrow>` — canonical trait form `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` — for a colocated-root self `Ref<A>` is the host class's ref (spike 11's shape), for a non-root self the entity's own — function semantics; at an unfused-root self the trait impl is not emitted and the op is inherent-only: `insert_<arrow>(Ref<K>, Ref<B>)` (one self, no id — the edge-induced composition, M2); a live key is rejected at the staging call, like a foreign ref |
 
 Derived read arrows (`:= sum`) have no write side, exactly as they have
 no backing. A `by`-derived `many` arrow's hooks fire when the determining
@@ -340,7 +388,8 @@ special casing for membership. Primitive insertions into a derived
 relation are impossible by construction — the method does not exist —
 which is what the schema's `by` declaration buys (M1 syntax section).
 
-Markers are the same per-instance markers as the read side, so a
+Markers are the same per-instance markers as the read side — plus the
+per-entity markers the existence traits carry — so a
 generic algorithm can bound on `OutEdges<M>` and `InsertOutEdges<M>`
 together — e.g. a graph-transform pass that reads one store and stages
 another without knowing either pattern. This has been spike-verified: a
@@ -353,12 +402,19 @@ What the verification pinned down:
   copy into an empty destination this is the *only* addition needed:
   `AddNode<M> + InsertOutEdges<M>` with an equality bound
   `NodeRef = AddNode::NodeRef`, and refs themselves need only `Copy`.
+  (This is the spike's hand-written surface; the generated surface
+  recasts the copy's bounds — see the node-creation paragraph below.)
 - A **handle→ref mapping** trait (the transaction converts old-store
   handles and ids to `Existing` refs) enters exactly when the transform
   *names old-store elements* — splicing, rewiring, delta edits — bringing
   the full equality web (`Handle = Src::Node`, `NodeRef = ...`). The
   plain associated-type equality bounds suffice; no GAT is needed on the
-  write side. Flush is deliberately *not* marker-generic.
+  write side. Its home is pinned: the runtime crate owns a single
+  marker-generic `HandleToRef<M>` with plain associated types `Handle`
+  and `Ref`, and `implement!` emits one impl per entity on the
+  transaction, marked by that entity's per-entity marker — an
+  algorithm-crate declaration (spike 8's shape) would not unify across
+  crates in a bound web. Flush is deliberately *not* marker-generic.
 - **Handle keyability is a load-bearing bound.** Generic transforms
   correlate nodes across iteration views and edge-endpoint views through
   a handle-keyed map, so `Copy + Eq + Hash` on handles is part of the
@@ -381,7 +437,17 @@ list is the entity's total `one` arrows, which differ per schema. A
 generic transform therefore bounds on a per-pattern node-constructor
 trait plus per-arrow ops, and covers primitive arrows only — copying a
 `by`-derived arrow's membership happens implicitly through the
-determining fields.
+determining fields. For a link-record entity (Digraph's Edge) the
+per-pattern constructor trait is the whole insert path:
+`AddEdge::add_edge(source, target)` fires the `by`-derived membership
+hooks from the constructor, so a generic copy bounds on
+`AddNode + AddEdge` and no `InsertOutEdges` at all. Spike 8's
+hand-written transaction modeled `out_edges` as primitive with a
+create-shaped `insert_out_edge(source, target) -> EdgeRef`; the
+generated surface splits that compound — membership-assert
+`Insert<Arrow>` exists for genuinely primitive `many` arrows (a
+`tags: Post -> Tag`), and record creation is the per-entity `Add`
+trait's job.
 
 ## Nested stores
 
@@ -572,7 +638,9 @@ refs already handed out, because nothing is applied until flush.
   re-point orchestration. The growth is per backing kind and is
   probe-verified (/tmp/m4-probe-set-unlink): a `by`-derived intrusive
   list gains `__unlink_<arrow>` — the delete verb in the landed hook
-  convention, a doc-hidden store method beside `__insert_<arrow>`
+  convention, a doc-hidden store method beside `__insert_<arrow>`,
+  its body authored in the `on_unlink(a, b)` clause of M3's clause
+  inventory
   (the probe's `unlink_<list>_hook` free-function spelling was
   hand-emission, like spike 11's) — walk-and-splice, O(list length),
   correct at head and tail (a `by` on both endpoints of a mutable
@@ -583,7 +651,11 @@ refs already handed out, because nothing is applied until flush.
   — M2's landed field-write hook, grown with the
   orchestration) takes only `(record, new value)`: the old host is
   read from the record's own determining field — that is exactly the
-  `by`-derivation invariant — then un-link, write, re-link. A phased
+  `by`-derivation invariant — then un-link, write, re-link. The
+  orchestration never threads an index path: `set_`-able arrows are
+  root-level-only under M3's contributed-field-location restriction
+  (embedded-class records carry no backing contributions), so the
+  record and its lists are always flat-addressed. A phased
   backing needs nothing (membership is derived at freeze); a
   hash_index needs entry removal only when un-insert lands (non-goal,
   v1). Hooks remain the single write path: flush
@@ -640,14 +712,22 @@ the probe crate under `/tmp` as the reference implementation.
 
 **Stage 2 — generated write surface**
 
-- [ ] 6. Write-trait codegen: courier write slot; root-sourced names
-      (`AddNode`/`RemoveNode` entity-named, `InsertOutEdges`/
-      `SetSource` arrow-named), one trait per verb, associated ref
-      types, inherent local spellings on the transaction. Acceptance:
-      spike 8's generic copy and node-replacement transforms compile
-      and run unmodified at two marker instantiations against
-      generated code.
-- [ ] 7. `set_` + delete hooks: `__unlink_<arrow>` (total) and the
+- [ ] 6. Write-trait codegen: courier write slot (the arrow-named
+      verbs, root-emitted trait items); per-entity `Add<Entity>`/
+      `Remove<Entity>` traits and per-entity markers emitted by the
+      declaring block; canonical arity (the self ref always present),
+      placement-variant forms inherent-only; the runtime-crate
+      `HandleToRef<M>` mapping trait with per-entity impls; inherent
+      local spellings on the transaction. Acceptance: spike 8's copy
+      and node-replacement scenarios recast against the generated verb
+      surface — the copy bounds on `AddNode + AddEdge` (membership
+      follows the constructor's hooks), the equality web spelled as in
+      spike 8's write.rs/map.rs (the de facto name contract), same
+      assertions, at two marker instantiations, against generated
+      code.
+- [ ] 7. `set_` + delete hooks: `__unlink_<arrow>` (total; the
+      `on_unlink(a, b)` clause of M3's clause inventory —
+      intrusive_list authors the body) and the
       re-point orchestration emitted per binding; builder
       `set_<one-arrow>` for all `one` arrows (field-write hooks are
       M2's deliverable, not M4's). Acceptance: probe 3's tests as
@@ -665,18 +745,27 @@ the probe crate under `/tmp` as the reference implementation.
       ref-segment paths, per-level maps + op-index replay table,
       root-before-nested grouping, `RemovedPathHost`. Acceptance:
       probe 2's tests (one-flush hierarchy edit, host-id translation,
-      per-arena ordering).
+      per-arena ordering). The replay-table lookup is emitted
+      bounds-checked (`get`, internal-bug message): probe 2's miss
+      test forged a stamped ref from same-crate tests, which a
+      downstream `tests/` crate cannot do, so the miss path is
+      exercised by a same-crate unit test or carried as a
+      codegen-review invariant — this step's notes say which.
 - [ ] 10. Induction: the inducing `add_subedge` constructor over
       generated primitives + the id-based read view, running during
       replay through the same constructors. The induction×flush-replay
-      probe (HANDOFF-m4-final) must land green before this step
-      starts. Acceptance: the edge-induced probe's tests plus that
-      probe's, as generated equivalents.
+      probe (/tmp/m4-probe-induct-flush, this review round) must land
+      green before this step starts; it also exercises step 8's
+      self-less keyed forms and step 11's carried keyed map.
+      Acceptance: the edge-induced probe's tests plus that probe's,
+      as generated equivalents.
 - [ ] 11. Removal + keyed carry: id-remap report (old ids only),
       survivors-only cascade, composed remap at carry and
       staged-insert replay, `Existing`-only keyed host/target.
-      Acceptance: probe 4's 15 tests plus spike 7's 14 removal tests
-      as generated equivalents.
+      Builds on step 9's per-level maps — the composed remap
+      translates path-id targets through host map ∘ per-host sub
+      maps. Acceptance: probe 4's 15 tests plus spike 7's 14 removal
+      tests as generated equivalents.
 - [ ] 12. Phased stores: flush into `GraphStore<Build>`,
       kept-fed-then-replay carry (old *frozen* reads only),
       `finish()` = steps 6–7. Acceptance: probe 1's 12 tests as
@@ -691,8 +780,8 @@ the probe crate under `/tmp` as the reference implementation.
 - [ ] 14. Doc pass: crate-root docs for transaction/flush/pass
       discipline, macro docs updated (M1 step 11's pattern).
 
-Dependencies: 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 11, 12);
-9 → 10. Stage 2 is independent of Stage 1's steps 4–5.
+Dependencies: 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 12); 9 → 11;
+(8, 11) → 10. Stage 2 is independent of Stage 1's steps 4–5.
 
 ## Risks
 

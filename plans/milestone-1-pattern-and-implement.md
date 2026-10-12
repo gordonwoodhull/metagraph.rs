@@ -147,16 +147,20 @@ Subgraph -> SubNode` is still called `.nodes()` and yields
 spike-verified). The registration courier's metadata therefore carries
 the full (method name, GAT name, associated type names, cardinality)
 tuple — plus the key's associated type name for keyed roots (M2) — and
-a write slot for M4: per write trait, its (trait name, method name, ref
-associated-type names).
+a write slot for M4: per *arrow-named* write trait, its (trait name,
+method name, ref associated-type names), carried as a sixth braced
+element on the tuple — the same kind of extension the key slot was.
 Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
 `set_<arrow>`) are the opposite: they derive from the instantiation's
-local names, since they are store API, not trait identity. M4's write
-*traits* follow the root-sourced discipline from that same slot:
-existence ops name after the entity (`AddNode<M>`, `RemoveNode<M>`),
-link and payload ops after the arrow (`InsertOutEdges<M>`,
-`SetSource<M>`) — one trait per verb, methods root-fixed, local
-spellings remaining the instantiation's inherent methods. A distinct
+local names, since they are store API, not trait identity. M4's link
+and payload write *traits* follow the root-sourced discipline from
+that slot (`InsertOutEdges<M>`, `SetSource<M>`) — one trait per verb,
+methods root-fixed, local spellings remaining the instantiation's
+inherent methods. The entity-named existence traits (`AddNode<M>`,
+`RemoveNode<M>`) are the one exception to root sourcing: no arrow root
+can name a pattern's entities, so the block that declares the entity
+owns and emits them, with a per-entity marker in the same markers
+module (M4's write-trait identity section). A distinct
 read-side spelling, if wanted, is an inherent alias under the rule in
 M2's marker-qualification section.
 
