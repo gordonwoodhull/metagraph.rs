@@ -63,7 +63,22 @@ be exercised before its staging call exists. Recorded here per the plan's
   ("collect, sort") starts mattering with step 11's keyed carries —
   the emission point is where the keyed loops land.
 
-Not started: steps 5–14.
+- **Step 5** (this commit): `into_edit(self) -> Tx<'static>` — the
+  old store rides as `OldStore<'a>` (Borrowed(&) | Owned(Box));
+  `old()` now borrows `&self` (the owned arm has no 'a to return).
+  The flush's carries were re-derived as ARRAYS before any write
+  (`__<arrow>_heads/_head/_links` from walking the old chains), and
+  step 4a became two write paths over the same derived data: fresh
+  arenas with capacity (borrowed) vs forward in-place compaction
+  (owned — every write slot <= its read slot; spike 7's ordering
+  constraint, REPORT finding 6). Tests: into_edit ports of spike 7's
+  owned-path tests (koenigsberg vs direct, self-loop tap_stage,
+  empty-set clone) plus the borrowed-vs-owned equivalence on a
+  removal-heavy change set (same signature, same reports). Note:
+  TxIntrusive regained its `arrow` field (the arrays are named after
+  the binding).
+
+Not started: steps 6–14.
 
 ## Architecture decisions (settled in the survey, keep unless forced)
 

@@ -677,3 +677,84 @@ fn error_display_is_deterministic() {
         assert_eq!(a, render());
     }
 }
+
+// ---- step 5: into_edit — the owned path + in-place reuse ----------------
+
+trait TapStage {
+    fn tap_stage(self, f: impl FnOnce(&mut Tx<'_>)) -> FlushOutcome;
+}
+
+impl TapStage for Tx<'static> {
+    fn tap_stage(mut self, f: impl FnOnce(&mut Tx<'_>)) -> FlushOutcome {
+        f(&mut self);
+        self.flush().expect("flush")
+    }
+}
+
+#[test]
+fn into_edit_koenigsberg_matches_direct() {
+    let out = GraphStore::new().into_edit().tap_stage(stage_koenigsberg);
+    assert_eq!(out.store.node_count(), 4);
+    assert_eq!(out.store.edge_count(), 14);
+    assert_eq!(signature(&out.store), signature(&koenigsberg()));
+    out.store.validate().expect("validate");
+}
+
+#[test]
+fn into_edit_self_loop() {
+    // The tap_stage shape: an empty store consumed, one self-edge staged.
+    let out = GraphStore::new().into_edit().tap_stage(|tx| {
+        let x = tx.add_node();
+        tx.add_edge(x, x);
+    });
+    let s = &out.store;
+    let n = s.graph().nodes().next().unwrap();
+    assert_eq!(n.out_edges().count(), 1);
+    assert_eq!(n.in_edges().count(), 1);
+    s.validate().expect("validate");
+}
+
+#[test]
+fn into_edit_empty_change_set_equals_clone() {
+    let s = koenigsberg();
+    let out = koenigsberg().into_edit().flush().expect("flush");
+    assert_eq!(signature(&out.store), signature(&s));
+    assert_eq!(out.report.node_map, vec![Some(0), Some(1), Some(2), Some(3)]);
+    assert_eq!(out.report.edge_map, (0..14).map(Some).collect::<Vec<_>>());
+}
+
+#[test]
+fn into_edit_in_place_removal_replay_agrees_with_borrowed() {
+    // The owned path forward-compacts in place (write slot <= read slot,
+    // all derived data precomputed). The strongest check available: the
+    // SAME change set through edit() and into_edit() must produce
+    // observably identical stores and reports — removals shift ids, so
+    // the compaction is real work.
+    // A dies with its ten incident edges (e0..e9); the B-D and C-D
+    // bridges survive, so compaction shifts real ids.
+    let stage = |tx: &mut Tx<'_>| {
+        tx.remove_node(NodeId(0)); // op 0
+        for e in 0u32..10 {
+            tx.remove_edge(EdgeId(e)); // ops 1..=10
+        }
+        let x = tx.add_node(); // op 11
+        tx.add_edge(x, NodeId(1)); // op 12: staged -> B
+        tx.add_edge(NodeId(2), x); // op 13: C -> staged
+    };
+    let base = koenigsberg();
+    let borrowed = base.edit().tap_flush(stage).expect("flush");
+    let owned = koenigsberg().into_edit().tap_stage(|tx| stage(tx));
+
+    assert_eq!(signature(&borrowed.store), signature(&owned.store));
+    assert_eq!(borrowed.report.node_map, owned.report.node_map);
+    assert_eq!(borrowed.report.edge_map, owned.report.edge_map);
+    // Old-id-indexed: A gone; e0..e9 gone, e10..e13 shift to 0..=3.
+    assert_eq!(owned.report.node_map, vec![None, Some(0), Some(1), Some(2)]);
+    assert_eq!(
+        owned.report.edge_map,
+        vec![None, None, None, None, None, None, None, None, None, None, Some(0), Some(1), Some(2), Some(3)]
+    );
+    owned.store.validate().expect("validate");
+    assert_eq!(owned.store.node_count(), 4); // B, C, D + the staged node
+    assert_eq!(owned.store.edge_count(), 6); // 4 kept + 2 staged
+}

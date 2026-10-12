@@ -1911,6 +1911,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                         });
                     let member_link = formula_name(b_fields[0], NameFormula::Stem, &a.name, &stem);
                     intrusive.push(crate::tx::TxIntrusive {
+                        arrow: a.name.clone(),
                         host: (!root_self).then(|| a.source.clone()),
                         head_field,
                         member: a.target.clone(),

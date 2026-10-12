@@ -713,7 +713,7 @@ the probe crate under `/tmp` as the reference implementation.
       sort, format). Acceptance: byte-identical `Display` across runs
       (probe 4's determinism test); the committed-mode contract
       exercised (`check()` green → `into_edit` flush commits).
-- [ ] 5. `into_edit()` allocation reuse, flat non-phased:
+- [x] 5. `into_edit()` allocation reuse, flat non-phased:
       derive-before-write, forward writes. Acceptance: spike 7's
       `into_edit` tests.
 

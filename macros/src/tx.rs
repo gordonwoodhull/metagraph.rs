@@ -80,6 +80,9 @@ pub(crate) struct TxField {
 /// old chains (kept hosts only, removed members skipped, ids remapped) —
 /// never per-field remap, which truncates at a removed mid-chain member.
 pub(crate) struct TxIntrusive {
+    /// The binding's arrow name — the derived walk arrays are named after
+    /// it (`__<arrow>_heads` / `__<arrow>_links`).
+    pub arrow: Ident2,
     /// The head's owner: `Some(entity)` whose record holds it, or `None`
     /// when the self is the unfused root (its `on A` contribution folds to
     /// a store field — one chain for the whole store).
@@ -146,7 +149,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             impl<'g> #into_trait for #handle_ty<'g> {
                 fn #into_fn(self, tx: &Tx<'_>) -> #ref_alias {
                     assert!(
-                        ::core::ptr::eq(self.store, tx.old),
+                        ::core::ptr::eq(self.store, tx.old.__store()),
                         "handle from a foreign store: a ref minted from it would silently resolve against the wrong arena"
                     );
                     #ref_alias::existing(self.id())
@@ -540,38 +543,152 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
 
     // Step 4a — the skeleton: store literal (capacities borrowed from the
     // old sizes; store-level links born empty), then kept records in old
-    // arena order as raw literals — ctor-arg id fields remapped through
-    // the target's map, everything else per the uniform init rule — with
-    // on_add hooks fired manually per kept record.
-    let s4_arena_inits = m.entities.iter().map(|e| {
+    // Step 4b-pre — the intrusive carries, DERIVED before any write: per
+    // binding, new heads (indexed by the host's NEW id; one value for a
+    // store-level head) and new links (indexed by the member's new id),
+    // from walking the OLD chains (kept hosts only, removed members
+    // skipped, ids remapped). In-place compaction (the owned path)
+    // destroys old chains as it writes, so every derived array exists
+    // before the first store write (spike 7's ordering constraint).
+    let s4_arrays = m.intrusive.iter().map(|i| {
+        let member = ent_of(&i.member);
+        let arrow = &i.arrow;
+        let (heads, head_val, links) = (
+            format_ident!("__{}_heads", arrow),
+            format_ident!("__{}_head", arrow),
+            format_ident!("__{}_links", arrow),
+        );
+        let (m_arena, m_map, m_link) =
+            (&member.arena, &member.map, &i.member_link);
+        let links_decl = quote! {
+            let mut #links: ::std::vec::Vec<::core::option::Option<u32>> =
+                ::std::vec![::core::option::Option::None; #m_map.iter().flatten().count()];
+        };
+        let walk_body = |head_set: TokenStream2, first: TokenStream2| {
+            quote! {
+                let mut prev: ::core::option::Option<u32> = ::core::option::Option::None;
+                let mut cur = #first;
+                while let ::core::option::Option::Some(old_member) = cur {
+                    cur = __old.#m_arena[old_member.0 as usize].#m_link;
+                    if let ::core::option::Option::Some(new_member) = #m_map[old_member.0 as usize] {
+                        match prev {
+                            ::core::option::Option::None => { #head_set }
+                            ::core::option::Option::Some(p) => {
+                                #links[p as usize] = ::core::option::Option::Some(new_member);
+                            }
+                        }
+                        prev = ::core::option::Option::Some(new_member);
+                    }
+                }
+            }
+        };
+        match &i.host {
+            Some(host) => {
+                let h = ent_of(host);
+                let (h_count, h_map, h_arena) = (&h.count, &h.map, &h.arena);
+                let head = &i.head_field;
+                let body = walk_body(
+                    quote! { #heads[new_host as usize] = ::core::option::Option::Some(new_member); },
+                    quote!(__old.#h_arena[old_host].#head),
+                );
+                quote! {
+                    #links_decl
+                    let mut #heads: ::std::vec::Vec<::core::option::Option<u32>> =
+                        ::std::vec![::core::option::Option::None; #h_map.iter().flatten().count()];
+                    for old_host in 0..#h_count {
+                        let ::core::option::Option::Some(new_host) = #h_map[old_host] else {
+                            continue;
+                        };
+                        #body
+                    }
+                }
+            }
+            None => {
+                let head = &i.head_field;
+                let body = walk_body(
+                    quote! { #head_val = ::core::option::Option::Some(new_member); },
+                    quote!(__old.#head),
+                );
+                quote! {
+                    #links_decl
+                    let mut #head_val: ::core::option::Option<u32> = ::core::option::Option::None;
+                    #body
+                }
+            }
+        }
+    });
+    // A field of a kept record's skeleton literal: ctor-arg ids remapped
+    // through the target's map; a derived head/link from its array
+    // (indexed by THIS record's new id); containers Default.
+    let record_field_init = |entity: &Ident2, field: &TxField| -> TokenStream2 {
+        let n = &field.emitted;
+        match &field.init {
+            TxFieldInit::CtorArg { target } => {
+                let t = ent_of(target);
+                let (t_map, t_id) = (&t.map, &t.id_ty);
+                quote!(#n: #t_id(#t_map[(rec.#n).0 as usize].expect("field target kept: step 2 proved it")),)
+            }
+            TxFieldInit::None_ => {
+                if let Some(i) = m.intrusive.iter().find(|i| {
+                    i.host.as_ref() == Some(entity) && i.head_field == field.emitted
+                }) {
+                    let member = ent_of(&i.member);
+                    let heads = format_ident!("__{}_heads", i.arrow);
+                    let m_id = &member.id_ty;
+                    return quote!(#n: #heads[new_id as usize].map(#m_id),);
+                }
+                if let Some(i) = m
+                    .intrusive
+                    .iter()
+                    .find(|i| i.member == *entity && i.member_link == field.emitted)
+                {
+                    let member = ent_of(&i.member);
+                    let links = format_ident!("__{}_links", i.arrow);
+                    let m_id = &member.id_ty;
+                    return quote!(#n: #links[new_id as usize].map(#m_id),);
+                }
+                quote!(#n: ::core::option::Option::None,)
+            }
+            TxFieldInit::New => quote!(#n: ::std::default::Default::default(),),
+        }
+    };
+    // A store-level field: a root-hosted arrow's single head value, else
+    // the uniform init.
+    let store_field_expr = |field: &TxField| -> TokenStream2 {
+        if let Some(i) = m
+            .intrusive
+            .iter()
+            .find(|i| i.host.is_none() && i.head_field == field.emitted)
+        {
+            let member = ent_of(&i.member);
+            let head_val = format_ident!("__{}_head", i.arrow);
+            let m_id = &member.id_ty;
+            return quote!(#head_val.map(#m_id));
+        }
+        match field.init {
+            TxFieldInit::None_ => quote!(::core::option::Option::None),
+            _ => quote!(::std::default::Default::default()),
+        }
+    };
+
+    // Step 4a — the kept skeleton, two write paths over the SAME derived
+    // data. Records push/compact in old arena order with on_add hooks
+    // fired per kept record.
+    let s4_borrowed_arena_inits = m.entities.iter().map(|e| {
         let x = ent_of(&e.name);
         let (arena, c) = (&x.arena, &x.count);
         quote!(#arena: ::std::vec::Vec::with_capacity(#c),)
     });
-    let s4_store_inits = m.store_fields.iter().map(|f| {
+    let s4_borrowed_store_inits = m.store_fields.iter().map(|f| {
         let n = &f.emitted;
-        match f.init {
-            TxFieldInit::None_ => quote!(#n: ::core::option::Option::None,),
-            TxFieldInit::New => quote!(#n: ::std::default::Default::default(),),
-            TxFieldInit::CtorArg { .. } => quote!(#n: ::std::default::Default::default(),),
-        }
+        let v = store_field_expr(f);
+        quote!(#n: #v,)
     });
-    let s4_record_loops = m.entities.iter().map(|e| {
+    let s4_borrowed_record_loops = m.entities.iter().map(|e| {
         let x = ent_of(&e.name);
         let (c, map, arena, data, id_ty) =
             (&x.count, &x.map, &x.arena, &x.data, &x.id_ty);
-        let field_inits = e.fields.iter().map(|f| {
-            let n = &f.emitted;
-            match &f.init {
-                TxFieldInit::CtorArg { target } => {
-                    let t = ent_of(&target);
-                    let (t_map, t_id) = (&t.map, &t.id_ty);
-                    quote!(#n: #t_id(#t_map[(rec.#n).0 as usize].expect("field target kept: step 2 proved it")),)
-                }
-                TxFieldInit::None_ => quote!(#n: ::core::option::Option::None,),
-                TxFieldInit::New => quote!(#n: ::std::default::Default::default(),),
-            }
-        });
+        let field_inits = e.fields.iter().map(|f| record_field_init(&e.name, f));
         let onadd_fires = e.onadd_hooks.iter().map(|h| {
             quote!(new_store.#h(#id_ty(new_id));)
         });
@@ -590,63 +707,39 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
-
-    // Step 4b — the intrusive carries: rebuild by walking the OLD chains
-    // (kept hosts only, removed members skipped, ids remapped), threading
-    // the new chains. Head at a record (per-host loop) or at the store
-    // (one chain).
-    let s4_walks = m.intrusive.iter().map(|i| {
-        let member = ent_of(&i.member);
-        let (m_arena, m_map, m_id, m_link) =
-            (&member.arena, &member.map, &member.id_ty, &i.member_link);
-        let walk_body = |head_write: TokenStream2, first: TokenStream2| {
-            quote! {
-                let mut prev: ::core::option::Option<u32> = ::core::option::Option::None;
-                let mut cur = #first;
-                while let ::core::option::Option::Some(old_member) = cur {
-                    cur = old.#m_arena[old_member.0 as usize].#m_link;
-                    if let ::core::option::Option::Some(new_member) = #m_map[old_member.0 as usize] {
-                        match prev {
-                            ::core::option::Option::None => #head_write,
-                            ::core::option::Option::Some(p) =>
-                                new_store.#m_arena[p as usize].#m_link =
-                                    ::core::option::Option::Some(#m_id(new_member)),
-                        }
-                        prev = ::core::option::Option::Some(new_member);
+    // The owned path: forward in-place compaction — every write slot j <=
+    // its read slot old_id, and all derived values (maps, arrays) were
+    // computed before the first write, so overwriting a compacted slot
+    // can never corrupt a later read.
+    let s4_owned_compactions = m.entities.iter().map(|e| {
+        let x = ent_of(&e.name);
+        let (c, map, arena, data, id_ty) =
+            (&x.count, &x.map, &x.arena, &x.data, &x.id_ty);
+        let field_inits = e.fields.iter().map(|f| record_field_init(&e.name, f));
+        let onadd_fires = e.onadd_hooks.iter().map(|h| {
+            quote!(new_store.#h(#id_ty(new_id));)
+        });
+        quote! {
+            {
+                let mut j = 0usize;
+                for old_id in 0..#c {
+                    if let ::core::option::Option::Some(new_id) = #map[old_id] {
+                        let rec = &new_store.#arena[old_id];
+                        let remapped = #data { #(#field_inits)* };
+                        new_store.#arena[j] = remapped;
+                        j += 1;
+                        #(#onadd_fires)*
+                        ::core::debug_assert_eq!(new_id as usize, j - 1);
                     }
                 }
-            }
-        };
-        match &i.host {
-            Some(host) => {
-                let h = ent_of(host);
-                let (h_count, h_map, h_arena) = (&h.count, &h.map, &h.arena);
-                let head = &i.head_field;
-                let body = walk_body(
-                    quote!(new_store.#h_arena[new_host as usize].#head =
-                        ::core::option::Option::Some(#m_id(new_member))),
-                    quote!(old.#h_arena[old_host].#head),
-                );
-                quote! {
-                    for old_host in 0..#h_count {
-                        let ::core::option::Option::Some(new_host) = #h_map[old_host] else {
-                            continue;
-                        };
-                        #body
-                    }
-                }
-            }
-            None => {
-                let head = &i.head_field;
-                let body = walk_body(
-                    quote!(new_store.#head = ::core::option::Option::Some(#m_id(new_member))),
-                    quote!(old.#head),
-                );
-                quote! {
-                    #body
-                }
+                new_store.#arena.truncate(j);
             }
         }
+    });
+    let s4_owned_store_assigns = m.store_fields.iter().map(|f| {
+        let n = &f.emitted;
+        let v = store_field_expr(f);
+        quote!(new_store.#n = #v;)
     });
 
     // Step 4c — replay constructive ops in submission order through the
@@ -732,28 +825,43 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
 
         #[doc = "The flush's first two steps as a pure predicate: resolves removals and collects every violation (unknown ids, double removals, danglers) the flush would reject with — without building anything. A green check means a subsequent `flush` of the SAME change set passes steps 1-2 (the committed-mode contract's read half; `into_edit` is the other)."]
         pub fn check(&self) -> ::core::result::Result<(), FlushError> {
-            Self::__analyze(self.old, &self.ops).map(|_| ())
+            Self::__analyze(self.old.__store(), &self.ops).map(|_| ())
         }
 
-        #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space — steps 1-2 are the same `check` analysis, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists rebuilt by walking the old chains) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — flat stores have none), (7) `validate()`. The old store is untouched; a rejection leaves nothing half-applied."]
+        #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space — steps 1-2 are the same `check` analysis, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists carried by arrays derived from the old chains BEFORE any write) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — flat stores have none), (7) `validate()`. A borrowed transaction builds fresh arenas; an owned one (`into_edit`) forward-compacts in place — every write slot at or before its read slot — reusing the old store's allocations. The old store (when borrowed) is untouched; a rejection leaves nothing half-applied."]
         pub fn flush(self) -> ::core::result::Result<FlushOutcome, FlushError> {
             let Tx { old, token: _, ops } = self;
             let __TxAnalysis {
                 #(#analysis_names)*
-            } = Self::__analyze(old, &ops)?;
+            } = Self::__analyze(old.__store(), &ops)?;
 
             // -- step 3: compaction; per-arena old->new id maps ------------
             #(#s3_maps)*
 
-            // -- step 4a: the kept skeleton --------------------------------
-            let mut new_store = #store {
-                #(#s4_arena_inits)*
-                #(#s4_store_inits)*
-            };
-            #(#s4_record_loops)*
+            // -- step 4b-pre: derive the carries from the OLD store --------
+            // All derived data (maps above, walk arrays here) exists before
+            // the first store write: the owned path's in-place compaction
+            // overwrites old chains as it goes.
+            let __old = old.__store();
+            #(#s4_arrays)*
 
-            // -- step 4b: intrusive carries, rebuilt by walking ------------
-            #(#s4_walks)*
+            // -- step 4a: the kept skeleton, then replay --------------------
+            let mut new_store = match old {
+                OldStore::Borrowed(old) => {
+                    let mut new_store = #store {
+                        #(#s4_borrowed_arena_inits)*
+                        #(#s4_borrowed_store_inits)*
+                    };
+                    #(#s4_borrowed_record_loops)*
+                    new_store
+                }
+                OldStore::Owned(mut boxed) => {
+                    let mut new_store = *boxed;
+                    #(#s4_owned_compactions)*
+                    #(#s4_owned_store_assigns)*
+                    new_store
+                }
+            };
 
             // -- step 4c: replay constructive ops in submission order ------
             #(#s4c_pending)*
@@ -788,9 +896,25 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #into_traits
         #flush_types
 
-        #[doc = concat!("Transaction over `", stringify!(#store), "`: stages a change set against the borrowed old store and flushes it as a full rebuild. Staging never touches the store — the change set is a plain queue, a first-class value.")]
+        #[doc(hidden)]
+        #[doc = concat!("What a `Tx` stages against: the shared borrow (`edit`) or the consumed store (`into_edit` — flush then reuses its arena allocations).")]
+        enum OldStore<'a> {
+            Borrowed(&'a #store),
+            Owned(::std::boxed::Box<#store>),
+        }
+
+        impl OldStore<'_> {
+            fn __store(&self) -> &#store {
+                match self {
+                    OldStore::Borrowed(s) => s,
+                    OldStore::Owned(b) => b,
+                }
+            }
+        }
+
+        #[doc = concat!("Transaction over `", stringify!(#store), "`: stages a change set against the old store and flushes it as a full rebuild. Staging never touches the store — the change set is a plain queue, a first-class value.")]
         pub struct Tx<'a> {
-            pub(crate) old: &'a #store,
+            pub(crate) old: OldStore<'a>,
             pub(crate) token: #rt::tx::TxToken,
             pub(crate) ops: ::std::vec::Vec<Op>,
         }
@@ -799,19 +923,31 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #[doc = "Borrow the store sharedly and start staging. Reads and old handles keep working while staging and after the flush; the old store is never mutated (the escape hatch — `into_edit` enforces the pass discipline at compile time)."]
             pub fn edit(&self) -> Tx<'_> {
                 Tx {
-                    old: self,
+                    old: OldStore::Borrowed(self),
+                    token: #rt::tx::mint_token(),
+                    ops: ::std::vec::Vec::new(),
+                }
+            }
+
+            #[doc = "Consume the store and start staging. The borrow checker then requires every old handle to be dead before the pass can end, and `flush` reuses the store's arena allocations (in-place compaction) instead of cloning. Old-store reads during staging are by raw id — handles into the moved store cannot exist."]
+            pub fn into_edit(self) -> Tx<'static> {
+                Tx {
+                    old: OldStore::Owned(::std::boxed::Box::new(self)),
                     token: #rt::tx::mint_token(),
                     ops: ::std::vec::Vec::new(),
                 }
             }
         }
 
-        impl<'a> Tx<'a> {
-            /// The old store this transaction borrows — the read side of
-            /// the pass discipline (traverse with real handles while
-            /// staging the replacement).
-            pub fn old(&self) -> &'a #store {
-                self.old
+        impl Tx<'_> {
+            /// The old store this transaction stages against — the read
+            /// side of the pass discipline. On a borrowed transaction
+            /// (`edit`) this is the original store and old handles still
+            /// work; on an owned one (`into_edit`) it borrows the store
+            /// the transaction now owns (reads by raw id; handles into it
+            /// cannot exist by construction).
+            pub fn old(&self) -> &#store {
+                self.old.__store()
             }
 
             #staging
