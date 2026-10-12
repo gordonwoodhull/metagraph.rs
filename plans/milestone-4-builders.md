@@ -5,12 +5,19 @@ write side is generated from the schema the same way the read side is: one
 interface per arrow, marker-generic, so generic graph-transformation
 algorithms are as portable as generic traversals.
 
-Specification level: preliminary, with one exception: the flat-`Digraph`
-case (change-set queue, tx-stamped refs, the flush pipeline, removal with
-the id-remap report) has been hand-built and tested against the reference
-store (32 tests, including Königsberg signature equality between
-tx-built and directly-built stores). Everything specific to write traits,
-nested staging, and induction remains uncompiled.
+Specification level: preliminary, with exceptions that have grown by
+probe. The flat-`Digraph` case (change-set queue, tx-stamped refs, the
+flush pipeline, removal with the id-remap report) is hand-built and
+tested (32 tests, including Königsberg signature equality between
+tx-built and directly-built stores — six steps as numbered at spike
+time; step 6, backing finalization, postdates the spike and first
+executed inside a flush in the phased-flush probe below). Flush into a
+Build-phased store (kept-membership carry, replay, freeze, validate)
+and nested staging under provisional hosts are probe-verified
+(/tmp/m4-probe-phased-flush, /tmp/m4-probe-nested-pending — REPORT.md
+in each). Everything specific to write traits as generated code,
+`set_` replay, keyed maps across flush, and induction remains
+uncompiled.
 
 ## Premises (what M1–M3 established)
 
@@ -38,6 +45,11 @@ nested staging, and induction remains uncompiled.
   structural half. M2 callers invoke it explicitly; flush invokes it
   unconditionally.
 - Nested stores are addressed by index paths (M2).
+- Constructor replay inherits M2's combined collision rule for merged
+  constructors under composition (colliding `ctor_arg` contributions
+  are shared when the resolved target classes agree, instance-prefixed
+  when they differ): flush replays through whatever constructors the
+  composed schema generated, under that rule.
 - CSR-style backings (M3) assume a build/flush boundary; M3's constraint
   annotations make the requirement explicit.
 
@@ -72,10 +84,18 @@ continue with the new metagraph. Two entry points support this:
   of all references" discipline is enforced at compile time — and flush
   can reuse the old store's allocations instead of cloning. This is the
   normal form; `edit()` is the escape hatch. Allocation reuse carries an
-  ordering constraint (spike-verified): all derived data — kept sets,
-  old→new maps, rebuilt link chains — must be computed before any
-  in-place write, and writes must go forward (write slot ≤ read slot),
-  so no slot is overwritten before its old value has been read.
+  ordering constraint (spike-verified for flat, non-phased arenas): all
+  derived data — kept sets, old→new maps, rebuilt link chains — must be
+  computed before any in-place write, and writes must go forward (write
+  slot ≤ read slot), so no slot is overwritten before its old value has
+  been read. Reuse is scoped to that case for now: nested stores
+  (embedded arenas whose host ids are themselves remapped mid-sweep)
+  and phased stores (the rebuild goes through a fresh build-phase
+  store, a different shape from the frozen one) clone until a stated
+  cross-level discipline is wanted and verified. `into_edit()` is also
+  the *committed* mode in error handling (flush semantics, below): a
+  failed flush forfeits the consumed store unless the change set was
+  checked first.
 
 - **The transaction borrows the old store sharedly.** This is the
   ergonomic point of the design: you can traverse the graph (with real
@@ -86,9 +106,10 @@ continue with the new metagraph. Two entry points support this:
   name entities inside the change set: new ones by submission order, old
   ones by id. They are opaque tokens, not handles — no read traits. The
   `Existing` half shares identity with old-store handles through the
-  stable id, and the transaction (which borrows the old store) can
-  resolve one to a handle on request; only `Pending` refs lack identity,
-  and only until flush.
+  stable id, and under `edit()` the transaction can resolve one to a
+  handle on request (`into_edit()` offers no such conversion — its
+  discipline is that no handle exists during the pass); only `Pending`
+  refs lack identity, and only until flush.
 - **Ref locality is a runtime guarantee, deliberately.** Every ref is
   stamped with a token the transaction mints at `edit()`/`into_edit()`.
   Staging ops check the stamp eagerly for `Pending` refs: a ref minted by
@@ -123,6 +144,15 @@ continue with the new metagraph. Two entry points support this:
      `add_<entity>`. A violation on a kept record has no op of its own,
      so it is attributed to the removal op that caused it, and violations
      distinguish `Kept(old id)` from `Staged(op index)` elements.
+     Detection honors staged corrections: a kept record whose endpoint
+     is removed does not dangle if the same change set re-points
+     (`set_`) or removes the record — the change set is judged as a
+     whole. Every read of an old id in this pass is range-guarded
+     before use — an out-of-range `Existing` ref is the `unknown old
+     id` error, never an index panic (spike 7's crate gets this wrong:
+     step 1 flags the id but does not return before step 2 indexes it —
+     repro /tmp/spike7-oob-repro — so the guard is stated here for
+     codegen to inherit).
      (Duplicate keys never reach this pipeline: a keyed insert onto a
      live key is rejected at the staging call — checked against the
      borrowed old store and the already-staged inserts, a staging panic
@@ -132,12 +162,24 @@ continue with the new metagraph. Two entry points support this:
      maps. Each map is an old-id-indexed array of `Option<new id>`, one
      entry per old arena slot, `None` for removed records; new records
      have no old id and no entry.
-  4. **Replay constructive ops in submission order** through the same
-     backing hooks construction uses, translating `Existing` refs through
-     the maps; root-level ops before nested ops at each step, so
-     provisional index paths resolve top-down. (Trivially satisfied in
-     the flat case — there is only the root level; the constraint becomes
-     real with nested stores.)
+  4. **Replay constructive ops** through the same backing hooks
+     construction uses, translating `Existing` refs through the maps.
+     The kept skeleton is copied first, with a fixed sub-order: kept
+     records (a record before anything that references it), then each
+     backing's kept membership carried in kept iteration order — fed
+     into build-phase accumulators for phased backings (probe-verified:
+     the carry reads only the old store's *frozen* state and writes
+     only through the hooks, so replay never reads build-phase CSR
+     state, and the pipeline presupposes a frozen old store;
+     /tmp/m4-probe-phased-flush) — and intrusive lists rebuilt by
+     walking old chains (order contracts, below). Staged ops then
+     replay against that rebuilt state, in submission order — a `set_`
+     un-links and re-links against the *rebuilt* lists, never the old
+     ones. With nested stores, root-level ops replay before nested
+     ops, submission order preserved within each level, so provisional
+     paths resolve top-down (probe-verified,
+     /tmp/m4-probe-nested-pending). In the flat case the grouping is
+     vacuous.
   5. **Induction** runs during replay, because replay goes through the
      same constructors as direct construction.
   6. **Backing finalization.** Backings with a build phase (CSR-style
@@ -146,13 +188,17 @@ continue with the new metagraph. Two entry points support this:
      Read access to such backings is only valid post-finalization; the
      M3 constraint annotations (`requires_compaction_at_boundary`,
      `freeze_scope: per_store`, `read_precondition: post_compaction`)
-     state this per backing.
+     state this per backing. Steps 6–7 are `finish()` in M3's terms —
+     freeze, then validate, in that order.
   7. **`validate()`**: key existence, value-in-arena, value-host
      agreement, and each backing's
      structural checks — M2's canonical inventory (premises, above; key
      uniqueness is enforced at staging, not here).
   Order contracts: kept elements keep their relative iteration order; new
-  arena records append in replay order. Iteration order itself is a
+  arena records append in replay order — both read *per arena*: no arena
+  receives records from two levels, so the level grouping of step 4
+  never reorders anything observable, and an arena's new records follow
+  that level's submission order. Iteration order itself is a
   per-backing contract (M3 annotation: intrusive_list iterates
   reverse-insertion, CSR forward-insertion); "kept order" means kept
   relative order under the backing's own rule, so generic algorithms may
@@ -165,14 +211,41 @@ continue with the new metagraph. Two entry points support this:
   preserving kept relative order — which degenerates to copy-and-remap
   when nothing was removed. Genuinely new inserts push-front onto the
   rebuilt heads, so new members iterate first and the reverse-insertion
-  contract holds for them.
+  contract holds for them. `validate()` is necessary, not sufficient: a
+  semantically wrong carry — a rebuilt chain truncated by a bad walk —
+  passes every structural check (links stay in range), so the carry
+  rules above are load-bearing, not backstopped (demonstrated in
+  /tmp/m4-probe-phased-flush).
+- **Flush consumes the transaction, and errors are pre-destruction.**
+  `flush(self) -> Result<Store, FlushError>` (spike 7's shape): every
+  violation in the surface below is detected in steps 1–2, before any
+  destructive work, so a failed flush has touched nothing. Recovery
+  differs by entry point, deliberately. Under `edit()` the old store
+  was only borrowed and is untouched — open a new transaction and
+  re-stage, guided by the error's op indices. Under `into_edit()` the
+  consumed store is forfeited — that is the price of the committed
+  mode — unless the change set was validated first: the pipeline's
+  steps 1–2 are factored as a pure predicate,
+  `tx.check(&self) -> Result<(), FlushError>` (the same
+  check-then-write factoring M2 applies to the keyed insert hook), so
+  a change set can be verified before `into_edit()`'s flush commits.
+  A `validate()` failure at step 7 after a green `check()` is a codegen
+  bug (a panic), not an `Err`: the error surface is exactly the
+  steps 1–2 violations.
 - **Flush errors are runtime data**, not compile errors: a `FlushError`
   lists each violation (dangling endpoint) by change-set
   op index. No spans; the op index is the debugging handle. The full
   surface: dangling endpoint (named in old ids), unknown
   old id, `set_` or `remove` of a removed element, double removal, and
   ops staged under a nested path whose record was removed (the change
-  set must be coherent; a silent discard would hide staging bugs).
+  set must be coherent; a silent discard would hide staging bugs). The
+  removed-path violation names both sides — the staged ops' own
+  indices, ascending, and the removal op's index — and a `remove`
+  staged under a doomed path counts among them ("remove of a removed
+  element" in nested clothing). Violation lists are deterministically
+  ordered (step order, then op index; never `HashMap` iteration order
+  — anything derived from a carried map is collected and sorted before
+  formatting), so error text is stable across runs.
   Distinct from these are **staging-time programming errors, which
   panic at the staging call** rather than joining `FlushError`: a
   foreign or stale ref stamp, removal of a `Pending` ref, and a keyed
@@ -181,25 +254,50 @@ continue with the new metagraph. Two entry points support this:
   and a silent `HashMap` overwrite there is exactly the failure the
   check exists to prevent — a staged removal does not free a key, so
   re-pointing one is two flushes; the check is probe-verified
-  implementable, /tmp/m2-probe-staged-key). The dividing line:
-  `FlushError` is for change sets that are coherent as staged but
-  invalid against the store; panics are for change sets that could
-  never have meant anything.
+  implementable, /tmp/m2-probe-staged-key). The dividing line: panics
+  are for ops whose acceptance would silently corrupt or mis-wire the
+  change set — each is deterministically detectable at the staging
+  call, and each, if missed, is silently wrong; `FlushError` is for
+  individually legal ops that are invalid against the store or the
+  change set as a whole.
 
 ## Write traits mirror read traits
 
 `implement!` gains a write side: per arrow instantiation, a marker-generic
 trait implemented by the store's transaction type.
 
+**Write-trait identity mirrors read-trait identity (M1): traits are
+root-sourced, with default names.** The root pattern that declares an
+arrow owns its write traits as it owns its read trait, and the
+registration courier's metadata gains a write slot (trait name, method
+name, ref associated-type names) alongside the read tuple, so
+`implement!` resolves write traits the same way it resolves read
+traits. Default names derive mechanically from the declared thing the
+op writes, fixed by the root: **existence ops name after the entity**
+— `AddNode<M>`, `RemoveNode<M>`, method `add_node()` — while **link
+and payload ops name after the arrow** — `InsertOutEdges<M>`,
+`SetSource<M>`, methods `insert_out_edges()` / `set_source()`. One
+trait per verb, so a copy transform bounds on `AddNode +
+InsertOutEdges` without dragging in `Remove`. Method names are
+root-fixed like read-side methods; instantiation-local spellings
+(`add_subnode`) are inherent methods on the transaction, exactly as a
+distinct read spelling would be (M1's inherent-alias rule). No override
+clause exists in v1 — defaults cannot collide (arrows are unique per
+pattern; traits live under the pattern's marker module). `backing!`
+contributes the hook mechanics each verb lowers into, never names;
+`compose_pattern!` re-mints markers and prefixes inherent aliases,
+never traits — both forced by epic invariant 2 (trait identity comes
+from the arrow pattern, not the store).
+
 | arrow shape | read side | write side (on the transaction) |
 |---|---|---|
-| entity | root accessor, handles | `add_<entity>(<total one-arrow args>) -> Ref<E>`; `remove_<entity>(Ref<E>)` |
-| total `one` | `e.target()` | constructor argument of `add_<entity>` |
-| optional `one` | `e.payload() -> Option<_>` | `set_<arrow>(Ref<A>, Ref<B>)` |
-| `many`, primitive | `p.tags()` | `insert_<arrow>(Ref<A>, Ref<B>)` — membership asserted directly |
-| `many`, existence-derived | `g.nodes()` | none beyond `add_<entity>`/`remove_<entity>` — membership is record existence |
+| entity | root accessor, handles | `Add<Entity>`/`Remove<Entity>` (root-sourced traits; local spelling `add_<entity>(<total one-arrow args>) -> Ref<E>`, `remove_<entity>(Ref<E>)`) |
+| total `one` | `e.target()` | constructor argument of `add_<entity>`; and `Set<Arrow>` — `set_<arrow>(Ref<A>, Ref<B>)`, re-pointing in place (the `by`-derived rows depend on this) |
+| optional `one` | `e.payload() -> Option<_>` | `Set<Arrow>` — `set_<arrow>(Ref<A>, Ref<B>)` |
+| `many`, primitive | `p.tags()` | `Insert<Arrow>` — `insert_<arrow>(Ref<A>, Ref<B>)`, membership asserted directly; `insert_<arrow>(Ref<B>)` when the self entity is an unfused root (no self id exists — M2's general rule) |
+| `many`, existence-derived | `g.nodes()` | none beyond `Add<Entity>`/`Remove<Entity>` — membership is record existence |
 | `many`, derived (`by`) | `n.out_edges()` | none — membership follows the determining `one` arrow's constructor argument or `set_`; no insert op is generated, so membership cannot contradict the field |
-| keyed partial | `sg.subnode(mn)` | `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is an unfused root (one self, no id — the edge-induced composition, M2); `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — for a colocated-root self `Ref<A>` is the host class's ref (spike 11's shape), for a non-root self the entity's own — function semantics; a live key is rejected at the staging call, like a foreign ref |
+| keyed partial | `sg.subnode(mn)` | `Insert<Arrow>` — `insert_<arrow>(Ref<K>, Ref<B>)` when the self entity is an unfused root (one self, no id — the edge-induced composition, M2); `insert_<arrow>(Ref<A>, Ref<K>, Ref<B>)` otherwise — for a colocated-root self `Ref<A>` is the host class's ref (spike 11's shape), for a non-root self the entity's own — function semantics; a live key is rejected at the staging call, like a foreign ref |
 
 Derived read arrows (`:= sum`) have no write side, exactly as they have
 no backing. A `by`-derived `many` arrow's hooks fire when the determining
@@ -258,14 +356,33 @@ a host record — `Vec<Data>` fields on the host class's record struct,
 never a nested `Store` struct; handles keep one root-store reference
 throughout. A change-set entry is an `(index path, operation)` pair —
 the same addressing scheme handles already use. The transaction API
-exposes scoped
-sub-transactions: `tx.within(node)` stages operations against the subgraph
-store embedded in that (possibly provisional) node's record. Since the
-change set is already path-addressed, `within` records a path prefix and
-ops are queued as `(path, op)` pairs — no borrow is held, so root and
-nested staging interleave freely. Flush replays root-level operations
-before nested ones (pipeline step 4), so provisional paths resolve
-top-down.
+exposes scoped sub-transactions: `tx.within(node)` stages operations
+against the subgraph store embedded in that (possibly provisional)
+node's record. Since the change set is already path-addressed, `within`
+records a path prefix and ops are queued as `(path, op)` pairs — no
+borrow is held, so root and nested staging interleave freely.
+
+**Path segments are refs, never resolved ids** (probe-verified,
+/tmp/m4-probe-nested-pending): each segment is
+`Existing(old id) | Pending(op index)`, because a provisional host has
+no id yet — it *is* its submission position. Flush resolves segments
+top-down (pipeline step 4): `Existing` through the per-level compaction
+maps — host ids shift under removal, and this translation is
+load-bearing — and `Pending` through the root pass's op-index replay
+table; a table miss is an internal bug and panics. One op queue serves
+all levels, and op indices count every op, root and nested alike, so
+staging under a provisional host interleaves with root staging freely.
+Because "no borrow is held" cannot mean a borrowed sub-transaction in
+safe Rust without giving up the change set's status as a plain struct,
+`within` returns an owned scope value (token + path prefix) and nested
+staging calls thread `&mut Tx` explicitly, the token re-checked per
+call. `within()` scopes the host-relative ops of the embedded store;
+ops whose signature already names the host (the colocated-root keyed
+form) stage at root level and do not combine with it. For id-free
+embedded shapes `validate()` is vacuous — there are no stored ids to
+check — and the real structural check is path coherence, in flush
+step 2, before compaction so errors name old ids; codegen emits no
+per-backing checks for backings with nothing stored to check.
 
 ## Induction
 
@@ -375,10 +492,17 @@ refs already handed out, because nothing is applied until flush.
 
 ## Explicit non-goals
 
-- No in-place mutation, ever. No generational ids.
+- No in-place mutation of a live store, ever (the `into_edit` flush
+  overwrites a store it consumed, which is dead, not live). No
+  generational ids.
 - No handle migration across a flush. Handles name (store, path); a new
   store is a new identity. The id-remap report exists for raw ids, not
   handles.
+- No per-membership un-insert in v1: primitive-`many` memberships and
+  keyed entries are removed only by removing the entity that carries
+  them, or by re-pointing a `one` arrow via `set_`. Un-linking a single
+  membership without removing its record is a deliberate deferral, not
+  an oversight.
 - No concurrency or merging: two transactions on one store are
   independent forks; merging change sets is out of scope. (The ref stamp
   makes cross-fork contamination a staging error rather than a silent
@@ -386,13 +510,20 @@ refs already handed out, because nothing is applied until flush.
 
 ## Interactions with other milestones
 
-- **Backings (M1–M3)**: unchanged. Hooks are the single write path, so
-  every backing works under flush replay without an interface change.
-  Backings that require a build phase (CSR) are *satisfied* by flush,
-  which is always a full rebuild; pipeline step 6 (backing finalization)
-  is where their compaction runs, and the M3 constraint annotations
-  ("append-only build phase", per-store freeze, post-compaction read
-  precondition) document the requirement.
+- **Backings (M1–M3)**: the backings are unchanged, but the hook
+  interface grows what M2's round-3 caveat predicted: `set_` requires
+  per-backing *delete* hooks (un-linking a `by`-derived intrusive
+  membership before re-linking) and a field-write hook — M3's clause
+  vocabulary has `ctor_arg` and `on_insert` but no write-after-
+  construction clause. Hooks remain the single write path: flush
+  replay lowers `set_` through the same grown hooks that the
+  builder's `set_<one-arrow>` method uses, replaying after the
+  kept-skeleton rebuild (pipeline step 4). Backings that require a
+  build phase (CSR) are *satisfied* by flush, which is always a full
+  rebuild; pipeline step 6 (backing finalization) is where their
+  compaction runs, and the M3 constraint annotations ("append-only
+  build phase", per-store freeze, post-compaction read precondition)
+  document the requirement.
 - **Payloads (M5+)**: `set_<one-arrow>` is the payload update path.
 - **Cost model**: flush is a deep copy of the entire store tree plus
   replay. Right for the target graph sizes; the report struct is where
@@ -405,11 +536,14 @@ refs already handed out, because nothing is applied until flush.
    the seven-step pipeline, rebuilding through the build phase from the
    old store's data (a phased store cannot be cloned-then-replayed —
    replay-into-frozen is a compile error under M3's type-state decision;
-   for non-phased stores the "build phase" is the M1 builder shape).
+   for non-phased stores the "build phase" is the M1 builder shape; the
+   kept-membership carry is probe-verified, /tmp/m4-probe-phased-flush).
    Königsberg built via
    transaction must equal the M1 store in every observable way (same test
    assertions).
-2. Write traits generated per arrow, with associated ref types; a generic
+2. Write traits generated per arrow — root-sourced default names,
+   courier write slot, one trait per verb (write-trait identity above) —
+   with associated ref types; a generic
    read→write transform (nodes via a per-pattern node-constructor bound,
    edges via per-arrow ops, primitive arrows only) as the portability
    proof.
@@ -417,9 +551,13 @@ refs already handed out, because nothing is applied until flush.
    endpoint, unknown old id, `set_`/`remove` of a removed
    element, double removal, ops under a
    removed nested path) and the staging panics (foreign or stale ref
-   stamp, removal of a `Pending` ref, keyed insert onto a live key).
-4. Nested stores: path-addressed ops and sub-transactions; hierarchy
-   edit tests (stage a new outer node *and* its subgraph in one flush).
+   stamp, removal of a `Pending` ref, keyed insert onto a live key);
+   `tx.check()` factoring steps 1–2 as the `into_edit()` pre-flight;
+   deterministic violation ordering.
+4. Nested stores: path-addressed ops (ref segments) and owned
+   sub-transaction scopes; hierarchy
+   edit tests (stage a new outer node *and* its subgraph in one flush —
+   probe-verified, /tmp/m4-probe-nested-pending).
 5. Induction for the subgraph pattern: the inducing `add_subedge`
    constructor as a builder extension over the generated primitives and
    the id-based read view.

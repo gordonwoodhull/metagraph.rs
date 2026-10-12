@@ -146,10 +146,17 @@ Subgraph -> SubNode` is still called `.nodes()` and yields
 `Nodes::Nodes<'a>` — emitting `fn subnodes` is a trait mismatch (E0407,
 spike-verified). The registration courier's metadata therefore carries
 the full (method name, GAT name, associated type names, cardinality)
-tuple — plus the key's associated type name for keyed roots (M2).
+tuple — plus the key's associated type name for keyed roots (M2) — and
+a write slot for M4: per write trait, its (trait name, method name, ref
+associated-type names).
 Generated *operation* names (`add_<entity>`, `insert_<arrow>`,
 `set_<arrow>`) are the opposite: they derive from the instantiation's
-local names, since they are store API, not trait identity. A distinct
+local names, since they are store API, not trait identity. M4's write
+*traits* follow the root-sourced discipline from that same slot:
+existence ops name after the entity (`AddNode<M>`, `RemoveNode<M>`),
+link and payload ops after the arrow (`InsertOutEdges<M>`,
+`SetSource<M>`) — one trait per verb, methods root-fixed, local
+spellings remaining the instantiation's inherent methods. A distinct
 read-side spelling, if wanted, is an inherent alias under the rule in
 M2's marker-qualification section.
 

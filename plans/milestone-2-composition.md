@@ -485,7 +485,11 @@ read-side addition it will reuse:
   write-trait methods** (`add_<entity>`, `insert_<arrow>`,
   `set_<one-arrow>`), so M4 can lift them into generated write traits —
   defined from the arrows the same way the read traits are — without
-  renaming.
+  renaming. The lift keeps two layers distinct: the *trait* methods are
+  root-fixed (M4's write-trait identity rule, carried in the courier's
+  write slot), while the builder's local spellings survive as the
+  transaction's inherent methods — the same alias split the read side
+  makes.
 - **Validation has a named boundary** (`validate()`, above), so M4 hangs
   full referential-integrity validation on a point that already exists.
 - **The builder exposes a read view of the store under construction.**

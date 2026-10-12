@@ -126,7 +126,11 @@ remapping of intrusive links silently truncates lists under removal;
 chains must be rebuilt by walking old lists. Also pinned: the report
 map shape, op-index attribution, the panic-vs-`FlushError` dividing line,
 structural `validate()` for keyless backings, and `into_edit`'s
-write-ordering constraint. Folded into milestone-4.
+write-ordering constraint. Folded into milestone-4. (A later probe
+found one bug in the crate: flush panics on an out-of-range
+`Existing` ref — step 1 flags the id but does not return before
+step 2 indexes it (repro `/tmp/spike7-oob-repro`). The plan's error
+surface was right; M4's step 2 carries the range-guard requirement.)
 
 **8. The generic read→write transform.** Associated ref types and a
 handle→ref mapping trait, compiled against spike 7's transaction.
@@ -238,6 +242,8 @@ as the addendum to spike 11's entry, above.)
 | Combined-rule sharing half (M3 review 3) | `/tmp/m3-probe-r3-ctor-share` | 4/4 tests. Retires the probe queued in main's ledger: one fused record, one shared-arg constructor (targets agree via `<->` — one argument feeds both instance-prefixed fields, routing by explicit init; shorthand cannot express it), and the prefixed constructor (targets differ) in the same crate. Together with /tmp/m3-probe-ctor-merge both halves of the combined rule are probe-covered |
 | Advance clause at the embedded placement (M3 review 4) | `/tmp/m3-probe-r4-advance` | 5/5 tests. `advance(w)` authored through the DSL and emitted at the embedded placement via both stdlib recipes — the index mint (`handle(w.cur)` → `SubNodeIdPath(w.host, w.cur)`) and the intrusive link walk (mint from the path id itself). Orders verified both ways: arena index order, intrusive reverse insertion. Refinement: only the index-mint recipe needs the Walk's reserved host field — the link walk's sits unused (`#[allow(dead_code)]`); the field is reserved for the recipes that need it |
 | Cross-crate courier bounce gate (M3 review 4) | superseded — never run | Planned as /tmp/m3-probe-r4-bounce (the round's one authorized proc-macro exception); dropped once M2's merge made the resolution half landed, tested code (downstream renamed/indirect crates) with the hygiene half spike-5-proven — step 2's permanent in-repo gate is the first-hand evidence, and it gains the use-site helper-resolution arm (spike 5's caveat 2) |
+| Phased flush: kept carry + replay into `GraphStore<Build>` (M4 review) | `/tmp/m4-probe-phased-flush` | 12/12 tests. A change set with removals flushes into a fresh Build store: CSR kept-membership fed through the insert hook in kept order (reads only the old store's *frozen* state — replay never reads build-phase buckets), intrusive in-lists rebuilt by walk, staged ops replayed, freeze, validate; signature-equal to direct construction. Bonus findings: `validate()` cannot catch a semantically truncated rebuilt chain (the carry rules are load-bearing, not backstopped); the carry presupposes a frozen old store; spike 7's flush panics on an out-of-range `Existing` ref instead of returning the listed error (repro `/tmp/spike7-oob-repro`; range-guard folded into M4 step 2) |
+| Nested staging under a Pending host (M4 review) | `/tmp/m4-probe-nested-pending` | 10/10 tests. Paths of token-stamped refs (`Existing \| Pending` segments), one flat op queue counting every op, root-then-nested replay resolving through per-level compaction maps + an op-index replay table; kept-host id translation under compaction pinned; `RemovedPathHost` names nested op indices ascending plus the removal op, deterministic; `within` returns an owned scope threading `&mut Tx` (plain-struct change set preserved); ordering is per-arena — kept, then per-level staged submission order. Also: `validate()` vacuous for id-free embedded shapes (path coherence in step 2 is the real check) |
 
 ## Sequencing rules (from the original brief)
 
