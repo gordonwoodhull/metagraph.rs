@@ -1,0 +1,5 @@
+error[E0599]: no method named `out_edges` found for struct `metagraph_exper::tx::Ref<I>` in the current scope
+  --> tests/compilefail/read_on_ref.rs:19:15
+   |
+19 |     let _ = p.out_edges(); // E0599: `Ref<NodeId>` has no method `out_edges`
+   |               ^^^^^^^^^ method not found in `metagraph_exper::tx::Ref<NodeId>`

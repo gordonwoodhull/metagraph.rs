@@ -691,7 +691,7 @@ the probe crate under `/tmp` as the reference implementation.
 
 **Stage 1 — flat, non-phased core (spike 7's territory)**
 
-- [ ] 1. Change-set data model: `Tx` over `&Store` (`edit()`),
+- [x] 1. Change-set data model: `Tx` over `&Store` (`edit()`),
       token-stamped refs (`Existing | Pending`, `Copy`), one flat op
       queue whose indices count every op, staging methods with local
       spellings. Acceptance: refs expose no read methods (compile-fail

@@ -1824,5 +1824,64 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
 
     out.extend(iter_defs);
     out.extend(trait_impls);
+
+    // ---- M4: the transaction (write side) ----
+    // Stage-1 gate: flat, non-phased, no keyed bindings (keyed carry and
+    // the phased flush pipeline land with their steps). Unsupported
+    // shapes emit no `Tx` — their `edit()` arrives with the step that
+    // implements their carry.
+    if !phased {
+        let has_keyed = infos
+            .iter()
+            .any(|i| i.backing.map(|d| card_of_decl(d) == Cardinality::Keyed).unwrap_or(false));
+        if !has_keyed {
+            let entities: Vec<crate::tx::TxEntity> = elements
+                .iter()
+                .map(|e| {
+                    let ctor_args: Vec<crate::tx::TxCtorArg> = infos
+                        .iter()
+                        .filter(|i| {
+                            i.decl.source == e.name
+                                && i.backing
+                                    .map(|d| d.has(|c| matches!(c, Clause::CtorArg { .. })))
+                                    .unwrap_or(false)
+                        })
+                        .map(|i| crate::tx::TxCtorArg {
+                            arg: i.decl.name.clone(),
+                            target_ref_alias: format_ident!("{}Ref", i.decl.target),
+                            target_into_trait: format_ident!("Into{}Arg", i.decl.target),
+                            target_into_fn: format_ident!(
+                                "into_{}_ref",
+                                snake(&i.decl.target.to_string())
+                            ),
+                        })
+                        .collect();
+                    let onadd_hooks: Vec<Ident2> = infos
+                        .iter()
+                        .filter(|i| {
+                            i.decl.source == e.name
+                                && i.backing
+                                    .map(|d| d.has(|c| matches!(c, Clause::OnAdd { .. })))
+                                    .unwrap_or(false)
+                        })
+                        .map(|i| format_ident!("__onadd_{}", i.decl.name))
+                        .collect();
+                    crate::tx::TxEntity {
+                        name: e.name.clone(),
+                        arena: arena_fld(&e.name),
+                        ctor_args,
+                        onadd_hooks,
+                    }
+                })
+                .collect();
+            let model = crate::tx::TxModel {
+                store: store.clone(),
+                rt: crate::runtime_path(),
+                entities,
+            };
+            out.extend(crate::tx::emit(&model));
+        }
+    }
+
     Ok(out)
 }

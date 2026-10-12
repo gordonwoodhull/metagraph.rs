@@ -179,6 +179,7 @@ extern crate self as metagraph_exper;
 pub mod algo;
 pub mod backings;
 pub mod stdlib;
+pub mod tx;
 
 pub use metagraph_exper_macros::{backing, compose_pattern, implement, pattern};
 #[doc(hidden)]
