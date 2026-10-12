@@ -5,6 +5,7 @@ members = [
     "tests/downstream/basic",
     "tests/downstream/own-root",
     "tests/downstream/renamed",
+    "tests/fixtures",
 ]
 
 [package]
@@ -17,3 +18,4 @@ metagraph-exper-macros = { path = "macros" }
 
 [dev-dependencies]
 trybuild = "1.0.122"
+m2-fixtures = { path = "tests/fixtures" }

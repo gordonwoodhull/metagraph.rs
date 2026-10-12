@@ -38,10 +38,7 @@ struct ArrowInfo<'a> {
 pub(crate) fn expand(config: &ChainConfig) -> syn::Result<TokenStream2> {
     match &config.schema {
         crate::grammar::GenSchema::Flat(_) => expand_flat(config),
-        crate::grammar::GenSchema::Composed(_) => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "composed-pattern codegen is not implemented yet (milestone-2 step 7)",
-        )),
+        crate::grammar::GenSchema::Composed(_) => crate::codegen_composed::expand_composed(config),
     }
 }
 

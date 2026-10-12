@@ -10,6 +10,7 @@
 //! parsers (shared module [`grammar`]), where errors get real spans.
 
 mod codegen;
+mod codegen_composed;
 mod compose;
 mod grammar;
 
@@ -584,6 +585,10 @@ impl Parse for ComposeInput {
 /// composition, mints per-instance markers, and emits the composed
 /// pattern's own courier — after which it is indistinguishable from a
 /// hand-written pattern.
+///
+/// Note: like `pattern!`, declare compositions in a named module. One
+/// declared at a crate root collides with its courier's `#[macro_export]`
+/// crate-root anchor (E0255).
 #[proc_macro]
 pub fn compose_pattern(input: TokenStream) -> TokenStream {
     let comp = syn::parse_macro_input!(input as ComposeInput);
@@ -868,24 +873,25 @@ fn finish_compose(
     Ok(quote! {
         // The composed pattern is indistinguishable from a hand-written one:
         // same markers-module layout, same courier rule, same
-        // path-derivation rule. Marker paths derive from the composed
-        // pattern's path by the M1 rule.
+        // path-derivation rule (`pub mod <snake(name)>` beside the courier
+        // at the invocation site, so `implement!` derives both from the
+        // pattern path exactly as for a flat pattern).
         pub mod #modname {
             /// Per-instance, per-arrow-instantiation markers.
             pub mod markers {
                 #marker_mods
             }
-            #[doc(hidden)]
-            #[macro_export]
-            macro_rules! #courier {
-                (($($fwd:tt)::+ ; $($rest:tt)*)) => {
-                    $($fwd)::+ ! { { #schema_tokens } ; $($rest)* }
-                };
-            }
-            #[doc(hidden)]
-            #[allow(unused_imports)]
-            pub use #courier;
         }
+        #[doc(hidden)]
+        #[macro_export]
+        macro_rules! #courier {
+            (($($fwd:tt)::+ ; $($rest:tt)*)) => {
+                $($fwd)::+ ! { { #schema_tokens } ; $($rest)* }
+            };
+        }
+        #[doc(hidden)]
+        #[allow(unused_imports)]
+        pub use #courier;
     })
 }
 

@@ -172,10 +172,13 @@ impl Parse for ArrowDecl {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name: Ident = input.parse()?;
         input.parse::<Token![:]>()?;
-        // Optional instantiation path followed by a comma.
+        // Optional instantiation path followed by a comma. A leading `::`
+        // (explicit-absolute spelling, e.g. naming the runtime crate from a
+        // fixture crate) is a path-sep token, not an ident.
         let inst = if (input.peek(Ident) && input.peek2(Token![::]))
             || (input.peek(Token![crate]) && input.peek2(Token![::]))
             || (input.peek(Ident) && input.peek2(Token![,]))
+            || input.peek(Token![::])
         {
             let p: Path = input.parse()?;
             input.parse::<Token![,]>()?;
@@ -685,10 +688,6 @@ pub struct RootMeta {
 }
 
 impl RootMeta {
-    pub fn many(&self) -> bool {
-        self.card == Cardinality::Many
-    }
-
     /// Derive the metadata tuple from a root pattern's single arrow. The
     /// associated type is the target entity's name; the GAT is the
     /// camel-cased arrow name (many arrows only); a `key(K)` clause declares
@@ -978,7 +977,6 @@ mod tests {
     #[test]
     fn bindings_parse_and_roundtrip() {
         use super::parse_bindings;
-        use syn::parse::Parser as _;
         let parse_all = |src: &str| {
             syn::parse::Parser::parse2(
                 |input: syn::parse::ParseStream| parse_bindings(input),
