@@ -942,12 +942,12 @@ hash_index `= suffix`, csr bare.)*
 
 **Step 2 — Binding resolution in `implement!`.** Contract: the
 token-routing paragraph (declaring-crate resolver).
-- [ ] grow the binding grammar with the path form; the bare-ident form
+- [x] grow the binding grammar with the path form; the bare-ident form
       stays legal and resolves against the runtime crate
-- [ ] the resolution hop via `proc-macro-crate`: renames handled,
+- [x] the resolution hop via `proc-macro-crate`: renames handled,
       re-export routing rejected, the direct-dependency rule enforced
       with a clean `compile_error!`
-- [ ] the bounce gate, in-repo and permanent: two distinct backing
+- [x] the bounce gate, in-repo and permanent: two distinct backing
       couriers resolved per one `implement!`-shaped invocation, bodies
       spliced hygienically, with the cross-crate arms — a stdlib
       backing resolved from a user crate, a user backing declared in a
@@ -961,28 +961,28 @@ token-routing paragraph (declaring-crate resolver).
 
 **Step 3 — `field` + `arena` in the DSL; the fixed table deleted.**
 Contract: the declarations, the placement rules, the premise table.
-- [ ] `field`: `on`/`ctor_arg`/`read`/`validate` wired to the existing
+- [x] `field`: `on`/`ctor_arg`/`read`/`validate` wired to the existing
       codegen shapes; the `ctor_arg` unfused-root rejection emitted
 - [ ] `arena`: `membership: existence`, `iter`/`iterate`/`advance`
       with the reserved iterator fields, the `hosts_arena` predicate
       wired
 - [ ] delete the fixed backing table from the macros crate
 - Acceptance:
-- [ ] M1 suite green, koenigsberg assertions byte-identical
-- [ ] expanded code shows couriers resolved and hook *methods* emitted
+- [x] M1 suite green, koenigsberg assertions byte-identical
+- [x] expanded code shows couriers resolved and hook *methods* emitted
 - Depends: 1, 2
 
 **Step 4 — `intrusive_list` in the DSL.** Contract: the declaration,
 the hygiene caveats.
-- [ ] `on A` + `on B` contributions, the stem formula, the push-front
+- [x] `on A` + `on B` contributions, the stem formula, the push-front
       hook as a store method
 - [ ] the hygiene caveats as grammar rules: `Span::mixed_site()`
       scaffold idents, absolutized container paths, reserved-set
       shadowing rejected
-- [ ] `validate by` + `validate primitive` authored and selected per
+- [x] `validate by` + `validate primitive` authored and selected per
       binding at `implement!` time
 - Acceptance:
-- [ ] M1 suite green including traversal orders (reverse insertion)
+- [x] M1 suite green including traversal orders (reverse insertion)
 - Depends: 3
 
 **Step 5 — `hash_index` in the DSL.** Gated on M2's keyed grammar
