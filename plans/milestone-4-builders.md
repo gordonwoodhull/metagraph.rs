@@ -170,7 +170,12 @@ continue with the new metagraph. Two entry points support this:
      live key is rejected at the staging call — checked against the
      borrowed old store and the already-staged inserts, a staging panic
      like a foreign ref — so uniqueness holds by construction at flush;
-     M2's keyed section.)
+     M2's keyed section. "Already-staged inserts" includes the keys an
+     already-staged *inducing* constructor will insert, not only
+     explicitly staged insert ops — a standalone add keyed after a
+     staged `add_subedge` in the same change set is a live-key case
+     even though no insert op was staged; probe-verified,
+     /tmp/m4-probe-induct-flush.)
   3. **Compact** kept arenas, assign new ids, build the per-arena old→new
      maps. Each map is an old-id-indexed array of `Option<new id>`, one
      entry per old arena slot, `None` for removed records; new records
@@ -298,7 +303,9 @@ continue with the new metagraph. Two entry points support this:
   `Pending` ref (a staged record's determining fields are fixed by its
   own `add` op), and a keyed
   insert onto a live key (checked against the borrowed old store and
-  the already-staged inserts; M2's builder does the same at its insert,
+  the already-staged inserts — including keys an already-staged
+  inducing constructor will insert, /tmp/m4-probe-induct-flush;
+  M2's builder does the same at its insert,
   and a silent `HashMap` overwrite there is exactly the failure the
   check exists to prevent — a staged removal does not free a key, so
   re-pointing one is two flushes; the check is probe-verified
