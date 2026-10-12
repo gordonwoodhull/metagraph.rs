@@ -166,6 +166,48 @@ Not started: steps 6–14.
    where the verb is real (existence many → no Insert impl; by-derived →
    none; keyed → Insert with key).
 
+## Step 6 pre-work — read before starting (impl-m4-2 session)
+
+The emission mechanics are clear; ONE design question is open and
+should be settled (likely with Gordon) before writing code:
+
+**Add\<E\> ctor-arg arity.** The acceptance bounds on `AddNode +
+AddEdge` where `AddEdge::add_edge(source, target)` — the trait carries
+the entity's ctor args. Traits must be emitted at the DECLARING
+pattern's site (two implement!s of Digraph share them; that is the
+marker-genericity spike 8 pinned), but one-ness of an instantiation's
+arrows is ROOT-side data (stdlib::Source declares `one`) that reaches
+the pattern only through implement-time metadata tuples — `pattern!`
+for Digraph cannot resolve `stdlib::Source`'s cardinality at emission
+time. The plan says "the constructor argument list is the entity's
+total `one` arrows" but never how the declaring block learns it.
+Candidates found:
+(a) **Determinant-derived arity**: an arrow named by a sibling `by`
+    clause is provably total at pattern time (`by` requires one).
+    Covers Digraph exactly (source and target are both determinants);
+    does NOT cover plain one-arrows (Hierarchy's `main_node`) — those
+    entities' Add traits would emit argless and get no Tx impl ("verb
+    not real"), deferring that shape.
+(b) Courier-delivered arity — no mechanism exists (a consumer's
+    implement! cannot emit items into the declaring crate's module).
+(a) is implementable today and covers the acceptance; flag the gap.
+
+Everything else about step 6 is settled reading: sixth braced slot
+`{ Trait, method, ARef, KRef?, BRef }` on RootMeta (grammar.rs parse/
+emit + round-trip tests, like the M2 key slot); Insert<Arrow> for
+many/keyed roots and Set<Arrow> for one roots emitted beside the read
+trait in expand_root_pattern; Add<E>/Remove<E> per non-root entity +
+per-entity markers (entity name verbatim) in expand_instantiation_
+pattern AND finish_compose (re-mint), with a pattern!-time collision
+check against camel(arrow) markers; canonical arity with self ref
+always present, unfused-root forms inherent-only; runtime
+HandleToRef<M> impls per entity under per-entity markers; Tx trait
+impls only where the verb is real. New staging verb `insert_<arrow>`
+for primitive many arrows queues a new `Op::Insert<Arrow>` variant —
+remember flush's match arms grow with it (replay through
+`__insert_<arrow>`; no step-1/2 checks for it until keyed live-key
+lands at 8/11).
+
 ## Per-step continuation guide (3–14)
 
 Acceptance instruments: probe crates under /tmp are the reference
@@ -299,11 +341,10 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
-- 2026-10-12: survey (repo codegen, five probes, spike 7/8, D1–D8 fold
-  diffs); baseline green.
-- Step 1 DONE 14a19f1; step 2 DONE (this commit).
-- Handed off after step 2 per Gordon: rest of the plan continues from
-  the guide above.
+- 2026-10-12 (impl-m4-2): steps 3, 4, 5 DONE (4cbddf0, c22cbb2,
+  20f1bda — see "Where things stand"). Step 6 investigated, not
+  started; see the pre-work note below. Suite green incl. trybuild +
+  downstream at every commit.
 - Step 3 DONE (this commit): flush emitted from TxModel — the model grew
   per-entity record fields (ctor-arg/None/Default init), store fields,
   and intrusive-carry arrows (host record vs store head); codegen
