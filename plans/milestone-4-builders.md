@@ -32,7 +32,8 @@ generated code and induction.
   flush re-runs the builder machinery.
 - Hooks are the single write path: every mutation primitive (field writes,
   intrusive links, hash-index maintenance) lives in a named per-backing
-  hook function over `&mut` store state, and the `add_*` constructors are
+  hook method on the store (doc-hidden, `__insert_<arrow>`-shaped — M3's
+  grammar section pins the convention), and the `add_*` constructors are
   thin orchestration (M1 commits to both names and shape).
 - Validation has a named boundary (`validate()`), with M2's canonical
   inventory: key existence, value-in-arena, and value-host agreement
@@ -208,8 +209,11 @@ continue with the new metagraph. Two entry points support this:
      same constructors as direct construction.
   6. **Backing finalization.** Backings with a build phase (CSR-style
      range adjacency, M3) compact here — accumulate structures are
-     frozen into their read form, per store, once, after all replay.
-     Read access to such backings is only valid post-finalization; the
+     frozen into their read form, per store, once, after all replay;
+     several phased backings on one store compact in the `implement!`
+     block's binding order at that single freeze (M3's pin, inherited —
+     "CSR and phase representation"). Read access to such backings is
+     only valid post-finalization; the
      M3 constraint annotations (`requires_compaction_at_boundary`,
      `freeze_scope: per_store`, `read_precondition: post_compaction`)
      state this per backing. Steps 6–7 are `finish()` in M3's terms —
@@ -562,17 +566,22 @@ refs already handed out, because nothing is applied until flush.
   per-backing *delete* hooks (un-linking a `by`-derived intrusive
   membership before re-linking). The field-write half is M2's
   deliverable (M2's builder shape moves field writes behind named
-  hooks; M3's field declaration notes "set_-time re-pointing is M4
+  hooks, landed as the `__set_<arrow>` methods; M3's field
+  declaration notes "set_-time re-pointing is M4
   vocabulary") — M4's growth beyond it is the delete verb and the
   re-point orchestration. The growth is per backing kind and is
   probe-verified (/tmp/m4-probe-set-unlink): a `by`-derived intrusive
-  list gains `unlink_<list>_hook` (walk-and-splice, O(list length),
-  correct at head and tail; a `by` on both endpoints of a mutable
-  field grows two), and it is *total* — it returns whether the record
+  list gains `__unlink_<arrow>` — the delete verb in the landed hook
+  convention, a doc-hidden store method beside `__insert_<arrow>`
+  (the probe's `unlink_<list>_hook` free-function spelling was
+  hand-emission, like spike 11's) — walk-and-splice, O(list length),
+  correct at head and tail (a `by` on both endpoints of a mutable
+  field grows two), and it is *total*: it returns whether the record
   was found, never panics on absence, because flush can legitimately
   hold a kept record that is currently in no list (the
-  correction-op case, step 4). The re-point hook (`set_source_field_
-  hook`-shaped) takes only `(record, new value)`: the old host is
+  correction-op case, step 4). The re-point hook (`__set_<arrow>`
+  — M2's landed field-write hook, grown with the
+  orchestration) takes only `(record, new value)`: the old host is
   read from the record's own determining field — that is exactly the
   `by`-derivation invariant — then un-link, write, re-link. A phased
   backing needs nothing (membership is derived at freeze); a
@@ -583,8 +592,9 @@ refs already handed out, because nothing is applied until flush.
   kept-skeleton rebuild (pipeline step 4). Backings that require a
   build phase (CSR) are *satisfied* by flush, which is always a full
   rebuild; pipeline step 6 (backing finalization) is where their
-  compaction runs, and the M3 constraint annotations ("append-only
-  build phase", per-store freeze, post-compaction read precondition)
+  compaction runs, and the M3 constraint annotations
+  (`append_only_build`, `freeze_scope: per_store`,
+  `read_precondition: post_compaction`)
   document the requirement.
 - **Payloads (M5+)**: `set_<one-arrow>` is the payload update path.
 - **Cost model**: flush is a deep copy of the entire store tree plus
@@ -637,7 +647,7 @@ the probe crate under `/tmp` as the reference implementation.
       spike 8's generic copy and node-replacement transforms compile
       and run unmodified at two marker instantiations against
       generated code.
-- [ ] 7. `set_` + delete hooks: `unlink_<list>` (total) and the
+- [ ] 7. `set_` + delete hooks: `__unlink_<arrow>` (total) and the
       re-point orchestration emitted per binding; builder
       `set_<one-arrow>` for all `one` arrows (field-write hooks are
       M2's deliverable, not M4's). Acceptance: probe 3's tests as
