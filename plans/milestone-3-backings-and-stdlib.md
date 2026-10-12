@@ -1011,13 +1011,13 @@ landing; the names are settled (Stdlib promotion).
 
 **Step 6 — Validate machinery + corruption fixtures.** Contract: the
 validate contribution.
-- [ ] doc-hidden `__validate_<arrow>` store methods, summoned from
+- [x] doc-hidden `__validate_<arrow>` store methods, summoned from
       `validate()` in binding order
-- [ ] corruption fixtures per spike 4 for every canonical-inventory
+- [x] corruption fixtures per spike 4 for every canonical-inventory
       check: ghost keys, out-of-range and cross-host values, chain
       corruption in both partition shapes (shared membership vs cycle,
       distinguished in the report)
-- [ ] the canonical inventory written out as the documented contract
+- [x] the canonical inventory written out as the documented contract
       M4's flush runs
 - Depends: 3–5
 

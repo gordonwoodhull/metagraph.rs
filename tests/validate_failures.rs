@@ -221,3 +221,210 @@ fn by_derived_lists_report_determinant_contradiction_and_coverage() {
         "{msg}"
     );
 }
+
+/// Corruption below the op boundary. The public ops only ever insert live
+/// ids, so nothing above can pin the uniform range pre-pass and its early
+/// return; the generated records are private to the `implement!` module, so
+/// each declaration sits beside its damage tests in its own submodule (two
+/// `implement!`s in one module would collide on shared class names like
+/// `OuterNodeId` — the class items emit per module).
+mod corrupt {
+    mod refinement {
+        use metagraph_exper::implement;
+
+        implement! {
+            crate::refin_comp::Refinement as CorruptRefStore {
+                outer.nodes:     arena,
+                outer.out_edges: intrusive_list,
+                outer.in_edges:  intrusive_list,
+                inner.nodes:     arena,
+                inner.out_edges: intrusive_list,
+                inner.in_edges:  intrusive_list,
+                chain.elems:     intrusive_list,
+            }
+        }
+
+        fn corrupt_ref_store() -> CorruptRefStore {
+            let mut s = CorruptRefStore::new();
+            let (a, b, c) = (s.add_outer_node(), s.add_outer_node(), s.add_outer_node());
+            let ab = s.add_outer_edge(a, b);
+            let bc = s.add_outer_edge(b, c);
+            let (i0, i1, i2, i3) = (
+                s.add_inner_node(),
+                s.add_inner_node(),
+                s.add_inner_node(),
+                s.add_inner_node(),
+            );
+            let e01 = s.add_inner_edge(i0, i1);
+            let e12 = s.add_inner_edge(i1, i2);
+            let e23 = s.add_inner_edge(i2, i3);
+            s.insert_elems(ab, e12);
+            s.insert_elems(ab, e01);
+            s.insert_elems(bc, e23);
+            s
+        }
+
+        #[test]
+        fn range_pre_pass_reports_dead_link_before_the_authored_walk() {
+            let mut s = corrupt_ref_store();
+            assert!(s.validate().is_ok());
+            // Direct field damage: e01's link names no record. The pre-pass
+            // names the field, the owning record, and the dead target.
+            s.inner_edge_arena[0].next_elems = Some(InnerEdgeId(99));
+            let msg = s.validate().unwrap_err();
+            assert!(
+                msg.contains(
+                    "arrow `chain.elems`: `next_elems` link of InnerEdgeId(0) \
+                     points at InnerEdgeId(99), which is not a live record"
+                ),
+                "{msg}"
+            );
+            // The early return: the authored partition walk never ran — the
+            // same report carries no shared-membership / cycle text.
+            assert!(!msg.contains("shared membership") && !msg.contains("repeats"), "{msg}");
+        }
+    }
+
+    // The intrusive-into-embedded placement's driver: `sub.subedges` bound
+    // to `intrusive_list` instead of `arena` — path-id links, records
+    // nested in the host's arena, the head field on the fused host record.
+    mod hierarchy {
+        use metagraph_exper::implement;
+        use metagraph_exper::stdlib::Nodes;
+        use m2_fixtures::roots::EdgesOf;
+
+        use crate::hier_comp::hierarchy::markers;
+
+        implement! {
+            crate::hier_comp::Hierarchy as HierIntrusiveStore {
+                outer.nodes:     arena,
+                outer.out_edges: intrusive_list,
+                outer.in_edges:  intrusive_list,
+                inner.nodes:     arena,
+                inner.out_edges: intrusive_list,
+                inner.in_edges:  intrusive_list,
+                sub.subnodes:    arena,
+                sub.subedges:    intrusive_list,
+                sub.subnode:     hash_index,
+                sub.subedge:     hash_index,
+            }
+        }
+
+        /// Host a's subedge chain [se1, se0] (push-front), host b's empty;
+        /// the subedges list threads records embedded in the host's arena.
+        fn hier_intrusive_store() -> (HierIntrusiveStore, SubEdgeId, SubEdgeId) {
+            let mut s = HierIntrusiveStore::new();
+            let a = s.add_outer_node();
+            let _b = s.add_outer_node();
+            let (i0, i1, i2) =
+                (s.add_inner_node(), s.add_inner_node(), s.add_inner_node());
+            let e01 = s.add_inner_edge(i0, i1);
+            let e12 = s.add_inner_edge(i1, i2);
+            let se0 = s.add_sub_edge(a, e01);
+            let se1 = s.add_sub_edge(a, e12);
+            s.insert_subedges(a, se0);
+            s.insert_subedges(a, se1);
+            (s, se0, se1)
+        }
+
+        #[test]
+        fn intrusive_into_embedded_walks_through_the_fused_handle() {
+            let (s, se0, se1) = hier_intrusive_store();
+            assert!(s.validate().is_ok());
+            let og = s.outer_graph();
+            let a = og.nodes().next().unwrap();
+            // The read rides the fused host handle; members come back as
+            // embedded handles whose ids are the full path ids.
+            let walked: Vec<SubEdgeId> =
+                <OuterNode<'_> as EdgesOf<markers::sub::Subedges>>::subedges(&a)
+                    .map(|se| se.id())
+                    .collect();
+            assert_eq!(walked, [se1, se0]); // push-front: reverse insertion
+        }
+
+        #[test]
+        fn range_pre_pass_checks_host_liveness_before_leaf_bounds() {
+            let (mut s, _se0, _se1) = hier_intrusive_store();
+            assert!(s.validate().is_ok());
+            // The host component names no record while the leaf index looks
+            // in-bounds (0) — only the host check can catch this, and it
+            // must fire before any leaf-bound computation indexes the
+            // host's arena.
+            s.outer_node_arena[0].sub_sub_edge_arena[0].next_subedges =
+                Some(SubEdgeId(OuterNodeId(99), 0));
+            let msg = s.validate().unwrap_err();
+            assert!(
+                msg.contains(
+                    "arrow `sub.subedges`: `next_subedges` link of SubEdgeId(OuterNodeId(0), 0) \
+                     points at SubEdgeId(OuterNodeId(99), 0), which is not a live record"
+                ),
+                "{msg}"
+            );
+            assert!(!msg.contains("shared membership") && !msg.contains("repeats"), "{msg}");
+        }
+
+        #[test]
+        fn range_pre_pass_checks_embedded_leaf_bounds_within_the_host() {
+            let (mut s, _se0, _se1) = hier_intrusive_store();
+            assert!(s.validate().is_ok());
+            // In-bounds host, out-of-bounds leaf: the second half of the
+            // path-aware range check.
+            s.outer_node_arena[0].sub_sub_edge_arena[0].next_subedges =
+                Some(SubEdgeId(OuterNodeId(0), 99));
+            let msg = s.validate().unwrap_err();
+            assert!(
+                msg.contains(
+                    "arrow `sub.subedges`: `next_subedges` link of SubEdgeId(OuterNodeId(0), 0) \
+                     points at SubEdgeId(OuterNodeId(0), 99), which is not a live record"
+                ),
+                "{msg}"
+            );
+            assert!(!msg.contains("shared membership") && !msg.contains("repeats"), "{msg}");
+        }
+    }
+
+    mod relaxed {
+        use metagraph_exper::compose_pattern;
+        use metagraph_exper::implement;
+
+        compose_pattern! {
+            Relaxed {
+                instances:
+                    m: metagraph_exper::stdlib::Digraph,
+                    r: m2_fixtures::neg::RootMany;
+            }
+        }
+
+        // A store-level head: the root-sourced `r.cs` list keeps its head in
+        // a store field, exercising the pre-pass's store variant.
+        implement! {
+            crate::corrupt::relaxed::Relaxed as CorruptRootStore {
+                m.nodes:     arena,
+                m.out_edges: intrusive_list,
+                m.in_edges:  intrusive_list,
+                r.cs:        intrusive_list,
+            }
+        }
+
+        #[test]
+        fn range_pre_pass_reports_dead_store_head() {
+            let mut s = CorruptRootStore::new();
+            let a = s.add_node();
+            let b = s.add_node();
+            s.add_edge(a, b);
+            let c0 = s.add_c();
+            s.insert_cs(c0);
+            assert!(s.validate().is_ok());
+            s.first_cs = Some(CId(99));
+            let msg = s.validate().unwrap_err();
+            assert!(
+                msg.contains(
+                    "arrow `r.cs`: `first_cs` head of the store points at CId(99), \
+                     which is not a live record"
+                ),
+                "{msg}"
+            );
+            assert!(!msg.contains("shared membership") && !msg.contains("repeats"), "{msg}");
+        }
+    }
+}

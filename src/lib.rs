@@ -126,11 +126,28 @@
 //! declaring crate (renames honored).
 //!
 //! Every generated store has a `validate()` boundary running the
-//! canonical inventory: keyed maps check key existence, value-in-arena,
-//! and value-host agreement; list backings check endpoint ranges and the
-//! intrusive-ownership contract (the partition walk for primitive
-//! membership, determinant consistency for `by`-derived membership).
-//! M4's flush calls it unconditionally.
+//! canonical inventory — one authored `validate` clause per backing
+//! declaration, summoned in binding order:
+//!
+//! - `field`: endpoint-in-range over its contributed field.
+//! - `arena`: nothing — existence cannot dangle.
+//! - `intrusive_list`: the ownership contract — the partition walk for
+//!   primitive membership (shared membership distinguished from cycles in
+//!   the report), determinant consistency and coverage for `by`-derived
+//!   membership.
+//! - `hash_index`: key existence, value-in-arena, and value-host
+//!   agreement (an embedded-target map holds host-anchored path ids; a
+//!   value in-bounds in its own host's arena but filed under another host
+//!   fails the agreement check alone).
+//!
+//! Before each authored body, a uniform range pre-pass walks every
+//! contributed `Option<id>` field of that binding — heads and links, on
+//! records and at the store level — and checks each against the target
+//! class's arena, path-aware for host-anchored ids (the host component
+//! must name a live record before the leaf index is even compared). On
+//! damage the pre-pass reports every dead link it found and returns
+//! early: the authored walk never runs, so it may assume links in range
+//! and use `rec(x)` freely. M4's flush calls `validate()` unconditionally.
 //!
 //! Stores are append-only while being built; handles borrow the store,
 //! so the borrow checker freezes it once handles exist — handle identity

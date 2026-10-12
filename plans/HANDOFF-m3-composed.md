@@ -1,127 +1,51 @@
-# HANDOFF — M3 continuation: steps 6–9
+# HANDOFF — M3 continuation: steps 7–9
 
-**Status when written:** the fused steps-2–5 sequence is COMPLETE on
-`worktree-m3-implement` (worktree `.claude/worktrees/m3-implement`,
-branched at `9c3569c` = main). Tip `64de74a`; commits this stretch:
-`7b3202a` (prior handoff), `aab753f` (commit 3 — composed codegen
-data-driven over `backing!` declarations, see its message for the two
-recorded decisions and the two role-engine fixes), `64de74a` (commit 4 —
-fixed-table inspection, step-5 flat keyed test, plan ticks). Full
-workspace green: 33 suites incl. trybuild and the three new tests
-(`root_intrusive`, `flat_keyed`, the `impl_keyed_embedded_gap` compilefail
-pair). Steps 3–5 ticked in the plan; the milestone gate's fixed-table item
-ticked. Nothing merged; the user merges.
+**Status when written:** step 6 is COMPLETE on `worktree-m3-implement`
+(worktree `.claude/worktrees/m3-implement`, branched at `9c3569c` = main).
+Steps 2–5 were complete at tip `64de74a`; step 6 lands on top (see the
+commit message). Full workspace green: 33 suites incl. trybuild;
+`validate_failures` now runs 11 tests (was 6). Steps 3–6 ticked in the
+plan; the milestone gate's fixed-table item is ticked. Nothing merged;
+the user merges.
 
-**Scope:** steps 6–9 per `plans/milestone-3-backings-and-stdlib.md` (the
-plan is the contract; this file is the working state and the traps). A
-step-6 start was attempted and reverted (tree is clean at tip) — its
-design work is written out under step 6 below so it doesn't have to be
-re-derived.
+**Scope:** steps 7–9 per `plans/milestone-3-backings-and-stdlib.md` (the
+plan is the contract; this file is the working state and the traps).
 
 ---
 
-## What this stretch left behind
+## What step 6 left behind
 
-- `macros/src/roles.rs` — the role-substitution engine, now with
-  `walk_host()` on `RoleBinding`: the Walk's reserved `host` field at
-  embedded-target placements (the initializer a `Walk { .. }` literal
-  carries, and the anchor a raw `handle(x)` mints through; call-site
-  spans on both sides — only authored Walk FIELD names are mixed-site).
-  Two latent bugs fixed there (see traps 6–7): tuple-pattern binding and
-  the MapIter source scan. `FlatRoles` (flat) and `ComposedRoles`
-  (composed, in `codegen_composed.rs`) are the two bindings; read either
-  as the template for a new one.
-- `macros/src/codegen_composed.rs` — fully declaration-driven: field
-  contributions via the free fn `push_contribution` (naming formulas,
-  collision prefixing, the combined ctor rule, the uniform init rule),
-  hooks/read/lookup/iterate/advance from authored bodies, sums via
-  rewritten sibling iterate bodies (`sibling_iterate_expr`; the old
-  hand-inlined `sum_sibling_expr` is gone), per-arrow
-  `__validate_<inst>_<arrow>` methods with the uniform `Option<id>` range
-  pre-pass and early return, summoned from `validate()` in binding order.
-  Applicability checks are declaration-driven: phased (until step 8),
-  `CtorArg`/`OnAdd` orchestrator rule, One-cardinality-into-embedded
-  handle mint, declared `requires:` predicates (`direct_records` →
-  embedded self, `hosts_arena` → cross-host), validate-variant selection,
-  `by`-totality, and the keyed host-agreement gap (below). `rec_ref`
-  (store-token-parametrized record access) replaced `rec_ref_ts`/
-  `rec_ref_handle`; `rec_get`, `root_map_of`, and `ClassData.maps` are
-  gone — per-arrow registries (`field_of_arrow`, `map_of_arrow`) name
-  contributed fields instead.
-- `macros/src/codegen.rs` — flat codegen unchanged except its declaration
-  helpers are now `pub(crate)` and shared: `card_of_decl`,
-  `contributed_fields`, `on_clause`, `body_of`, `FieldInit`/`init_of`,
-  `scaffold_lets`.
-- Keyed decisions recorded: the **host-agreement gap** — `host_of(v) !=
-  owner` binds only where a self-side anchor of the host id type exists
-  (self record IS the host, or self shares the target's host); anywhere
-  else it is an implement!-time rejection quoting placement facts (folded
-  into the plan's Constraints section; pinned by
-  `tests/compilefail/impl_keyed_embedded_gap.*`). The **intrusive-at-
-  unfused-root relaxation** is emitted and driven by
-  `tests/root_intrusive.rs` (store-level head, self-less op, root-handle
-  read; the flat side was the r3 probe's).
-- `tests/fixtures` — three new patterns: `shapes::KeyedPlain` (flat
-  keyed, plain-self + store-level arrows; driven by
-  `tests/flat_keyed.rs`), `neg::AnchoredKey` (the gap fixture's key),
-  `neg::RootMany` (root-sourced many arrow; the relaxation driver).
-- The keyed live-key predicate (`__<inst>_<arrow>_key_live`, M4's pure
-  check form) is derived from the authored lookup body (`.is_some()`).
-- Arena iterators no longer emit the hand-rolled `size_hint` — the
-  advance body owns `next()` entirely, and nothing in the suites reads
-  size hints.
-
-## Step 6 — validate machinery + corruption fixtures
-
-Contract: the plan's "The validate contribution".
-
-- **Box 1 is already done** — the `__validate_<arrow>` convention (per
-  arrow, doc-hidden, summoned in binding order) landed with the port in
-  both codegens; tick it first.
-- **Pre-pass fixtures (the new work).** The existing
-  `tests/validate_failures.rs` covers ghost keys, value-in-arena,
-  host-agreement, shared membership, cycles, and the by-contradiction +
-  coverage pair — all through public ops. What no fixture pins is the
-  **uniform range pre-pass and its early return**: the ops cannot put a
-  link out of range (hooks only ever insert live ids), so corrupt
-  directly. The generated records are private to the implement module —
-  put the `implement!` and the tests in ONE module inside
-  `validate_failures.rs` (`mod corrupt { use metagraph_exper::implement;
-  implement! { ... } #[test] fn ... }`) and the field damage is legal:
-  `s.inner_edge_arena[0].next_elems = Some(InnerEdgeId(99));`.
-  Pin both the message and the early return:
-  - message: `arrow `inst.arrow`: `next_elems` link of InnerEdgeId(0)
-    points at InnerEdgeId(99), which is not a live record` (the pre-pass
-    names the field, the owning record's id, and the dead target; the
-    head/store variants say `head` / `head of the store`);
-  - early return: assert the SAME report carries no `shared membership` /
-    `repeats` text — the authored partition walks never ran. This is the
-    deliberate pin of the joint-report change the handoff-before-last
-    flagged.
-- **The intrusive-into-embedded emission has no driver yet.** A Hierarchy
-  variant binding `sub.subedges: intrusive_list` (instead of `arena`)
-  drives it: path-id links, the nested `rec(id)` walk, the non-raw
-  `handle(id)` split (`{host: id.0, id: id.1}`), and `records(B)` as the
-  embedded host×leaf enumeration. Walk it through the fused handle
-  (`<OuterNode<'_> as EdgesOf<markers::sub::Subedges>>::subedges(&h)`)
-  beside the corruption tests. It also gives the **path-aware pre-pass
-  fixture**: corrupt a link's host component
-  (`s.sub_sub_edge_arena[0].next_sub = Some(SubEdgeId(OuterNodeId(99),
-  0))`) — host liveness must fire before leaf bounds are even computed
-  (the test's out-of-range-host case is otherwise in-bounds-looking).
-  NOTE: that Walk carries the reserved `host` field unread (the intrusive
-  recipe takes the host from the path id — r4-advance pinned the field as
-  reserved, not always read), so the field triggers a dead_code warning
-  in the test crate; harmless, but don't "fix" it by dropping the field.
-- **Field-name formula for damage:** `link_stem` strips one trailing
-  `_edges` — `out_edges` → `first_out`/`next_out`, `elems` →
-  `first_elems`/`next_elems`, `subedges` → `first_sub`/`next_sub`
-  (`subedges` → stem `sub` — easy to misguess; check with MG_DEBUG).
-- **Doc-contract box:** expand the canonical-inventory paragraph in
-  `src/lib.rs` crate docs (currently one paragraph predating the
-  pre-pass) to state the inventory per backing class and the pre-pass +
-  early-return semantics — the documented contract M4's flush runs.
-- Then tick box 1 and the corruption-fixture box (and the doc box).
+- `tests/validate_failures.rs` gained `mod corrupt` — corruption below
+  the op boundary, the only driver of the uniform range pre-pass and its
+  early return. **One `implement!` per submodule**: two `implement!`s in
+  one module collide on shared class names (`OuterNodeId`, …) — the class
+  items emit per module. Three submodules:
+  - `corrupt::refinement` — `CorruptRefStore` (the Refinement
+    composition); damages `inner_edge_arena[0].next_elems` and pins the
+    link message + the early return (no `shared membership`/`repeats`
+    text in the same report).
+  - `corrupt::hierarchy` — `HierIntrusiveStore`: the same
+    `hier_comp::Hierarchy` composition with `sub.subedges:
+    intrusive_list` instead of `arena`. This is the
+    **intrusive-into-embedded driver** the port had never run: path-id
+    links, records nested in the host's arena, the walk through the
+    fused handle (`<OuterNode<'_> as
+    EdgesOf<markers::sub::Subedges>>::subedges(&a)`), plus the
+    path-aware pre-pass fixtures (dead host component with an
+    in-bounds-looking leaf; in-bounds host with a dead leaf). The
+    emission worked unmodified — no engine fixes this step.
+  - `corrupt::relaxed` — `CorruptRootStore` (own `Relaxed`
+    composition over `neg::RootMany`); damages the store-level head
+    `first_cs` and pins the `head of the store` message variant.
+- **Field-name correction to the step-6 design note**: `subedges`' link
+  field is `next_subedges`, not `next_sub` — `link_stem` strips one
+  trailing `_edges` and `subedges` has no underscore, so the stem is the
+  full arrow name. Same for the head: `first_subedges`.
+- `src/lib.rs` crate docs: the canonical-inventory paragraph is now the
+  documented contract — per-class inventory (`field`/`arena`/
+  `intrusive_list`/`hash_index`) plus the pre-pass's scope (heads and
+  links, record-level and store-level, path-aware host-anchored ids) and
+  its report-everything-then-return-early semantics.
 
 ## Step 7 — constraint predicates + trybuild error tests
 
@@ -131,14 +55,14 @@ table.
 - **Predicate evaluation with the pinned templates.** Cardinality exists
   (both codegens, byte-pinned). To add: `existence` (a primitive `many`
   arrow bound to a `membership: existence` backing is rejected — today
-  nothing reads `Clause::MembershipExistence`; also the duplicate case,
-  a second existence binding on one target naming both arrows),
+  nothing reads `Clause::MembershipExistence`; also the duplicate case, a
+  second existence binding on one target naming both arrows),
   `hosts_arena` and `direct_records` upgraded from commit 3's
   plain-worded rejections to the table's template style (error names the
   arrow, the computed placement facts — B's arena location, A's self
   case, endpoint placements — and quotes the backing's tokens). The
-  evaluation hooks are already there in codegen_composed's applicability
-  loop; flat has the orchestrator check only — bring flat up to parity.
+  evaluation hooks are already in codegen_composed's applicability loop;
+  flat has the orchestrator check only — bring flat up to parity.
 - **`ctor_arg`/`on_add` orchestrator-rule rejection**: exists in both
   codegens; the trybuild fixture (`impl_unfused_root_field`) is composed
   — a flat fixture is owed.
@@ -203,7 +127,7 @@ table.
 ## Verification commands
 
 - `cargo test --workspace` — must be fully green at every commit (33
-  suites at tip `64de74a`; grows with step 6's fixtures).
+  suites at the step-6 tip; `validate_failures` runs 11 tests).
 - `cargo test -p metagraph-exper --test koenigsberg` — byte-sensitive
   traversal-order assertions.
 - `cargo test -p metagraph-exper --test validate_failures` — the pinned
@@ -254,3 +178,16 @@ table.
    -Zmacro-backtrace` names the expansion the bad token lives in; from
    there, temporary `eprintln!`s inside `rw_for` (bindings firing per
    loop) localize it in one run. Remove the eprintlns after.
+9. **Two `implement!`s in one module collide on class names** (new this
+   stretch): each implement emits its classes' items (ids, Data, handle
+   types, iterators) into the implementing module, un-prefixed by store
+   name. Two compositions that share entity names (`OuterNode`, …) in
+   one module → E0428/E0119 floods. One `implement!` per module; the
+   corruption tests sit in the same submodule as their declaration
+   (record fields are private to it).
+10. **Guess field names from the naming formula, not the arrow's
+    spelling** (new this stretch): `link_stem` strips one trailing
+    `_edges` — `elems → next_elems`, `out_edges → next_out`, but
+    `subedges → next_subedges` (no underscore; the stem is the whole
+    name). Verify with MG_DEBUG before writing damage against generated
+    fields.
