@@ -443,8 +443,8 @@ inserts, a staging panic like a foreign ref, deterministically
 detectable where the op is submitted and never a flush error. Uniqueness
 thereafter holds by construction. How entries fare across removal and
 flush — the key side as a reference, the target side as membership,
-maps carried and never rebuilt — is recorded with M4's cascade policy
-as completion points (M4, Removal).
+maps carried and never rebuilt — is pinned in M4's cascade policy
+(M4, Removal; probe-verified, /tmp/m4-probe-keyed-carry).
 
 Runtime checks attach to the **`validate()` boundary** M1 establishes:
 key existence (every key id names a real record) and value-in-arena

@@ -18,8 +18,10 @@ and nested staging under provisional hosts are probe-verified
 in each). `set_` re-pointing of a `by`-derived membership — the
 delete-hook growth, effective-endpoint dangler detection, replay
 against the rebuilt skeleton — is likewise probe-verified
-(/tmp/m4-probe-set-unlink). What remains uncompiled: write traits as
-generated code, keyed maps across flush, and induction.
+(/tmp/m4-probe-set-unlink), as is the keyed-map flush policy
+(carry, composed remap, cascade split, two-flush re-keying;
+/tmp/m4-probe-keyed-carry). What remains uncompiled: write traits as
+generated code and induction.
 
 ## Premises (what M1–M3 established)
 
@@ -264,7 +266,11 @@ continue with the new metagraph. Two entry points support this:
   removed-path violation names both sides — the staged ops' own
   indices, ascending, and the removal op's index — and a `remove`
   staged under a doomed path counts among them ("remove of a removed
-  element" in nested clothing). Violation lists are deterministically
+  element" in nested clothing). Staged keyed inserts get their own
+  step-2 coherence checks in old-id space, attributed to the insert
+  op: a target removed by the change set is a dangling endpoint, and
+  a host/target pair that will not agree post-flush is rejected
+  before compaction. Violation lists are deterministically
   ordered (step order, then op index; never `HashMap` iteration order
   — anything derived from a carried map is collected and sorted before
   formatting), so error text is stable across runs.
@@ -500,16 +506,33 @@ refs already handed out, because nothing is applied until flush.
   listing the danglers — the change set must remove dependents
   explicitly. One exception: a nested store embedded in a removed record
   goes with the record, contents and all. Keyed maps follow the same
-  field-vs-membership split, as recorded intent to be pinned when M4 is
-  implemented (spike 7 was keyless): an entry's *key* behaves as a
+  field-vs-membership split, probe-verified
+  (/tmp/m4-probe-keyed-carry): an entry's *key* behaves as a
   reference — removing a key record with live entries is a `FlushError`
-  naming them; remove the dependent target explicitly — while its
+  naming them (sorted by (host, key), attributed to the removal op);
+  remove the dependent target explicitly — while its
   *target* behaves as membership — removing a target record clears the
   entries pointing at it, as list membership follows a removed record.
+  *Live* means surviving the change set, symmetrically in both
+  directions: entries under a host removed in the same change set are
+  cascade-covered (their keys do not keep the key record alive — there
+  is no per-entry removal op to cure them with), while a *staged
+  insert* keyed by the removed key record counts as live (the change
+  set names the key from a new place) and forces the error.
   Flush accordingly carries keyed maps as state, never rebuilding them
   (a keyed arrow need not have a companion field to recompute from):
-  entries copy with kept records, remap through the old→new id maps,
-  and drop with removed targets.
+  entries copy with kept records and remap — keys through the key
+  arena's old→new map, and path-id targets through the *composition*
+  of host and per-host sub maps (no single map translates a path id);
+  the composition applies at two sites, carry and staged-insert
+  replay. Two staging-time pins ride with this: a keyed insert's
+  host and target must be `Existing` (a `Pending` host can never hold
+  a path-id target that would agree with it — the mismatch is
+  unrepresentable, so the staging call panics, symmetric with
+  removal-of-`Pending`), and the duplicate-key check has two arms —
+  existing entry or already-staged insert under the same host. Re-
+  keying is deliberately two flushes (remove the target, then insert
+  the new entry); the single-flush equivalent panics at staging.
 - Tombstones are rejected: they would complicate every backing contract
   (intrusive lists, size hints, CSR ranges) for a benefit
   rebuild-without already provides.
@@ -599,7 +622,9 @@ refs already handed out, because nothing is applied until flush.
    constructor as a builder extension over the generated primitives and
    the id-based read view.
 6. Removal with compaction and the id-remap report; cascade-policy tests
-   (dangling removals rejected, nested stores dropped with their record).
+   (dangling removals rejected, nested stores dropped with their record;
+   the keyed cascade split, survivors-only liveness, and two-flush
+   re-keying per the probe — /tmp/m4-probe-keyed-carry).
 
 ## Risks
 
