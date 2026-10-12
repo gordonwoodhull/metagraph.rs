@@ -974,7 +974,7 @@ token-routing paragraph (declaring-crate resolver).
 Contract: the declarations, the placement rules, the premise table.
 - [x] `field`: `on`/`ctor_arg`/`read`/`validate` wired to the existing
       codegen shapes; the `ctor_arg` unfused-root rejection emitted
-- [ ] `arena`: `membership: existence`, `iter`/`iterate`/`advance`
+- [x] `arena`: `membership: existence`, `iter`/`iterate`/`advance`
       with the reserved iterator fields, the `hosts_arena` predicate
       wired
 - [x] delete the fixed backing table from the macros crate
