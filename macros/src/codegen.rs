@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use proc_macro2::{Ident as Ident2, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens};
 
-use crate::backing::{formula_name, BackingCard, BackingDecl, Clause, ContribField, NameFormula, OnTarget, ValidateVariant};
+use crate::backing::{formula_name, BackingCard, BackingDecl, Clause, ContribField, NameFormula, OnTarget, PhaseLabel, ValidateVariant};
 use crate::grammar::{
     arena_fld, data_ty, id_ty, iter_ty, link_stem, marker_ty, path_tokens, snake, Binding,
     Cardinality, RootMeta,
@@ -83,13 +83,23 @@ impl FlatRoles {
         arrow: &crate::grammar::ArrowDecl,
         root_self: bool,
         tgt_handle: Ident2,
+        store_overrides: &HashMap<(String, String), Ident2>,
     ) -> Self {
         let id_a = id_ty(&arrow.source);
         let id_b = id_ty(&arrow.target);
         let id_k = arrow.key.as_ref().map(id_ty);
         let renames = contributed_fields(decl)
             .into_iter()
-            .map(|f| (f.logical.to_string(), formula_name(&f, f.formula, &arrow.name, &link_stem(&arrow.name))))
+            .map(|f| {
+                // Store-level contributions disambiguated per arrow when two
+                // bindings emit the same store field (the pinned "bare when
+                // unambiguous" rule); record fields keep the formula.
+                let emitted = store_overrides
+                    .get(&(arrow.name.to_string(), f.logical.to_string()))
+                    .cloned()
+                    .unwrap_or_else(|| formula_name(&f, f.formula, &arrow.name, &link_stem(&arrow.name)));
+                (f.logical.to_string(), emitted)
+            })
             .collect();
         let walk_fields = decl
             .clause(|c| matches!(c, Clause::Iter { .. }))
@@ -288,6 +298,20 @@ pub(crate) fn contributed_fields(decl: &BackingDecl) -> impl Iterator<Item = &Co
     .flatten()
 }
 
+/// Every `on <target>` clause of a declaration as (label, fields) pairs —
+/// `on store` may repeat per label, so collection sees them all.
+fn on_clauses<'a>(decl: &'a BackingDecl, target: OnTarget) -> Vec<(Option<PhaseLabel>, &'a [ContribField])> {
+    decl.clauses
+        .iter()
+        .filter_map(|c| match c {
+            Clause::On { target: t, label, fields, .. } if *t == target => {
+                Some((*label, fields.as_slice()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn on_clause<'a>(decl: &'a BackingDecl, target: OnTarget) -> Option<&'a Clause> {
     decl.clause(|c| matches!(c, Clause::On { target: t, .. } if *t == target))
 }
@@ -370,6 +394,10 @@ struct CollectedField {
     backing_name: Ident2,
     /// For the range pre-pass: the field's id type is `Option<id>`.
     option_id: bool,
+    /// Phase attribution for store-level contributions: `on store build`
+    /// fields are typed per phase (released at the type level on Frozen);
+    /// `on store frozen` and unlabeled fields exist in all phases.
+    phase: Option<PhaseLabel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -529,15 +557,19 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     for info in &infos {
         let Some(d) = info.backing else { continue };
         let named = info.decl.name.to_string();
-        if d.is_phased()
-            || d.has(|c| matches!(c, Clause::Compact { .. }))
-            || d.clauses.iter().any(|c| matches!(c, Clause::On { label: Some(_), .. }))
-        {
+        // Phased backings (csr): the entity-arrow / unfused-root rejection. A
+        // phased backing maintains membership by insert hooks, so it cannot
+        // bind its target's entity arrow — mechanically, `hosts_arena(self,
+        // B)` must not hold. Flat stores host every arena at the store, so
+        // the predicate's only flat arm is the unfused-root self (the root
+        // owns no `a` for `on_add`/`on_insert` either way).
+        if d.is_phased() && is_root(&info.decl.source) {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!(
-                    "backing `{}` (arrow `{named}`) is phased (`phase:`/`compact`/labeled `on store` clauses); phased backings and the type-state store land with M3 step 8",
-                    d.name
+                    "backing `{d_name}` (arrow `{named}`) is phased, but `{named}` is sourced at the pattern's root-marked entity `{src}` — the entity-arrow/unfused-root case: the root owns no record (it *is* the store), so there is no self id for `on_add`/`on_insert`, and an arrow whose B arena is root-level under an unfused root is its target's entity arrow, which a hook-maintained backing cannot declare (bind `arena` — existence is `add_<B>`'s own write path — or source the arrow at an element)",
+                    d_name = d.name,
+                    src = info.decl.source,
                 ),
             ));
         }
@@ -638,6 +670,42 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     }
 
     // ---- collect contributed fields (records + store) ----
+    // Pre-scan: store-level contribution name usage. The pinned naming rule
+    // ("the declared stem, bare when unambiguous"): when two bindings emit
+    // the same store field, all colliding fields rename per arrow (the
+    // suffix formula, `<arrow>_<name>`). An `on A` contribution at an
+    // unfused-root self folds to the store, so it joins the scan.
+    let mut store_name_users: HashMap<String, Vec<(Ident2, Ident2)>> = HashMap::new();
+    for info in &infos {
+        let Some(d) = info.backing else { continue };
+        let a = info.decl;
+        for target in [OnTarget::A, OnTarget::Store] {
+            if target == OnTarget::A && !is_root(&a.source) {
+                continue;
+            }
+            for (_label, fields) in on_clauses(d, target) {
+                for f in fields {
+                    let emitted = formula_name(f, f.formula, &a.name, &link_stem(&a.name));
+                    store_name_users
+                        .entry(emitted.to_string())
+                        .or_default()
+                        .push((a.name.clone(), f.logical.clone()));
+                }
+            }
+        }
+    }
+    let mut store_overrides: HashMap<(String, String), Ident2> = HashMap::new();
+    for users in store_name_users.values() {
+        if users.len() > 1 {
+            for (arrow, logical) in users {
+                let disambiguated = Ident2::new(
+                    &format!("{}_{}", arrow, logical),
+                    logical.span(),
+                );
+                store_overrides.insert((arrow.to_string(), logical.to_string()), disambiguated);
+            }
+        }
+    }
     let mut rec_fields: HashMap<String, Vec<CollectedField>> =
         elements.iter().map(|e| (e.name.to_string(), Vec::new())).collect();
     let mut store_fields: Vec<CollectedField> = Vec::new();
@@ -647,34 +715,50 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         for (target, owner_name, on_self_record) in [
             (OnTarget::A, Some(&a.source), true),
             (OnTarget::B, Some(&a.target), false),
+            (OnTarget::Store, None, false),
         ] {
-            let Some(Clause::On { fields, .. }) = on_clause(d, target) else { continue };
-            for f in fields {
-                let emitted = formula_name(f, f.formula, &a.name, &link_stem(&a.name));
-                let ty = roles::rewrite_ty(&f.ty.to_token_stream(), &FlatRoles::new(d, a, false, a.target.clone()));
-                let init = init_of(d, on_self_record && d.has(|c| matches!(c, Clause::CtorArg { .. })), f, &a.name)?;
-                // A field contributed at the root-marked self folds to the
-                // store (the unfused root's record is the store).
-                let owner = match owner_name {
-                    Some(name) if !is_root(name) => Some(name.clone()),
-                    _ => None,
-                };
-                let cf = CollectedField {
-                    option_id: f.ty.to_token_stream().to_string().replace(' ', "").starts_with("Option<"),
-                    emitted,
-                    ty,
-                    init,
-                    owner,
-                    arrow: a.name.clone(),
-                    backing_name: d.name.clone(),
-                };
-                match &cf.owner {
-                    Some(o) => rec_fields.get_mut(&o.to_string()).unwrap().push(cf),
-                    None => store_fields.push(cf),
+            for (label, fields) in on_clauses(d, target) {
+                for f in fields {
+                    let mut emitted = formula_name(f, f.formula, &a.name, &link_stem(&a.name));
+                    if let Some(r) = store_overrides.get(&(a.name.to_string(), f.logical.to_string())) {
+                        emitted = r.clone();
+                    }
+                    let ty = roles::rewrite_ty(&f.ty.to_token_stream(), &FlatRoles::new(d, a, false, a.target.clone(), &store_overrides));
+                    let init = init_of(d, on_self_record && d.has(|c| matches!(c, Clause::CtorArg { .. })), f, &a.name)?;
+                    // A field contributed at the root-marked self folds to the
+                    // store (the unfused root's record is the store).
+                    let owner = match owner_name {
+                        Some(name) if !is_root(name) => Some(name.clone()),
+                        _ => None,
+                    };
+                    // Phase attribution rides only on explicit `on store`
+                    // contributions; record fields and unlabeled store fields
+                    // exist in all phases.
+                    let phase = if target == OnTarget::Store { label } else { None };
+                    let cf = CollectedField {
+                        option_id: f.ty.to_token_stream().to_string().replace(' ', "").starts_with("Option<"),
+                        emitted,
+                        ty,
+                        init,
+                        owner,
+                        arrow: a.name.clone(),
+                        backing_name: d.name.clone(),
+                        phase,
+                    };
+                    match &cf.owner {
+                        Some(o) => rec_fields.get_mut(&o.to_string()).unwrap().push(cf),
+                        None => store_fields.push(cf),
+                    }
                 }
             }
         }
     }
+
+    // The store binds a phased backing (csr) when any bound declaration
+    // carries `phase:` — the type-state emission below keys on this.
+    let phased = infos
+        .iter()
+        .any(|i| i.backing.map(|d| d.is_phased()).unwrap_or(false));
 
     let mut out = TokenStream2::new();
 
@@ -743,6 +827,18 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 FieldInit::New => record_fields.extend(quote!(#n: ::std::default::Default::default(),)),
             }
         }
+        // `on_add` hooks fired by this constructor: a backing's per-add
+        // growth of store-level per-self state (csr's bucket push) runs
+        // before the insert hooks below, so an insert hook that reads the
+        // grown state for the new record sees it.
+        let mut onadd_calls = TokenStream2::new();
+        for info in &infos {
+            let Some(d) = info.backing else { continue };
+            if info.decl.source == e.name && d.has(|c| matches!(c, Clause::OnAdd { .. })) {
+                let hook = format_ident!("__onadd_{}", info.decl.name);
+                onadd_calls.extend(quote!(self.#hook(id);));
+            }
+        }
         // `by`-derived arrows whose determining `one` arrow originates here:
         // the new record becomes that arrow's first member, inserted by the
         // arrow's named hook reading the determining argument.
@@ -771,6 +867,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             pub fn #add_name(&mut self, #(#arg_defs)*) -> #idt {
                 let id = #idt(self.#arena.len() as u32);
                 self.#arena.push(#dat { #record_fields });
+                #onadd_calls
                 #hook_calls
                 id
             }
@@ -794,7 +891,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             let ida = id_ty(&a.source);
             let idb = id_ty(&a.target);
             let idk = a.key.as_ref().map(id_ty);
-            let mut roles = FlatRoles::new(d, a, root_self, a.target.clone());
+            let mut roles = FlatRoles::new(d, a, root_self, a.target.clone(), &store_overrides);
             if root_self {
                 roles = roles.with_a(quote!(()));
             }
@@ -888,6 +985,49 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 }
             });
         }
+
+        // `on_add` hook: per-add growth of store-level per-self state
+        // (csr's bucket push). Fired from `add_<A>` orchestration (the ctor
+        // loop above); applicability guaranteed an `add_<A>`-orchestrated
+        // self (an unfused root was rejected).
+        if let Some(body) = body_of(d, |c| matches!(c, Clause::OnAdd { .. })) {
+            let d_name = &d.name;
+            let hook = format_ident!("__onadd_{}", a.name);
+            let ida = id_ty(&a.source);
+            let a_mixed = Ident2::new("a", Span::mixed_site());
+            // The self is never an unfused root here (applicability rejected
+            // it — on_add is constructor-orchestrated), so `a` binds the
+            // real id; the body's mentions re-emit mixed-site and pair.
+            let roles = FlatRoles::new(d, a, false, a.target.clone(), &store_overrides);
+            let body_rw = roles::rewrite(body, &roles);
+            let scaffolds = scaffold_lets(body, &label, None, false);
+            hook_impls.extend(quote! {
+                #[doc(hidden)]
+                #[doc = concat!("on-add hook of arrow `", stringify!(#arrow_doc_name), "` (backing `", stringify!(#d_name), "`): per-add growth of store-level per-self state.")]
+                fn #hook(&mut self, #a_mixed: #ida) {
+                    #scaffolds
+                    #body_rw
+                }
+            });
+        }
+
+        // `compact` hook (phased backings only): the compaction body runs on
+        // the build-phase store at the single `freeze()`, in binding order.
+        if let Some(body) = body_of(d, |c| matches!(c, Clause::Compact { .. })) {
+            let d_name = &d.name;
+            let hook = format_ident!("__compact_{}", a.name);
+            let roles = FlatRoles::new(d, a, root_self, a.target.clone(), &store_overrides);
+            let body_rw = roles::rewrite(body, &roles);
+            let scaffolds = scaffold_lets(body, &label, None, false);
+            hook_impls.extend(quote! {
+                #[doc(hidden)]
+                #[doc = concat!("compact contribution of arrow `", stringify!(#arrow_doc_name), "` (backing `", stringify!(#d_name), "`): runs at the single `freeze()`.")]
+                fn #hook(&mut self) {
+                    #scaffolds
+                    #body_rw
+                }
+            });
+        }
     }
 
     // ---- validate methods (the round-4 convention) ----
@@ -924,10 +1064,16 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             }
             _ => ValidateVariant::Plain,
         };
-        let Some(vbody) = d.clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == wanted_variant)).map(|c| match c {
-            Clause::Validate { body, .. } => body,
-            _ => unreachable!(),
-        }) else {
+        // A `Plain` body (membership-agnostic — csr's offsets check) serves
+        // any membership kind; the wanted variant wins when authored.
+        let Some(vbody) = d
+            .clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == wanted_variant))
+            .or_else(|| d.clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == ValidateVariant::Plain)))
+            .map(|c| match c {
+                Clause::Validate { body, .. } => body,
+                _ => unreachable!(),
+            })
+        else {
             continue; // arena: nothing — existence cannot dangle
         };
         let det_label = a.by.as_ref().map(|b| b.to_string()).unwrap_or_default();
@@ -951,7 +1097,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     &link_stem(&det.name),
                 )
             });
-        let mut roles = FlatRoles::new(d, a, is_root(&a.source), a.target.clone()).with_det(
+        let mut roles = FlatRoles::new(d, a, is_root(&a.source), a.target.clone(), &store_overrides).with_det(
             det_field.unwrap_or_else(|| a.name.clone()),
         );
         if is_root(&a.source) {
@@ -1046,6 +1192,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let dat = data_ty(&e.name);
         quote!(#f: ::std::vec::Vec<#dat>,)
     });
+    let phase_trait = format_ident!("__{}Phases", store);
     let store_contrib = store_fields.iter().map(|f| {
         let n = &f.emitted;
         let ty = &f.ty;
@@ -1053,7 +1200,18 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             "store-level contribution of arrow `{}` (backing `{}`)",
             f.arrow, f.backing_name
         );
-        quote!(#[doc = #doc] #n: #ty,)
+        // Phase attribution: `on store build` fields are typed through the
+        // phase trait — `()` on Frozen — so a forgetful freeze has nothing
+        // stale to carry and the accumulators are unwritable on the frozen
+        // type; `on store frozen` and unlabeled fields exist in all phases
+        // with their natural type.
+        match f.phase {
+            Some(PhaseLabel::Build) => {
+                let assoc = format_ident!("__build_{}", f.emitted);
+                quote!(#[doc = #doc] #n: <P as #phase_trait>::#assoc,)
+            }
+            _ => quote!(#[doc = #doc] #n: #ty,),
+        }
     });
     let count_fns = elements.iter().map(|e| {
         let ent_doc_name = &e.name;
@@ -1066,29 +1224,105 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             }
         }
     });
+    // The phase trait: one associated type per `on store build` field. The
+    // Build impl types them naturally; Frozen types them `()` — the
+    // type-level release of the accumulators. Private to the module (the
+    // struct's fields are private, so no private-in-public exposure).
+    let phase_assocs: Vec<(Ident2, TokenStream2)> = store_fields
+        .iter()
+        .filter(|f| f.phase == Some(PhaseLabel::Build))
+        .map(|f| (format_ident!("__build_{}", f.emitted), f.ty.clone()))
+        .collect();
+    let assoc_names: Vec<&Ident2> = phase_assocs.iter().map(|(n, _)| n).collect();
+    let assoc_tys: Vec<&TokenStream2> = phase_assocs.iter().map(|(_, t)| t).collect();
+    let phase_trait_def = quote! {
+        #[doc(hidden)]
+        pub trait #phase_trait {
+            #(type #assoc_names;)*
+        }
+        impl #phase_trait for Build {
+            #(type #assoc_names = #assoc_tys;)*
+        }
+        impl #phase_trait for Frozen {
+            #(type #assoc_names = ();)*
+        }
+    };
+    // freeze()/finish() (phased): compact every phased backing in binding
+    // order at the single boundary, then rebuild the store with the phase
+    // marker swapped — build-attributed fields reset (their Frozen type is
+    // `()`, and the compact body already drained them), everything else
+    // moved over.
+    let compact_hooks: Vec<Ident2> = validate_order
+        .iter()
+        .filter_map(|key| {
+            let info = infos.iter().find(|i| i.decl.name.to_string() == *key)?;
+            let d = info.backing?;
+            d.is_phased().then(|| format_ident!("__compact_{}", info.decl.name))
+        })
+        .collect();
+    let freeze_fields = elements.iter().map(|e| {
+        let n = arena_fld(&e.name);
+        quote!(#n: self.#n,)
+    }).chain(store_fields.iter().map(|f| {
+        let n = &f.emitted;
+        match f.phase {
+            Some(PhaseLabel::Build) => quote!(#n: ::std::default::Default::default(),),
+            _ => quote!(#n: self.#n,),
+        }
+    }));
+    let freeze_finish = quote! {
+        #[doc = "The single builder boundary: compact the phased backings in binding order, consume the build-phase store, and return the frozen store. Insert-after-freeze is unrepresentable — freeze consumes."]
+        pub fn freeze(mut self) -> #store<Frozen> {
+            #(self.#compact_hooks();)*
+            #store {
+                #(#freeze_fields)*
+                _phase: ::core::marker::PhantomData,
+            }
+        }
 
+        #[doc = "Freeze, then validate — M4's flush ordering: compaction (flush step 6) precedes validation (step 7)."]
+        pub fn finish(self) -> ::core::result::Result<#store<Frozen>, ::std::string::String> {
+            let frozen = self.freeze();
+            frozen.validate()?;
+            ::core::result::Result::Ok(frozen)
+        }
+    };
+    // Debug field lists (phased manual impls; `_phase` is skipped, as derive
+    // would print it but nothing pins it).
+    let debug_names: Vec<Ident2> = elements
+        .iter()
+        .map(|e| arena_fld(&e.name))
+        .chain(store_fields.iter().map(|f| f.emitted.clone()))
+        .collect();
+    let debug_fields = &debug_names;
     // The builder's read view: id-based getters derived from the authored
     // access protocols — one field-read getter per bound `one` arrow (named
     // after the arrow), one keyed lookup per keyed arrow. Pattern-level
     // constructor logic (induction, dedup) is user code over this view; the
-    // getter names are contract.
+    // getter names are contract. On a phased store the full view is Frozen;
+    // the Build phase carries the non-phased bindings' getters only (a
+    // phased backing contributes no build-phase reads — its store-level
+    // state is pre-compaction by construction).
     let mut read_view = TokenStream2::new();
+    let mut read_view_build = TokenStream2::new();
     for info in &infos {
         let Some(d) = info.backing else { continue };
         let a = info.decl;
         let arrow_doc = &a.name;
         let root_self = is_root(&a.source);
+        let is_phased_binding = d.is_phased();
+        let mut view = TokenStream2::new();
         match card_of_decl(d) {
             Cardinality::One => {
                 let Some(body) = body_of(d, |c| matches!(c, Clause::Read { .. })) else { continue };
                 let getter = &a.name;
                 let sid = id_ty(&a.source);
                 let tid = id_ty(&a.target);
-                let roles = FlatRoles::new(d, a, root_self, a.target.clone())
+                let roles = FlatRoles::new(d, a, root_self, a.target.clone(), &store_overrides)
                     .at(quote!(self))
                     .with_a(quote!(self_id));
                 let body_rw = roles::rewrite(body, &roles);
-                read_view.extend(quote! {
+                view.extend(quote! {
                     #[doc = concat!("Builder read view: the `", stringify!(#arrow_doc), "` field of `self_id`.")]
                     pub fn #getter(&self, self_id: #sid) -> #tid {
                         #body_rw
@@ -1100,13 +1334,13 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 let getter = format_ident!("{}_by_key", a.name);
                 let kid = id_ty(a.key.as_ref().expect("keyed arrows bind a key sort"));
                 let tid = id_ty(&a.target);
-                let roles = FlatRoles::new(d, a, root_self, a.target.clone())
+                let roles = FlatRoles::new(d, a, root_self, a.target.clone(), &store_overrides)
                     .at(quote!(self))
                     .with_a(quote!(self_id))
                     .with_k(quote!(key));
                 let body_rw = roles::rewrite(body, &roles);
                 if root_self {
-                    read_view.extend(quote! {
+                    view.extend(quote! {
                         #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (root-sourced; no self id).")]
                         pub fn #getter(&self, key: #kid) -> ::core::option::Option<#tid> {
                             #body_rw
@@ -1114,7 +1348,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     });
                 } else {
                     let sid = id_ty(&a.source);
-                    read_view.extend(quote! {
+                    view.extend(quote! {
                         #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object.")]
                         pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#tid> {
                             #body_rw
@@ -1123,6 +1357,10 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 }
             }
             _ => {}
+        }
+        read_view.extend(view.clone());
+        if !is_phased_binding {
+            read_view_build.extend(view);
         }
     }
     let root_snake = Ident2::new(&snake(&root_entity.name.to_string()), root_entity.name.span());
@@ -1133,57 +1371,161 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         .last()
         .map(|s| s.ident.to_string())
         .unwrap_or_default();
-    out.extend(quote! {
-        #[doc = concat!("Store generated by `implement!` for pattern `", #store_pattern_name, "`.")]
-        #[derive(Default, Debug)]
-        pub struct #store {
-            #(#arena_fields)*
-            #(#store_contrib)*
+    // The store type as handles and iterators hold it: bare when unphased
+    // (M1 shape); `#store<Frozen>` when phased — handles exist only for the
+    // frozen phase.
+    let store_ref: TokenStream2 = if phased { quote!(#store<Frozen>) } else { quote!(#store) };
+    let root_accessor = quote! {
+        #[doc = concat!("The root handle: the \"object\" view of this store (root entity `", stringify!(#root_handle), "`).")]
+        pub fn #root_snake(&self) -> #root_handle<'_> {
+            #root_handle { store: self }
         }
+    };
+    let validate_method = quote! {
+        #[doc = "Structural validation: the canonical runtime inventory, one authored contribution per bound backing (key existence, value-in-arena, value-host agreement for keyed maps; endpoint ranges and the intrusive-ownership contract for lists — the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
+        pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
+            let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
+            #validate_calls
+            if errs.is_empty() {
+                ::core::result::Result::Ok(())
+            } else {
+                ::core::result::Result::Err(errs.join("; "))
+            }
+        }
+    };
+    if phased {
+        // Type-state store (spike 6 / the mixed-phase probe): ONE store type
+        // parameterized by a phase marker, emitted only when a phased
+        // backing is bound. `on store build` fields are typed through the
+        // phase trait — `()` on Frozen — so a forgetful freeze has nothing
+        // stale to carry and the accumulators are unwritable on the frozen
+        // type. Non-phased stores keep the M1 shape (their own builder), so
+        // the M1/M2 surfaces are unchanged.
+        let arena_field_inits = elements.iter().map(|e| {
+            let f = arena_fld(&e.name);
+            quote!(#f: ::std::default::Default::default(),)
+        });
+        let store_field_inits = store_fields.iter().map(|f| {
+            let n = &f.emitted;
+            quote!(#n: ::std::default::Default::default(),)
+        });
+        let default_init = quote! {
+            Self {
+                #(#arena_field_inits)*
+                #(#store_field_inits)*
+                _phase: ::core::marker::PhantomData,
+            }
+        };
+        let debug_fmt = quote! {
+            f.debug_struct(stringify!(#store))
+                #(.field(stringify!(#debug_names), &self.#debug_fields))*
+                .finish()
+        };
+        out.extend(quote! {
+            /// Build phase: the store is owned mutably; `add_*`/`insert_*`,
+            /// the backing hooks, and `freeze` exist only here.
+            pub struct Build(());
+            /// Frozen phase: compaction has run at the single `freeze()`;
+            /// reads, handles, and `validate` exist only here.
+            pub struct Frozen(());
+            #phase_trait_def
 
-        impl #store {
-            #[doc = "Empty store."]
-            pub fn new() -> Self {
-                Self::default()
+            #[doc = concat!("Store generated by `implement!` for pattern `", #store_pattern_name, "`.")]
+            pub struct #store<P: #phase_trait = Frozen> {
+                #(#arena_fields)*
+                #(#store_contrib)*
+                _phase: ::core::marker::PhantomData<P>,
             }
 
-            #ctor_impls
-
-            #hook_impls
-
-            #validate_methods
-
-            #(#count_fns)*
-
-            #read_view
-
-            #[doc = concat!("The root handle: the \"object\" view of this store (root entity `", stringify!(#root_handle), "`).")]
-            pub fn #root_snake(&self) -> #root_handle<'_> {
-                #root_handle { store: self }
-            }
-
-            #[doc = "Structural validation: the canonical runtime inventory, one authored contribution per bound backing (key existence, value-in-arena, value-host agreement for keyed maps; endpoint ranges and the intrusive-ownership contract for lists — the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
-            pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
-                let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
-                #validate_calls
-                if errs.is_empty() {
-                    ::core::result::Result::Ok(())
-                } else {
-                    ::core::result::Result::Err(errs.join("; "))
+            impl ::core::default::Default for #store<Build> {
+                fn default() -> Self {
+                    #default_init
                 }
             }
-        }
-    });
+            impl ::core::default::Default for #store<Frozen> {
+                fn default() -> Self {
+                    #default_init
+                }
+            }
+            impl ::core::fmt::Debug for #store<Build> {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    #debug_fmt
+                }
+            }
+            impl ::core::fmt::Debug for #store<Frozen> {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    #debug_fmt
+                }
+            }
+
+            impl #store<Build> {
+                #[doc = "Empty store (build phase)."]
+                pub fn new() -> Self {
+                    Self::default()
+                }
+
+                #ctor_impls
+
+                #hook_impls
+
+                #freeze_finish
+
+                #read_view_build
+            }
+
+            impl #store<Frozen> {
+                #(#count_fns)*
+
+                #read_view
+
+                #validate_methods
+
+                #root_accessor
+
+                #validate_method
+            }
+        });
+    } else {
+        out.extend(quote! {
+            #[doc = concat!("Store generated by `implement!` for pattern `", #store_pattern_name, "`.")]
+            #[derive(Default, Debug)]
+            pub struct #store {
+                #(#arena_fields)*
+                #(#store_contrib)*
+            }
+
+            impl #store {
+                #[doc = "Empty store."]
+                pub fn new() -> Self {
+                    Self::default()
+                }
+
+                #ctor_impls
+
+                #hook_impls
+
+                #validate_methods
+
+                #(#count_fns)*
+
+                #read_view
+
+                #root_accessor
+
+                #validate_method
+            }
+        });
+    }
 
     // ---- handles ----
     for e in &body.entities {
         let h = &e.name;
         let (body, id_fn, eq_body, hash_body, dbg_body) = if e.root {
             (
-                quote!(store: &'g #store),
+                quote!(store: &'g #store_ref),
                 quote!(),
                 quote!(::std::ptr::eq(self.store, other.store)),
-                quote!((self.store as *const #store).hash(state);),
+                quote!((self.store as *const #store_ref).hash(state);),
                 {
                     // Mirror the reference `arena.rs`: the root handle's
                     // Debug lists the per-entity counts.
@@ -1200,7 +1542,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         } else {
             let idt = id_ty(&e.name);
             (
-                quote!(store: &'g #store, id: #idt),
+                quote!(store: &'g #store_ref, id: #idt),
                 quote! {
                     #[doc = "Index of this entity in its arena."]
                     pub fn id(self) -> #idt {
@@ -1209,7 +1551,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 },
                 quote!(self.id == other.id && ::std::ptr::eq(self.store, other.store)),
                 quote! {
-                    (self.store as *const #store).hash(state);
+                    (self.store as *const #store_ref).hash(state);
                     self.id.hash(state);
                 },
                 quote!(write!(f, "{}({:?})", stringify!(#h), self.id)),
@@ -1267,7 +1609,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let body = body_of(d, |c| matches!(c, Clause::Iterate { .. }))
             .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no iterate(a) body", d.name)))?;
         let it = iter_ty(&a.name);
-        let roles = FlatRoles::new(d, a, is_root(&a.source), a.target.clone())
+        let roles = FlatRoles::new(d, a, is_root(&a.source), a.target.clone(), &store_overrides)
             .at(quote!(self.store))
             .with_a(quote!(self.id))
             .with_walk_ty(it);
@@ -1348,7 +1690,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                             .map(|(n, t)| {
                                 let ty = roles::rewrite_ty(
                                     &t.to_token_stream(),
-                                    &FlatRoles::new(d, d_expr, false, d_expr.target.clone()),
+                                    &FlatRoles::new(d, d_expr, false, d_expr.target.clone(), &store_overrides),
                                 );
                                 let field = Ident2::new(&n.to_string(), Span::mixed_site());
                                 quote!(#field: #ty,)
@@ -1359,7 +1701,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     .unwrap_or_default();
                 let adv = body_of(d, |c| matches!(c, Clause::Advance { .. }))
                     .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no advance(w) body", d.name)))?;
-                let adv_roles = FlatRoles::new(d, d_expr, is_root(self_h), tgt_h.clone())
+                let adv_roles = FlatRoles::new(d, d_expr, is_root(self_h), tgt_h.clone(), &store_overrides)
                     .at(quote!(self.store))
                     .with_w(quote!(self))
                     .with_walk_ty(walk_ty.clone());
@@ -1378,7 +1720,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 iter_defs.extend(quote! {
                     #[doc = concat!("Iterator of `", stringify!(#arrow_doc_name), "' (backing `", stringify!(#d_name), "`): authored Walk, ", #iter_doc, ".")]
                     pub struct #it<'g> {
-                        store: &'g #store,
+                        store: &'g #store_ref,
                         #(#walk_fields)*
                     }
                     impl<'g> ::core::iter::Iterator for #it<'g> {
@@ -1402,7 +1744,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             Cardinality::One => {
                 let body = body_of(d, |c| matches!(c, Clause::Read { .. }))
                     .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no read(a) body", d.name)))?;
-                let roles = FlatRoles::new(d, d_expr, false, tgt_h.clone())
+                let roles = FlatRoles::new(d, d_expr, false, tgt_h.clone(), &store_overrides)
                     .at(quote!(self.store))
                     .with_a(quote!(self.id));
                 let body_rw = roles::rewrite(body, &roles);
@@ -1427,7 +1769,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 let body = body_of(d, |c| matches!(c, Clause::Lookup { .. }))
                     .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no lookup(a, k) body", d.name)))?;
                 let root_self = is_root(self_h);
-                let mut roles = FlatRoles::new(d, d_expr, root_self, tgt_h.clone())
+                let mut roles = FlatRoles::new(d, d_expr, root_self, tgt_h.clone(), &store_overrides)
                     .at(quote!(self.store))
                     .with_k(quote!(key));
                 if !root_self {

@@ -235,11 +235,11 @@ backing! {
                     arrow_label, store.offsets.first(), store.offsets.last(), store.adj.len()
                 ));
             }
-            for w in store.offsets.windows(2) {
-                if w[0] > w[1] {
+            for win in store.offsets.windows(2) {
+                if win[0] > win[1] {
                     errs.push(format!(
                         "{}: offsets are not monotonic at [{}, {}]",
-                        arrow_label, w[0], w[1]
+                        arrow_label, win[0], win[1]
                     ));
                 }
             }
