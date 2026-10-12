@@ -231,11 +231,14 @@ What each clause is load-bearing for:
   (an optional `one` arrow's field is default-initialized and updated by
   M4's `set_`). Field is the only such binding in M3, so the M1/M2
   constructor surfaces are unchanged. Under composition the merged
-  constructor takes the union of every member's `ctor_arg` arguments,
-  instance-prefixed on collision (`outer_source`, per M2's
-  collision-first naming) — spike 1's "silently deduped (keeps first)"
-  limit is unemittable for required fields (E0063, confirmed by the
-  ctor-merge probe's negcheck) and is retired.
+  constructor takes the union of every member's `ctor_arg` arguments;
+  colliding argument names are *shared* when the two members' resolved
+  target classes agree (one argument feeds both fields — the `<->`
+  partner map usually guarantees agreement) and *instance-prefixed*
+  when they differ (`outer_source`, per M2's collision-first naming;
+  probe-verified by the ctor-merge probe) — spike 1's "silently
+  deduped (keeps first)" limit is unemittable for required fields
+  (E0063, confirmed by the probe's negcheck) and is retired.
 - **`membership: existence` (arena).** No insert op is generated; the
   write path is `add_<entity>` itself. A primitive `many` arrow bound to
   `arena` is rejected (Constraints, below) — the fixed-table era never
@@ -561,7 +564,8 @@ two-member classes (M2's frontier, still uncarried); and further
 composition of a composed pattern (the grammar note above). Retired in
 this fold: spike 1's "constructor argument name collisions silently
 deduped" (unemittable for required fields — E0063; colliding `ctor_arg`
-contributions are instance-prefixed instead, per the grammar section)
+contributions are shared when target classes agree and instance-prefixed
+when they differ, per the grammar section)
 and "field backing into an embedded class rejected" (a spike-1 codegen
 limit, not a rule — see the placement rules).
 
