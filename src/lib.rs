@@ -58,7 +58,7 @@
 //! `many` arrows bind explicitly (`arena` vs `intrusive_list` is a real
 //! choice with no safe default); `one` arrows default to `field`.
 //! Derived membership (`by <one-arrow>`) fires an arrow's insert hook
-//! from constructors; derived reads (`:= union(a, b)`) take no backing
+//! from constructors; derived reads (`:= sum(a, b)`) take no backing
 //! at all. Every generated store has a `validate()` boundary (a no-op
 //! in M1) that later milestones' checks and flush hang on.
 //!

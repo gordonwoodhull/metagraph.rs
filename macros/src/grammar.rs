@@ -160,8 +160,12 @@ pub struct ArrowDecl {
     /// `by <arrow>` — derived membership: the named total `one` arrow (which
     /// runs opposite: target-of-`by` -> source-of-`by`) determines membership.
     pub by: Option<Ident>,
-    /// `:= union(a, b)` — derived read over two sibling `many` arrows.
-    pub union: Option<(Ident, Ident)>,
+    /// `key(K)` on a *root* arrow: declares the keyed partial cardinality (K
+    /// is the root's own key entity, rebound per instantiation). On an
+    /// *instantiation*: binds the key sort to a local entity (M2).
+    pub key: Option<Ident>,
+    /// `:= sum(a, b)` — derived read over two sibling `many` arrows.
+    pub sum: Option<(Ident, Ident)>,
 }
 
 impl Parse for ArrowDecl {
@@ -184,20 +188,21 @@ impl Parse for ArrowDecl {
         let target: Ident = input.parse()?;
         let mut many = None;
         let mut by = None;
-        let mut union = None;
+        let mut key = None;
+        let mut sum = None;
         loop {
             if input.peek(Token![;]) {
                 input.parse::<Token![;]>()?;
                 break;
             }
             if input.peek(Token![:]) && input.peek2(Token![=]) {
-                // `:= union(a, b)` — terminates the declaration.
+                // `:= sum(a, b)` — terminates the declaration.
                 input.parse::<Token![:]>()?;
                 input.parse::<Token![=]>()?;
                 let kw: Ident = input.parse()?;
-                if kw != "union" {
+                if kw != "sum" {
                     return Err(
-                        syn::Error::new(kw.span(), "only `union` derivation is supported")
+                        syn::Error::new(kw.span(), "only `sum` derivation is supported")
                     );
                 }
                 let content;
@@ -206,7 +211,7 @@ impl Parse for ArrowDecl {
                 content.parse::<Token![,]>()?;
                 let b: Ident = content.parse()?;
                 input.parse::<Token![;]>()?;
-                union = Some((a, b));
+                sum = Some((a, b));
                 break;
             }
             input.parse::<Token![,]>()?;
@@ -222,17 +227,23 @@ impl Parse for ArrowDecl {
                     let det: Ident = input.parse()?;
                     by = Some(det);
                 }
+                "key" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let k: Ident = content.parse()?;
+                    key = Some(k);
+                }
                 other => {
                     return Err(syn::Error::new(
                         kw.span(),
                         format!(
-                            "unexpected `{other}` in arrow declaration (expected `one`, `many`, `by`, or `:= union(..)`)"
+                            "unexpected `{other}` in arrow declaration (expected `one`, `many`, `by`, `key(K)`, or `:= sum(..)`)"
                         ),
                     ));
                 }
             }
         }
-        Ok(ArrowDecl { name, inst, source, target, many, by, union })
+        Ok(ArrowDecl { name, inst, source, target, many, by, key, sum })
     }
 }
 
@@ -306,12 +317,17 @@ pub fn schema_body_tokens(body: &SchemaBody) -> TokenStream {
             .as_ref()
             .map(|x| quote!(, by #x))
             .unwrap_or_default();
-        let union_ts = a
-            .union
+        let key_ts = a
+            .key
             .as_ref()
-            .map(|(x, y)| quote!(:= union(#x, #y)))
+            .map(|k| quote!(, key(#k)))
             .unwrap_or_default();
-        quote!(#n: #inst_ts #s -> #t #card_ts #by_ts #union_ts ;)
+        let sum_ts = a
+            .sum
+            .as_ref()
+            .map(|(x, y)| quote!(:= sum(#x, #y)))
+            .unwrap_or_default();
+        quote!(#n: #inst_ts #s -> #t #card_ts #by_ts #key_ts #sum_ts ;)
     });
     quote! {
         entities: #(#entities),* ; arrows: { #(#arrows)* }
@@ -322,33 +338,55 @@ pub fn schema_body_tokens(body: &SchemaBody) -> TokenStream {
 // Root registration metadata (the metadata tuple)
 // ---------------------------------------------------------------------------
 
+/// A root arrow's cardinality — the metadata tuple's fourth slot. `keyed` is
+/// M2's third value (beside `one`/`many`), declared on the root via `key(K)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cardinality {
+    One,
+    Many,
+    Keyed,
+}
+
 /// A root pattern's trait metadata, published by its registration courier:
 /// (method name, associated type name, GAT name, cardinality, key associated
-/// type name). The key slot is reserved for M2's keyed partial arrows and is
-/// always `-` in M1. Method/GAT/associated-type names are the *root's*
-/// declaration — never the instantiation's local alias (spike 1's E0407
-/// finding).
+/// type name). The key slot carries the key's associated type name for a
+/// keyed root (`Key`), `-` otherwise. Method/GAT/associated-type names are
+/// the *root's* declaration — never the instantiation's local alias (spike
+/// 1's E0407 finding).
 #[derive(Clone, Debug)]
 pub struct RootMeta {
     pub method: Ident,
     pub assoc: Ident,
     pub gat: Option<Ident>,
-    pub many: bool,
+    pub card: Cardinality,
     pub key: Option<Ident>,
 }
 
 impl RootMeta {
+    pub fn many(&self) -> bool {
+        self.card == Cardinality::Many
+    }
+
     /// Derive the metadata tuple from a root pattern's single arrow. The
     /// associated type is the target entity's name; the GAT is the
-    /// camel-cased arrow name (many arrows only).
+    /// camel-cased arrow name (many arrows only); a `key(K)` clause declares
+    /// the keyed cardinality, whose key rides as the associated type `Key`.
     pub fn of_root_arrow(arrow: &ArrowDecl) -> syn::Result<RootMeta> {
-        let many = arrow.many.ok_or_else(|| {
-            syn::Error::new(
-                arrow.name.span(),
-                "a root arrow must declare a cardinality (`one` or `many`)",
-            )
-        })?;
-        let gat = many.then(|| {
+        let card = if arrow.key.is_some() {
+            Cardinality::Keyed
+        } else {
+            match arrow.many {
+                Some(true) => Cardinality::Many,
+                Some(false) => Cardinality::One,
+                None => {
+                    return Err(syn::Error::new(
+                        arrow.name.span(),
+                        "a root arrow must declare a cardinality (`one`, `many`, or `key(K)`)",
+                    ))
+                }
+            }
+        };
+        let gat = (card == Cardinality::Many).then(|| {
             let g = camel(&arrow.name.to_string());
             Ident::new(&g, arrow.name.span())
         });
@@ -356,8 +394,8 @@ impl RootMeta {
             method: arrow.name.clone(),
             assoc: arrow.target.clone(),
             gat,
-            many,
-            key: None, // M2 slot: keyed partial arrows
+            card,
+            key: (card == Cardinality::Keyed).then(|| Ident::new("Key", arrow.name.span())),
         })
     }
 }
@@ -376,13 +414,16 @@ impl Parse for RootMeta {
         };
         input.parse::<Token![,]>()?;
         let card: Ident = input.parse()?;
-        let many = match card.to_string().as_str() {
-            "many" => true,
-            "one" => false,
+        let card = match card.to_string().as_str() {
+            "many" => Cardinality::Many,
+            "one" => Cardinality::One,
+            "keyed" => Cardinality::Keyed,
             other => {
                 return Err(syn::Error::new(
                     card.span(),
-                    format!("expected cardinality `one` or `many`, found `{other}`"),
+                    format!(
+                        "expected cardinality `one`, `many`, or `keyed`, found `{other}`"
+                    ),
                 ))
             }
         };
@@ -393,7 +434,7 @@ impl Parse for RootMeta {
         } else {
             Some(input.parse()?)
         };
-        Ok(RootMeta { method, assoc, gat, many, key })
+        Ok(RootMeta { method, assoc, gat, card, key })
     }
 }
 
@@ -402,7 +443,11 @@ pub fn root_meta_tokens(m: &RootMeta) -> TokenStream {
     let method = &m.method;
     let assoc = &m.assoc;
     let gat = m.gat.as_ref().map(|g| quote!(#g)).unwrap_or(quote!(-));
-    let card = if m.many { quote!(many) } else { quote!(one) };
+    let card = match m.card {
+        Cardinality::Many => quote!(many),
+        Cardinality::One => quote!(one),
+        Cardinality::Keyed => quote!(keyed),
+    };
     let key = m.key.as_ref().map(|k| quote!(#k)).unwrap_or(quote!(-));
     quote!(#method, #assoc, #gat, #card, #key)
 }
@@ -411,38 +456,70 @@ pub fn root_meta_tokens(m: &RootMeta) -> TokenStream {
 // implement! bindings
 // ---------------------------------------------------------------------------
 
-/// One `arrow: backing` pair of an `implement!` block.
+/// One `arrow: backing` (or `instance.arrow: backing`, for composed
+/// patterns) pair of an `implement!` block. Qualified keys are M2's composed
+/// binding grammar; the flat bare-arrow form stays legal and means what it
+/// meant in M1. The `instance.*` whole-instance sugar some spike tests used
+/// is *not* grammar.
 #[derive(Clone)]
 pub struct Binding {
+    /// `Some(inst)` for the qualified `inst.arrow` key form.
+    pub instance: Option<Ident>,
     pub arrow: Ident,
     pub backing: Ident,
 }
 
-/// Parse the braced `{ arrow: backing, ... }` block.
+impl Binding {
+    /// Qualified key as displayed in messages: `inst.arrow` or `arrow`.
+    pub fn key_str(&self) -> String {
+        match &self.instance {
+            Some(i) => format!("{i}.{}", self.arrow),
+            None => self.arrow.to_string(),
+        }
+    }
+}
+
+/// Parse the braced `{ arrow: backing, ... }` (or `{ inst.arrow: backing,
+/// ... }`) block.
 pub fn parse_bindings(input: ParseStream) -> syn::Result<Vec<Binding>> {
     let content;
     braced!(content in input);
     let mut bindings = Vec::new();
     while !content.is_empty() {
-        let arrow: Ident = content.parse()?;
+        let first: Ident = content.parse()?;
+        let (instance, arrow) = if content.peek(Token![.]) {
+            content.parse::<Token![.]>()?;
+            (Some(first), content.parse::<Ident>()?)
+        } else {
+            (None, first)
+        };
         content.parse::<Token![:]>()?;
         let backing: Ident = content.parse()?;
         if content.peek(Token![,]) {
             content.parse::<Token![,]>()?;
         }
-        bindings.push(Binding { arrow, backing });
+        bindings.push(Binding { instance, arrow, backing });
     }
     Ok(bindings)
 }
 
-/// Re-emit parsed bindings (canonically `arrow: backing,`).
+/// Re-emit parsed bindings (canonically `inst.arrow: backing,` /
+/// `arrow: backing,`).
 pub fn bindings_tokens(bindings: &[Binding]) -> TokenStream {
     bindings
         .iter()
         .map(|b| {
-            let a = &b.arrow;
             let k = &b.backing;
-            quote!(#a: #k,)
+            match &b.instance {
+                Some(i) => {
+                    let a = &b.arrow;
+                    quote!(#i.#a: #k,)
+                }
+                None => {
+                    let a = &b.arrow;
+                    quote!(#a: #k,)
+                }
+            }
         })
         .collect()
 }
@@ -485,8 +562,11 @@ mod tests {
             if let Some(b) = &a.by {
                 s.push_str(&format!(",by {}", b));
             }
-            if let Some((x, y)) = &a.union {
-                s.push_str(&format!(",union({},{})", x, y));
+            if let Some(k) = &a.key {
+                s.push_str(&format!(",key({})", k));
+            }
+            if let Some((x, y)) = &a.sum {
+                s.push_str(&format!(",sum({},{})", x, y));
             }
             s.push(';');
         }
@@ -529,7 +609,7 @@ mod tests {
                 in_edges:  stdlib::InEdges,  Node -> Edge, by target;
                 source:    stdlib::Source,   Edge -> Node;
                 target:    stdlib::Target,   Edge -> Node;
-                edges:     stdlib::Edges,    Node -> Edge := union(out_edges, in_edges);
+                edges:     stdlib::Edges,    Node -> Edge := sum(out_edges, in_edges);
             }
             "#,
         );
@@ -543,11 +623,23 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_keyed_arrows() {
+        // Root side: `key(K)` declares the cardinality; instantiation side:
+        // `key(LocalEntity)` binds the key sort (no cardinality restated).
+        assert_schema_roundtrip(
+            "entities: root Subgraph, SubNode, MainNode; arrows { subnode: Subgraph -> SubNode, key(MainNode); }",
+        );
+        assert_schema_roundtrip(
+            "entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open); arrows { subnode: crate::roots::SubNodeOf, Subgraph -> SubNode, key(MainNode); }",
+        );
+    }
+
+    #[test]
     fn roundtrip_root_meta_tuple() {
         for src in [
             "nodes, Node, Nodes, many, -",
             "source, Node, -, one, -",
-            "subnode, SubNode, Subnode, many, Key",
+            "subnode, SubNode, -, keyed, Key",
         ] {
             let ts: TokenStream = src.parse().expect("tuple parses");
             let once: RootMeta = syn::parse2(ts).expect("tuple parse");
@@ -556,9 +648,40 @@ mod tests {
             assert_eq!(once.method, twice.method, "src: {src}");
             assert_eq!(once.assoc, twice.assoc, "src: {src}");
             assert_eq!(once.gat, twice.gat, "src: {src}");
-            assert_eq!(once.many, twice.many, "src: {src}");
+            assert_eq!(once.card, twice.card, "src: {src}");
             assert_eq!(once.key, twice.key, "src: {src}");
         }
+    }
+
+    #[test]
+    fn bindings_parse_and_roundtrip() {
+        use super::parse_bindings;
+        use syn::parse::Parser as _;
+        let parse_all = |src: &str| {
+            syn::parse::Parser::parse2(
+                |input: syn::parse::ParseStream| parse_bindings(input),
+                src.parse::<TokenStream>().expect("bindings parse"),
+            )
+            .expect("bindings")
+        };
+        let once = parse_all("{ nodes: arena, sub.subnodes: arena, sub.subnode: hash_index }");
+        assert_eq!(once.len(), 3);
+        assert_eq!(once[0].key_str(), "nodes");
+        assert_eq!(once[1].key_str(), "sub.subnodes");
+        assert_eq!(once[2].key_str(), "sub.subnode");
+        let emitted = bindings_tokens(&once);
+        let emitted_str = format!("{{ {emitted} }}");
+        let twice = parse_all(&emitted_str);
+        assert_eq!(
+            once.iter().map(|b| b.key_str()).collect::<Vec<_>>(),
+            twice.iter().map(|b| b.key_str()).collect::<Vec<_>>(),
+            "emitted: {emitted_str}"
+        );
+        assert_eq!(
+            emitted.to_string(),
+            bindings_tokens(&twice).to_string(),
+            "idempotent emission"
+        );
     }
 
     #[test]

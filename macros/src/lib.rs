@@ -19,8 +19,8 @@ use syn::parse::{Parse, ParseStream};
 use syn::{braced, bracketed, Ident, Path, Token};
 
 use grammar::{
-    parse_bindings, path_tokens, root_meta_tokens, schema_body_tokens, snake, Binding, RootMeta,
-    SchemaBody,
+    parse_bindings, path_tokens, root_meta_tokens, schema_body_tokens, snake, Binding,
+    Cardinality, RootMeta, SchemaBody,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ impl Parse for PatternInput {
 ///         arrows {
 ///             nodes:     stdlib::Nodes,    Graph -> Node;
 ///             out_edges: stdlib::OutEdges, Node -> Edge, by source;
-///             edges:     stdlib::Edges,    Node -> Edge := union(out_edges, in_edges);
+///             edges:     stdlib::Edges,    Node -> Edge := sum(out_edges, in_edges);
 ///         }
 ///     }
 /// }
@@ -181,22 +181,89 @@ fn validate_pattern(pat: &PatternInput) -> syn::Result<()> {
             ));
         }
 
-        if a.by.is_some() && a.union.is_some() {
+        if a.by.is_some() && a.sum.is_some() {
             return Err(syn::Error::new(
                 a.name.span(),
-                format!("arrow `{}` is derived both `by` and `:= union(..)`; pick one", a.name),
+                format!("arrow `{}` is derived both `by` and `:= sum(..)`; pick one", a.name),
             ));
         }
 
-        // `by` and `:= union` are properties of instantiations, not roots.
-        if a.inst.is_none() && (a.by.is_some() || a.union.is_some()) {
+        // `by` and `:= sum` are properties of instantiations, not roots.
+        if a.inst.is_none() && (a.by.is_some() || a.sum.is_some()) {
             return Err(syn::Error::new(
                 a.name.span(),
                 format!(
-                    "root arrow `{}` cannot carry `by`/`:= union(..)` — derivations are properties of instantiations",
+                    "root arrow `{}` cannot carry `by`/`:= sum(..)` — derivations are properties of instantiations",
                     a.name
                 ),
             ));
+        }
+
+        // `key(K)` does not combine with `by` or `:= sum(..)` (keyed arrows
+        // bind explicitly and are never derived).
+        if a.key.is_some() && (a.by.is_some() || a.sum.is_some()) {
+            return Err(syn::Error::new(
+                a.name.span(),
+                format!(
+                    "arrow `{}` is keyed (`key(..)`) and cannot also be derived (`by`/`:= sum(..)`)",
+                    a.name
+                ),
+            ));
+        }
+        // `key(K)` IS the root's cardinality declaration — not combinable
+        // with `one`/`many` on a root, and never restated by an
+        // instantiation (the instantiation's `key(E)` only binds the sort).
+        if a.key.is_some() && a.many.is_some() {
+            return Err(syn::Error::new(
+                a.name.span(),
+                format!(
+                    "arrow `{}` declares both a cardinality and `key(..)`; on a root, `key(K)` is the cardinality",
+                    a.name
+                ),
+            ));
+        }
+        // The key entity must be declared in the pattern, and it must own an
+        // id type — the root-marked entity owns none, so it cannot be keyed
+        // on. (Open entities may be keys on the *instantiation* side, where
+        // the clause binds a local sort that `<->` closes; a root pattern
+        // declaring its own key on an open entity would leave the key
+        // unresolved, so reject that too.)
+        if let Some(k) = &a.key {
+            let ke = body.entities.iter().find(|e| e.name == *k).ok_or_else(|| {
+                syn::Error::new(
+                    k.span(),
+                    format!("`key({})` names an entity `{}` does not declare", k, pat.name),
+                )
+            })?;
+            if a.inst.is_none() {
+                // Root side: the key must be an ordinary element entity.
+                if ke.root {
+                    return Err(syn::Error::new(
+                        k.span(),
+                        format!(
+                            "`key({})` names the root-marked entity; the root owns no id type to key on",
+                            k
+                        ),
+                    ));
+                }
+                if ke.open {
+                    return Err(syn::Error::new(
+                        k.span(),
+                        format!(
+                            "root arrow `{}` keys on open entity `{}`; a root pattern's key must be an entity it owns",
+                            a.name, k
+                        ),
+                    ));
+                }
+            } else if ke.root {
+                return Err(syn::Error::new(
+                    k.span(),
+                    format!(
+                        "`key({})` names the root-marked entity; the root owns no id type to key on",
+                        k
+                    ),
+                ));
+            }
         }
 
         // Cardinality is declared on the root, inherited by instantiations.
@@ -210,10 +277,13 @@ fn validate_pattern(pat: &PatternInput) -> syn::Result<()> {
                 ),
             ));
         }
-        if a.inst.is_none() && a.many.is_none() {
+        if a.inst.is_none() && a.many.is_none() && a.key.is_none() {
             return Err(syn::Error::new(
                 a.name.span(),
-                format!("root arrow `{}` must declare a cardinality (`one` or `many`)", a.name),
+                format!(
+                    "root arrow `{}` must declare a cardinality (`one`, `many`, or `key(K)`)",
+                    a.name
+                ),
             ));
         }
 
@@ -238,17 +308,17 @@ fn validate_pattern(pat: &PatternInput) -> syn::Result<()> {
             }
         }
 
-        // `:= union(a, b)`: siblings with the same self and associated entity.
-        if let Some((ua, ub)) = &a.union {
+        // `:= sum(a, b)`: siblings with the same self and associated entity.
+        if let Some((ua, ub)) = &a.sum {
             for u in [ua, ub] {
                 let d = body.arrows.iter().find(|x| x.name == *u).ok_or_else(|| {
-                    syn::Error::new(u.span(), format!("union names undeclared sibling `{}`", u))
+                    syn::Error::new(u.span(), format!("sum names undeclared sibling `{}`", u))
                 })?;
                 if d.source != a.source || d.target != a.target {
                     return Err(syn::Error::new(
                         u.span(),
                         format!(
-                            "union sibling `{}: {} -> {}` does not share `{}: {} -> {}`'s self and associated entities",
+                            "sum sibling `{}: {} -> {}` does not share `{}: {} -> {}`'s self and associated entities",
                             d.name, d.source, d.target, a.name, a.source, a.target
                         ),
                     ));
@@ -298,26 +368,47 @@ fn expand_root_pattern(pat: &PatternInput) -> syn::Result<TokenStream2> {
         a.name,
         a.source,
         a.target,
-        if meta.many { "many" } else { "one" }
+        match meta.card {
+            Cardinality::Many => "many",
+            Cardinality::One => "one",
+            Cardinality::Keyed => "keyed partial",
+        }
     );
-    let mut out = if meta.many {
-        let gat = meta.gat.as_ref().unwrap();
-        quote! {
-            #[doc = #doc]
-            pub trait #trait_name<M> {
-                type #assoc;
-                type #gat<'a>: ::core::iter::Iterator<Item = Self::#assoc>
-                where
-                    Self: 'a;
-                fn #m(&self) -> Self::#gat<'_>;
+    let mut out = match meta.card {
+        Cardinality::Many => {
+            let gat = meta.gat.as_ref().unwrap();
+            quote! {
+                #[doc = #doc]
+                pub trait #trait_name<M> {
+                    type #assoc;
+                    type #gat<'a>: ::core::iter::Iterator<Item = Self::#assoc>
+                    where
+                        Self: 'a;
+                    fn #m(&self) -> Self::#gat<'_>;
+                }
             }
         }
-    } else {
-        quote! {
-            #[doc = #doc]
-            pub trait #trait_name<M> {
-                type #assoc;
-                fn #m(&self) -> Self::#assoc;
+        Cardinality::One => {
+            quote! {
+                #[doc = #doc]
+                pub trait #trait_name<M> {
+                    type #assoc;
+                    fn #m(&self) -> Self::#assoc;
+                }
+            }
+        }
+        // Keyed partial (probe-verified, /tmp/m2-probe-edge-induced): the
+        // root cannot name the instantiation's key sort, so the trait carries
+        // it as an associated type and the method takes it as an argument.
+        Cardinality::Keyed => {
+            let key = meta.key.as_ref().unwrap();
+            quote! {
+                #[doc = #doc]
+                pub trait #trait_name<M> {
+                    type #assoc;
+                    type #key;
+                    fn #m(&self, key: Self::#key) -> ::core::option::Option<Self::#assoc>;
+                }
             }
         }
     };
@@ -428,7 +519,7 @@ impl Parse for ImplementInput {
 /// the stdlib's, `crate::shapes::Labeled` for one of yours). `many`
 /// arrows bind explicitly (`arena` vs `intrusive_list` is a real choice
 /// with no safe default); `one` arrows default to `field`; derived
-/// (`:= union`) arrows take no binding.
+/// (`:= sum`) arrows take no binding.
 ///
 /// ```ignore
 /// implement! {
@@ -675,17 +766,29 @@ fn expand_stage1(
     }
 
     // Binding checks that need no root metadata: unknown arrow, duplicate,
-    // union-arrow-given-binding. These run here, while the binding idents
-    // still carry the `implement!` call site's spans.
-    let mut seen: Vec<&Ident> = Vec::new();
+    // sum-arrow-given-binding, qualified key against a flat pattern. These
+    // run here, while the binding idents still carry the `implement!` call
+    // site's spans. Duplicate/unknown compare *qualified* keys.
+    let mut seen: Vec<String> = Vec::new();
     for b in &bindings {
-        if seen.contains(&&b.arrow) {
+        let key = b.key_str();
+        if seen.contains(&key) {
             return Err(syn::Error::new(
                 b.arrow.span(),
-                format!("duplicate binding for arrow `{}`", b.arrow),
+                format!("duplicate binding for arrow `{key}`"),
             ));
         }
-        seen.push(&b.arrow);
+        seen.push(key);
+        if let Some(inst) = &b.instance {
+            return Err(syn::Error::new(
+                b.arrow.span(),
+                format!(
+                    "binding `{inst}.{}` is qualified, but pattern `{}` is not composed; use the bare arrow name",
+                    b.arrow,
+                    pattern_name(&pattern_path)
+                ),
+            ));
+        }
         match schema.arrows.iter().find(|a| a.name == b.arrow) {
             None => {
                 return Err(syn::Error::new(
@@ -697,12 +800,12 @@ fn expand_stage1(
                     ),
                 ));
             }
-            Some(a) if a.union.is_some() => {
-                let (ua, ub) = a.union.as_ref().unwrap();
+            Some(a) if a.sum.is_some() => {
+                let (ua, ub) = a.sum.as_ref().unwrap();
                 return Err(syn::Error::new(
                     b.arrow.span(),
                     format!(
-                        "derived arrow `{}` (`:= union({}, {})`) is never bound to a backing",
+                        "derived arrow `{}` (`:= sum({}, {})`) is never bound to a backing",
                         b.arrow, ua, ub
                     ),
                 ));

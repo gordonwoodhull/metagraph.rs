@@ -21,7 +21,7 @@ use quote::{format_ident, quote};
 
 use crate::grammar::{
     arena_fld, data_ty, id_ty, iter_ty, link_stem, marker_ty, path_tokens, snake, Binding,
-    RootMeta,
+    Cardinality, RootMeta,
 };
 use crate::{resolve_schema_path, ChainConfig};
 
@@ -29,7 +29,7 @@ use crate::{resolve_schema_path, ChainConfig};
 struct ArrowInfo<'a> {
     decl: &'a crate::grammar::ArrowDecl,
     meta: &'a RootMeta,
-    /// `None` for derived (`:= union`) arrows — never bound to a backing.
+    /// `None` for derived (`:= sum`) arrows — never bound to a backing.
     backing: Option<String>,
 }
 
@@ -73,15 +73,43 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let meta = meta_of
             .get(&path_tokens(decl.inst.as_ref().unwrap()).to_string())
             .expect("every arrow's root was queued");
-        let backing = if decl.union.is_some() {
+        // The instantiation's key clause must agree with the root's keyed
+        // cardinality: the root owns the cardinality, the instantiation only
+        // binds the key sort.
+        match (meta.card, &decl.key) {
+            (Cardinality::Keyed, None) => {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "arrow `{}` instantiates the keyed root `{}` but does not bind a key sort (`key(LocalEntity)`)",
+                        decl.name,
+                        path_tokens(decl.inst.as_ref().unwrap())
+                    ),
+                ));
+            }
+            (card, Some(k)) if card != Cardinality::Keyed => {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "arrow `{}` declares `key({k})` but its root `{}` is not a keyed root",
+                        decl.name,
+                        path_tokens(decl.inst.as_ref().unwrap())
+                    ),
+                ));
+            }
+            _ => {}
+        }
+        let backing = if decl.sum.is_some() {
             None
         } else if let Some(b) = binding_of(&decl.name.to_string()) {
             let b = b.backing.to_string();
-            // Wrong-cardinality check, both directions. Spans have degraded
-            // to the call site; quote the offending tokens in the message.
+            // Wrong-cardinality check, both directions (M1's three backings
+            // plus the keyed directions). Spans have degraded to the call
+            // site; quote the offending tokens in the message.
             let ok = match b.as_str() {
-                "field" => !meta.many,
-                "arena" | "intrusive_list" => meta.many,
+                "field" => meta.card == Cardinality::One,
+                "arena" | "intrusive_list" => meta.card == Cardinality::Many,
+                "hash_index" => meta.card == Cardinality::Keyed,
                 _ => true, // unknown backings get their own error below
             };
             if !ok {
@@ -90,16 +118,28 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     format!(
                         "backing `{b}` has wrong cardinality for arrow `{}` (a `{}` arrow)",
                         decl.name,
-                        if meta.many { "many" } else { "one" }
+                        match meta.card {
+                            Cardinality::Many => "many",
+                            Cardinality::One => "one",
+                            Cardinality::Keyed => "keyed",
+                        }
                     ),
                 ));
             }
             Some(b)
-        } else if meta.many {
+        } else if meta.card == Cardinality::Many {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 format!(
                     "missing backing binding for `many` arrow `{}` (`arena` vs `intrusive_list` is an explicit choice)",
+                    decl.name
+                ),
+            ));
+        } else if meta.card == Cardinality::Keyed {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "missing backing binding for keyed arrow `{}` (`hash_index` is the only keyed-legal backing)",
                     decl.name
                 ),
             ));
@@ -109,11 +149,13 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         infos.push(ArrowInfo { decl, meta, backing });
     }
     for b in &config.bindings {
-        if !["arena", "field", "intrusive_list"].contains(&b.backing.to_string().as_str()) {
+        if !["arena", "field", "intrusive_list", "hash_index"]
+            .contains(&b.backing.to_string().as_str())
+        {
             return Err(syn::Error::new(
                 b.arrow.span(),
                 format!(
-                    "unknown backing `{}` for arrow `{}` (M1 built-ins: `arena`, `field`, `intrusive_list`)",
+                    "unknown backing `{}` for arrow `{}` (built-ins: `arena`, `field`, `intrusive_list`, `hash_index`)",
                     b.backing, b.arrow
                 ),
             ));
@@ -131,7 +173,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 format!("`by {}` does not name a resolvable arrow", det_name),
             )
         })?;
-        if det.meta.many {
+        if det.meta.card != Cardinality::One {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 format!(
@@ -453,7 +495,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     );
 
     // Iterator expression for a bound sibling many-arrow read through the
-    // union arrow's self handle `self_h` (unions chain sibling iterators
+    // sum arrow's self handle `self_h` (sums chain sibling iterators
     // directly, so generated code never depends on trait imports).
     let iter_expr = |d: &crate::grammar::ArrowDecl, self_h: &proc_macro2::Ident| -> syn::Result<TokenStream2> {
         let it = iter_ty(&d.name);
@@ -472,7 +514,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             }
             _ => Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
-                format!("union sibling `{}` is not a bound `many` arrow", d.name),
+                format!("sum sibling `{}` is not a bound `many` arrow", d.name),
             )),
         }
     };
@@ -494,12 +536,12 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let it = iter_ty(&d.name);
         let tid = id_ty(&d.target);
 
-        if let Some((ua, ub)) = &d.union {
+        if let Some((ua, ub)) = &d.sum {
             let da = schema.arrows.iter().find(|x| x.name == *ua).ok_or_else(|| {
-                syn::Error::new(proc_macro2::Span::call_site(), format!("union names unknown sibling `{ua}`"))
+                syn::Error::new(proc_macro2::Span::call_site(), format!("sum names unknown sibling `{ua}`"))
             })?;
             let db = schema.arrows.iter().find(|x| x.name == *ub).ok_or_else(|| {
-                syn::Error::new(proc_macro2::Span::call_site(), format!("union names unknown sibling `{ub}`"))
+                syn::Error::new(proc_macro2::Span::call_site(), format!("sum names unknown sibling `{ub}`"))
             })?;
             let ita = iter_ty(&da.name);
             let itb = iter_ty(&db.name);

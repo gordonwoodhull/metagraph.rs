@@ -31,7 +31,7 @@ pattern! {
             in_edges:  stdlib::InEdges,  Node -> Edge, by target;
             source:    stdlib::Source,   Edge -> Node;
             target:    stdlib::Target,   Edge -> Node;
-            edges:     stdlib::Edges,    Node -> Edge := union(out_edges, in_edges);
+            edges:     stdlib::Edges,    Node -> Edge := sum(out_edges, in_edges);
         }
     }
 }
