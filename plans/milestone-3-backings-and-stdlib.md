@@ -11,15 +11,23 @@ each grounded in a spike or probe. Uncompiled: the macro side of
 `backing!` — grammar and codegen — as with M2's keyed grammar. One seam
 is recorded untested rather than claimed: hook-body hygiene across the
 token channel is spike-verified (spike 5), and courier resolution inside
-`implement!` is spike-verified for *root metadata* (spike 1), but the
-conjunction — `implement!` resolving a *backing binding* through a
-backing courier and splicing its bodies — has never been bounced. The bounce
-gate — cross-crate arms included — runs before the fixed table is
-deleted (Implementation plan). Round 4 records two smaller seams in the
-same spirit: the `advance(w)` clause is grounded in the landed codegen's
-hard-coded `next()` bodies but has never been authored through the DSL
-and emitted (probe owed, this round); and csr at a fused root-marked
-self is admitted by the applicability rule but unemitted (Frontier). Spike-verified
+`implement!` is landed, tested code since M2 merged (the downstream
+renamed/indirect crates in its suite), but the conjunction —
+`implement!` resolving a *backing binding* through a backing courier and
+splicing its bodies — has never been bounced. The bounce gate —
+cross-crate arms included — runs before the fixed table is deleted, as
+step 2's permanent in-repo test. Round 4 planned a throwaway probe for
+it (/tmp/m3-probe-r4-bounce, the round's one authorized proc-macro
+exception) and superseded the probe once M2 merged: with the resolution
+half landed and the hygiene half spike-proven, the permanent gate is the
+first-hand evidence and a stand-in model of tested mechanisms buys
+calendar, not design — the gate's arm list gains the use-site
+helper-resolution arm (spike 5's caveat 2) so it covers the whole
+conjunction. The round's other recorded seam retired by probe: the
+`advance(w)` clause, grounded until now only in the landed codegen's
+hard-coded `next()` bodies, authored through the DSL and emitted at the
+embedded placement (/tmp/m3-probe-r4-advance, 5/5). Still admitted but
+unemitted: csr at a fused root-marked self (Frontier). Spike-verified
 islands: keyed mechanics in both embedded and store-level map placements
 (spike 11; the edge-induced probe, 5/5 tests), CSR with its phase
 annotations (spike 6), one authored validate body emitted at two
@@ -224,8 +232,11 @@ backing! {
         membership: existence        // no insert op; the write path is add_<B>
         iter Walk { cur: u32, len: u32 }   // codegen adds the store ref, and
                                            // at embedded placements the host
-                                           // path — path-id handles need it
-                                           // (the reserved iterator fields)
+                                           // path — the reserved iterator
+                                           // fields (r4-advance: the index
+                                           // mint needs the host; the link
+                                           // walk takes it from the path id
+                                           // and leaves the field unused)
         iterate(a) { Walk { cur: 0, len: b_arena_of(a).len() } }
         advance(w) { /* (w.cur < w.len).then(|| { let n = handle(w.cur);
                           w.cur += 1; n }) — handles minted from w.cur and,
@@ -458,15 +469,17 @@ What each clause is load-bearing for:
   recipes — index mint, link walk, slice walk — are three distinct
   bodies with no DSL home, and a user Walk is unemittable). Reserved
   iterator fields: codegen adds the store ref to every Walk, and at
-  embedded placements the host path beside it — path-id handles need
-  the host to mint from, and `iterate(a)`'s `a` is the host id there
-  (main's M2: embedded iteration "gains a host parameter" — the branch's
-  copy predates the sentence). The clause's own mechanism — body
-  splicing, the `w` binding, `handle(x)` availability — is unprobed
-  (every probe iterator to date was hand-emitted whole); round 4's
-  advance-at-embedded probe is the recorded coverage, and `handle(x)`
-  joins the reserved placeholders (role table) so the body's vocabulary
-  stays closed.
+  embedded placements the host path beside it — `iterate(a)`'s `a` is
+  the host id there (M2: embedded iteration "gains a host parameter").
+  Which recipes need the host is probe-graded, not blanket-claimed
+  (/tmp/m3-probe-r4-advance, 5/5 — the clause's own mechanism, body
+  splicing and the `w` binding and `handle(x)` availability, authored
+  and emitted at the embedded placement through both stdlib recipes):
+  the index mint takes the host from the Walk's reserved field, while
+  the intrusive link walk mints from the path id itself and leaves the
+  reserved host field unused — the field is reserved for the recipes
+  that need it. `handle(x)` stays in the reserved placeholders (role
+  table) so the body's vocabulary stays closed.
 
 Two mechanical obligations come with user-writable backings:
 
@@ -895,10 +908,11 @@ green unchanged.
       union
 - [ ] the `union` → `sum` code rename landed (it rides with M2's
       step-1 grammar pass)
-- [ ] the round-4 probe reports read, their limits carried or retired:
-      /tmp/m3-probe-r4-advance (advance clause mechanics at the
-      embedded placement), /tmp/m3-probe-r4-bounce (the cross-crate
-      courier bounce)
+- [x] /tmp/m3-probe-r4-advance read, its limits carried (the
+      reserved-host-field refinement, grammar section); the planned
+      /tmp/m3-probe-r4-bounce superseded at the round-4 merge — the
+      bounce evidence is step 2's permanent in-repo gate, which adds
+      the use-site helper-resolution arm (header)
 
 **Step 1 — `backing!` parser + courier emission.** Contract: the
 clause grammar (the pinned table and its rules) and the token-routing
@@ -933,10 +947,12 @@ token-routing paragraph (declaring-crate resolver).
       couriers resolved per one `implement!`-shaped invocation, bodies
       spliced hygienically, with the cross-crate arms — a stdlib
       backing resolved from a user crate, a user backing declared in a
-      second crate, a renamed dependency (/tmp/m3-probe-r4-bounce is
-      the throwaway evidence; this is the test that stays). The hygiene
-      half is spike-5-proven and the resolution half spike-1-proven;
-      the conjunction is what this gate bounces
+      second crate, a renamed dependency — and the use-site
+      helper-resolution arm: a helper named in a hook body must resolve
+      at the backing's use site (spike 5's caveat 2), so the gate
+      bounces the whole conjunction, resolution and hygiene together
+      (round 4 superseded the planned throwaway probe once M2 merged —
+      header; this gate is the evidence)
 - Depends: 1
 
 **Step 3 — `field` + `arena` in the DSL; the fixed table deleted.**
