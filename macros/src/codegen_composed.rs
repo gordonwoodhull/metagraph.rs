@@ -441,12 +441,31 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
     // (member i, arrow name) -> field name in the class record; per class,
     // contributions ride in ClassData::fields in collection order
     // (composition-instance order, then member schema order).
+    // An open entity closed by `<->` is never a class member — its records
+    // ARE the partner's — so its arrow fields contribute to the hosting
+    // class (e.g. the `next_elems` link of a chain rides the inner-edge
+    // records that close `Elem`).
+    let hosted: Vec<Vec<(usize, usize)>> = {
+        let mut hosted: Vec<Vec<(usize, usize)>> =
+            classes.iter().map(|c| c.members.clone()).collect();
+        for i in 0..n_inst {
+            for (e, ent) in members[i].2.entities.iter().enumerate() {
+                if ent.open {
+                    let ci = class_index_of(i, e);
+                    if classes[ci].owns_records {
+                        hosted[ci].push((i, e));
+                    }
+                }
+            }
+        }
+        hosted
+    };
     let mut field_of_arrow: HashMap<(usize, String), Ident2> = HashMap::new();
     for ci in 0..classes.len() {
         if !classes[ci].owns_records {
             continue;
         }
-        let cls_members = classes[ci].members.clone();
+        let cls_members = hosted[ci].clone();
         for (i, e) in cls_members {
             for info in &inst_infos[i] {
                 let d = info.decl;

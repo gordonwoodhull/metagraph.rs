@@ -79,4 +79,17 @@ pub mod shapes {
             }
         }
     }
+
+    // The Chain pattern for edge-chain refinement (M2 step 11): an outer
+    // edge is-also a chain of inner edges. `Elem` is open — there is no Elem
+    // arena; chain membership threads through the inner-edge records
+    // themselves (a head field on the fused outer-edge record, a `next` link
+    // on each inner edge), exactly the way `out_edges` threads through edge
+    // records.
+    pattern! {
+        Chain {
+            entities: root Chain, Elem(open);
+            arrows { elems: metagraph_exper::stdlib::OutEdges, Chain -> Elem; }
+        }
+    }
 }

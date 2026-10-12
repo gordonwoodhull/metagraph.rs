@@ -5,7 +5,7 @@
 //! declaring-crate resolver's acceptance test: per-member baked packages
 //! must map to local names (`mg`, `fx`) at the implement site.
 
-use mg::{compose_pattern, implement};
+use mg::implement;
 
 mod comp {
     use mg::compose_pattern;
@@ -20,8 +20,6 @@ mod comp {
         }
     }
 }
-
-use comp::edge_induced::markers;
 
 implement! {
     comp::EdgeInduced as Store {
@@ -52,6 +50,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comp::edge_induced::markers;
     use fx::roots::SubNodeOf;
     use mg::stdlib::Nodes;
 
