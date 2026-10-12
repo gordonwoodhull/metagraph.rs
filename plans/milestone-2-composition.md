@@ -26,15 +26,28 @@ milestone's known frontier, stated in full: embedding depth 1 only;
 intrusive arrows sourced at embedded classes or unfused roots rejected;
 field backing into an embedded class rejected (its id needs a host path);
 arena arrows into an embedded class hosted by another class rejected;
-`<=>` transitivity exercised only on two-member classes; constructor
-argument name collisions across instances of one fusion class dedup
-the argument list, keeping the first — but the dropped member's field
-is then un-fed (feeding it from the shared argument needs
-cross-instance id-sort unification; leaving it unset is inexpressible),
-and spike 1 never exercised a true collision (its field emission would
-hit a duplicate field first); and further composition of a composed
-pattern untested (the emitted courier has the right shape, but the
-member-schema grammar would need to nest).
+`<=>` transitivity is vacuous beyond two members *by design* — every
+legal colocation class has exactly one element member (Structural
+validation pins this; the spike exercised two-member classes only);
+constructor argument name collisions across instances of one fusion
+class dedup the argument list, keeping the first, and the dropped
+member's field is fed from the kept argument when the two arguments'
+resolved target classes agree — the partner map usually guarantees
+this — with the composition rejected at compose time otherwise (pinned
+rule, replacing the earlier "un-fed field" frontier: Rust record
+literals cannot leave a field unset, so this was a missing emission
+rule, not a deferrable detail). Spike 1 never exercised a true
+collision (its field emission would hit a duplicate field first), so
+the rule is plan-pinned, not spike-verified; further composition of a
+composed pattern untested (the emitted courier has the right shape,
+but the member-schema grammar would need to nest); union (`:=`)
+sibling sets whose targets resolve to different classes after fusion
+are unchecked — a generated-code compile error, not a validation
+message (no planned test composes a cross-instance union);
+cross-crate composition of a pattern with crate-local roots requires
+the implementing crate to depend directly on every member pattern's
+declaring crate (the declaring-crate resolver's one constraint —
+renames handled, re-export routing rejected; Open entities).
 
 ## In scope
 
@@ -158,10 +171,24 @@ Fusion has two flavors (epic invariant 4):
   collision. Merged constructors take the union of every member's total
   `one`-arrow arguments in that same order — composition-instance order,
   then each member's schema order (argument-name collisions across
-  instances of one fusion class silently dedup, keeping the first:
-  frontier). Counts match placement: a root-level entity gets a global
+  instances of one fusion class dedup, keeping the first, and feed the
+  dropped member's field from the kept argument when the two arguments'
+  resolved target classes agree — the partner map usually guarantees
+  this — and reject the composition at compose time otherwise; pinned
+  rule, not spike-verified: spike 1 never exercised a true collision). Counts match placement: a root-level entity gets a global
   `*_count()`; an embedded entity's count is per-host
-  (`sub_node_count(host: OuterNodeId)` — spike 1's shape). The store
+  (`sub_node_count(host: OuterNodeId)` — spike 1's shape). Iterators
+  match placement too: M1's arena iterator is a single global index
+  range, so iteration over an embedded class gains a host parameter
+  and walks that host record's embedded arena, yielding nested
+  handles (root store reference plus index path) — this is the
+  permissive reading that keeps the Hierarchy test's
+  `sub.subnodes: arena` / `sub.subedges: arena` bindings legal: the
+  arrows are sourced at `sub`'s colocated root, so the embedded arena
+  is reachable through the same index path the self record occupies
+  (the frontier's "arena arrows into an embedded class hosted by
+  another class" rejection targets exactly the other shape — an arena
+  arrow whose self is *not* the host). The store
   entry point for a composed pattern with several unfused roots is one
   instance-prefixed accessor per unfused root entity
   (`outer_graph()`, `inner_graph()`).
@@ -189,25 +216,65 @@ Fusion has two flavors (epic invariant 4):
   `sub.subnodes:`). Two instances of the same pattern may choose different
   backings. (Spike 1's tests abbreviated whole instances with `outer.*`
   sugar; that is test-local shorthand, not grammar — the planned tests
-  enumerate bindings.)
+  enumerate bindings.) This extends M1's binding grammar: M1's
+  `Binding.arrow` is a bare `Ident` (`parse_bindings`), and the
+  duplicate/unknown-arrow checks compare `Ident` equality. The shared
+  grammar module gains the qualified `instance.arrow` form (dotted pair
+  of idents), the duplicate/unknown checks compare qualified keys, and
+  the module's round-trip test grows accordingly. The flat bare-`Ident`
+  form stays legal and means what it meant in M1.
 
 ### Open entities
 
-`pattern!` gains the ability to declare entities it does not own, to be
-closed by reference fusion at composition time. `Subgraph` is defined
+Patterns may declare entities they do not own, to be closed by reference
+fusion at composition time — the *declaration* machinery shipped in M1
+(`(open)` parses, rides the shared schema grammar into the courier,
+open-as-source is rejected at `pattern!` time, and open entities are
+rejected at `implement!` time with a message naming `compose_pattern!`).
+M2 adds the closure semantics. `Subgraph` is defined
 *over* a main graph without naming it. Open entities may only be arrow
 *targets* within their declaring pattern (closing by `<->` merges no
 records, so a sourced arrow's field would have no home); open-as-source
 with colocation closure and constructor merging is deferred. Per the
 trait-identity invariant, every arrow instantiates a root arrow pattern;
 `Subgraph`'s novel arrows (`main_node`, `subnode`, …) are declared as
-their own single-arrow roots. In principle neither placement needs
-privilege — the stdlib, or alongside the pattern — since local roots
-register themselves through the same courier mechanism (M1). What the
-spike compiled is the stdlib placement; declaring a local root
-*alongside* the pattern is unverified (frontier), and spike 1's codegen
-resolved root paths by last segment, papering over path prefixes — a
-shortcut the real resolver must not inherit:
+their own single-arrow roots. **Root placement decision: the four roots
+are declared *alongside* the pattern — local roots are the goal, not the
+stdlib fallback.** That goal requires a resolver M1 does not have: M1's
+`resolve_schema_path` prefixes every non-`crate::`-rooted instantiation
+path with the *runtime* crate root, so the sketched bare `MainNode` /
+`SubNodeOf` spellings resolve to `::metagraph_exper::MainNode` at the
+`implement!` site and fail outside the runtime crate, while
+`crate::`-rooted spellings pass verbatim but bind `crate` at the
+implement! site — correct only when pattern, compose, and implement all
+share one crate (and `tests/` integration tests are a separate crate
+from `src/`). A proc macro cannot ask what crate it is expanding in, so
+M2 begins with the **declaring-crate resolver**, spike-verified
+(/tmp/m2-probe-root-resolver, six-crate workspace, green): `pattern!`
+reads `CARGO_PKG_NAME` from its process environment at expansion time —
+Cargo sets it for the crate being compiled, and the proc macro runs in
+that crate's rustc process — and bakes the declaring crate's package
+name into the courier schema as a string literal; the final hop maps it
+to the implementing crate's local name with the `proc-macro-crate` scan
+M1 already uses for the runtime root (`Itself` → `crate::…`,
+`Name(n)` → `::n::…`, renames handled; missing dependency fails with a
+clean `compile_error!`). The `$crate`-hygiene alternative also works but
+only under verbatim token splicing — re-parsing the substituted path as
+`syn::Path` is untested, and the composed-schema grammar *does* parse
+paths, so env+`proc_macro_crate` is the mechanism. Spike-pinned
+constraints: the schema must ride the courier hops as **one group token
+tree** (never re-tokenized); the **implementing crate must depend
+directly on every member pattern's declaring crate** (renames fine;
+composition through a re-exporting intermediate is not routed — the
+re-export chain would have to be recorded in the schema, and isn't);
+courier transcribers spell the forwarding target `$($fwd:tt)::+` (a
+`path` fragment can't be followed by `!`), nested macro invocations are
+brace-delimited for item position, a `macro_export` courier is invoked
+by textual name inside its own crate (`crate::name!` is
+future-incompat deny), and courier bodies containing `$` metavariables
+are built as source text via `from_str`, never `quote!`. Spike 1's
+codegen resolved root paths by last segment, papering over path
+prefixes — a shortcut this resolver replaces:
 
 ```rust
 pattern! {
@@ -234,14 +301,22 @@ trait-identity section for the alias rule.
 
 New cardinality: keyed partial, spelled `key(K)` — a partial lookup
 parameterized by an entity of another sort. This is the first relation
-whose method takes an argument beyond `&self`; M1's root-trait grammar
-reserves the parameter slot for it. The keyed cardinality is declared on
+whose method takes an argument beyond `&self`; M1's registration-courier
+metadata already reserves the slot for it (the fifth tuple element,
+parsed as `key` and always `-` in M1 — the reservation is in the
+*metadata*, not in the trait grammar, which cannot yet declare a keyed
+root). The keyed cardinality travels as a third value in the metadata's
+cardinality slot (`keyed`, beside `one`/`many`), with the key's
+associated-type name in the key slot. The keyed cardinality is declared on
 the root, which owns the method and its key parameter; the instantiation
 supplies only the key-entity binding (`key(MainNode)`), a local clause
 like the instantiation-side `by` — it never restates the cardinality
 (`by` never appears on a root, which declares a bare capability;
 `key(K)` must, since the root owns the keyed cardinality — see M1's
-trait-identity section).
+trait-identity section). `key(K)` does not combine with `by` or with
+`:= union` (keyed arrows bind explicitly and are never derived), and an
+unbound keyed arrow draws the same missing-binding error as an unbound
+`many` arrow.
 
 The root side, sketched (`SubNodeOf` is the stdlib candidate; `SubEdgeOf`
 has the same shape):
@@ -284,9 +359,12 @@ backing whose hooks maintain *derived lookup state* (intrusive_list's
 hooks already mutate records; hash_index's maintain a secondary index),
 and it validates the hook interface designed in M1. Keyed arrows bind
 explicitly, like `many` arrows; `hash_index` is the only keyed-legal
-backing in the fixed table, and M1's wrong-cardinality validation covers
-both directions (`hash_index` on a non-keyed arrow, a keyed arrow bound
-to anything else).
+backing in the fixed table. M1's wrong-cardinality validation covers
+both directions *for M1's three backings* (`field` on `many`,
+`intrusive_list` on `one` — trybuild fixtures exist for both); the
+keyed directions are new match arms in the same check — `hash_index`
+on a non-keyed arrow, a keyed arrow bound to anything else — plus a
+new unbound-keyed-arrow error path.
 
 Two configurations, both verified by hand-written emission:
 
@@ -300,9 +378,13 @@ Two configurations, both verified by hand-written emission:
   plain id (`InnerNodeId`, no wrapper newtype).
 - *Unfused-root self* — the edge-induced composition (Tests, below),
   the arrow sourced at `sub`'s unfused root (review probe, 5 tests):
-  the self owns no record or id, so the map is a store-level field —
-  the contribution site M1's backing contract has always allowed — and
-  the insert op omits the self argument: `insert_subnode(key, target)`.
+  the self owns no record or id, so the map is a store-level field.
+  The M1 *plan*'s backing contract allowed a store-level contribution
+  site, but M1's *code* implements only self-record and target-record
+  contributions (`field_decls` is keyed by entity; the store struct's
+  fields are exactly the per-entity arenas) — the store-level site is
+  new M2 codegen machinery, not reuse of an existing one. The insert
+  op omits the self argument: `insert_subnode(key, target)`.
   Write ops for arrows sourced at an unfused root follow this rule
   generally: there is exactly one self, and it has no id to pass. The
   colocated-root self is the host shape's mirror: one self per host
@@ -357,7 +439,14 @@ read-side addition it will reuse:
   `add_*` constructors are thin orchestration over them. (Pattern-level
   constructor logic such as induction sits in the orchestration layer,
   not inside backing hooks.) M4's flush replays change sets through
-  these same hooks.
+  these same hooks. Note what M1's *code* actually provides: named hooks
+  exist only for `intrusive_list` (the M1 plan's "hooks: constructor
+  arg" for `field` was never realized as a function — field-backed
+  values move into the record literal inline), and no `set_<one-arrow>`
+  op exists anywhere. M2 therefore *grows* the hook surface it claims
+  to reuse: field writes move behind named hooks and hash_index gains
+  its insert hook, so that every storage mutation is replayable. This
+  is a deliberate M1-code change, not just an addition.
 - **Builder methods are named and shaped as if they were already
   write-trait methods** (`add_<entity>`, `insert_<arrow>`,
   `set_<one-arrow>`), so M4 can lift them into generated write traits —
@@ -395,6 +484,24 @@ The index-path handle representation doubles as M4's change-set
 addressing scheme: a change-set entry is an `(index path, operation)`
 pair.
 
+Where M4 is *not* additive, stated plainly so M2 doesn't over-commit:
+M2 bakes in append-only identity — dense positional `u32` ids
+(`NodeId(pub u32)` is pinned by tests), index-range iterators, and
+index-path addressing. M4 removal forces a choice M2 cannot pre-make:
+tombstones (every iterator, count, and value-in-arena check grows
+liveness filtering — every backing's access protocol changes) or
+compaction (every stored id, map key/value, and intrusive link needs
+cascade rewriting). Index-path change-set addressing "doubles as" M4's
+scheme only for append+mutate. Likewise the duplicate-key rejection:
+M2's check lives in the mutating insert hook, but M4's staging needs
+the same determination as a pure predicate over (old store, staged
+ops) — "deterministically detectable where the op is submitted, never
+a flush error" — so the hook should be factored check-then-write from
+the start, with the predicate callable without performing the write.
+And M4's `set_<one-arrow>` will need per-backing *delete* hooks
+(un-linking a `by`-derived intrusive membership), a structural growth
+of the hook interface beyond the keyed insert M2 adds.
+
 ### Marker qualification becomes real
 
 Composed patterns instantiate the same arrow more than once on fused
@@ -422,13 +529,17 @@ implemented as a plain function over a hand-written schema struct, with
 a pass and a fail fixture per check, plus the Hierarchy and Refinement
 compositions as realistic inputs.
 
-Two run at `pattern!` time (each needs only the declaring pattern):
+Two run at `pattern!` time (each needs only the declaring pattern).
+Both already ship in M1 — the no-arrow-targets-root check with a
+pinned trybuild fixture, the open-targets-only check without one — so
+M2's work here is the compile-fail fixture for the open-as-source
+check, not the checks themselves:
 
 - Open entities are arrow *targets* only in their declaring pattern.
 - No arrow targets the root-marked entity: it owns no id type to store
   (M1's naming rule). Before this rule existed the failure surfaced as
-  a generated-code compile error (spike 10 observed it); as a check it
-  gets a real message quoting the offending tokens. Arrows *sourced* at
+  a generated-code compile error (spike 10 observed it); M1 turned it
+  into a check with a real message. Arrows *sourced* at
   the root are fine — that is what the root accessor's handle is for.
 
 Five run at `compose_pattern!` time — all member schemas and fusions are
@@ -458,7 +569,25 @@ classes-closed check:
   — spike 1's message: "colocation class fuses elements of multiple
   instances"). The host shape — one instance's element hosting other
   instances' roots, `outer.Node <=> sub.Subgraph` — is the legal
-  cross-instance form.
+  cross-instance form. A consequence, accepted as a design decision
+  (2026-10 review): every legal colocation class has exactly two
+  members — one element member plus at most one root — because any
+  transitively formed three-member class contains either two
+  cross-instance elements or two roots, both rejected. `<=>`
+  transitivity is therefore vacuous in practice, and one host element
+  can host exactly *one* instance's arenas: two Subgraph instances
+  both fused to `outer.Node` over the same inner graph is rejected.
+  Runtime multiplicity (each outer node owning its own embedded copy
+  of one pattern's arenas) is unaffected; what is rejected is multiple
+  *patterns* on one host.
+- Generated names are unique: fusion-class names (first element
+  member's post-collision name), instance-prefixed entity names,
+  arena fields, iterators, read-view getters, and root accessors must
+  not collide after all prefixes and class namings are applied. The
+  naming rules above pin the tiebreaks for *entity* declarations;
+  this check catches what they don't (two fusion classes deriving
+  one name; a fused-class name meeting a third instance's prefixed
+  entity; read-view getters meeting root accessors or each other).
 
 Two run at `implement!` time, because they need backing bindings:
 
@@ -471,7 +600,20 @@ Two run at `implement!` time, because they need backing bindings:
   per-backing contribution typing (inline vs id), which is
   implement!-time information.)
 - Field contributions must have a home after placement, and the home
-  must be id-addressable (a `field`-backing rule — below). One
+  must be id-addressable (a `field`-backing rule — below). This check
+  **subsumes M1's flat-codegen rejection** of `field`/`intrusive_list`
+  arrows sourced at the root-marked entity ("the root owns no record"):
+  M1's version runs against the raw member schema and would reject the
+  Refinement sketch's `elems` arrow, whose self record exists only
+  post-fusion (`outer.Edge <=> chain.Chain` gives chain's root the
+  fused outer-edge record). The re-scoped rule runs *after*
+  fusion-class and host resolution: a root-marked self has a record
+  exactly when it is colocation-fused into a host element, so the
+  rejection fires only for unfused roots (where it houses the
+  frontier's "intrusive arrows sourced at … unfused roots" item).
+  A verbatim port of M1's check into composed codegen kills the
+  milestone's own Refinement test — the spike solved this in code;
+  this paragraph is the plan recording the rule. One
   `implement!` call generates **one root store**;
   every instance's arenas live in that store's tree (root-level, or
   embedded per host record by the placement rule), so for contributions
@@ -508,10 +650,15 @@ M2, forced by M4's flush). This is the canonical inventory — M4's flush
 runs exactly these:
 
 - **Key checks** (keyed partial arrows): key existence (every key id
-  names a real record) and value-in-arena (every mapped target id is a
-  live record). Key uniqueness per self object is not a runtime check:
-  a keyed arrow is a function because inserts onto a live key are
-  rejected at the call (Keyed partial arrows).
+  names a real record), value-in-arena (every mapped target id is a
+  live record), and value-host agreement (an embedded-target map holds
+  host-anchored path ids; a value whose host component names a
+  *different* host record is in-bounds in its own host's arena, so
+  value-in-arena alone passes it — spike 11's `validate` needed this
+  third check, and since M4's flush runs exactly this inventory, the
+  omission would be load-bearing). Key uniqueness per self object is
+  not a runtime check: a keyed arrow is a function because inserts
+  onto a live key are rejected at the call (Keyed partial arrows).
 - **Per-backing structural checks.** Endpoint ids in arena range;
   intrusive link well-formedness (in-range links). For `intrusive_list`
   there is additionally an exclusive-membership contract — built in
@@ -568,9 +715,17 @@ impossible by construction.
   induces subnodes for its endpoints, deduplicated via the hash index;
   induction is constructor logic, not schema vocabulary (see M4), and
   the inducing constructor reads the endpoints through the builder's
-  id-based read view (Builder shape, above) — the mechanism is
+  id-based read view (Builder shape, above). `add_subedge` is
+  **hand-written user code in the test** — an inherent `impl` block on
+  the generated store, exactly as /tmp/m2-probe-edge-induced has it —
+  not macro-generated; there is no constructor-extension grammar, and
+  none is planned before M4. The mechanism is
   probe-verified end to end (/tmp/m2-probe-edge-induced); the generated
-  code is uncompiled.
+  code is uncompiled. With the declaring-crate resolver spike-verified
+  (Open entities), this test lives in `tests/` as an integration test,
+  and a fully cross-crate composed-implement test (M1 step 9's
+  precedent, including a renamed-dependency variant) exercises the
+  resolver's `Name(n)` arm as the mechanism's acceptance test.
 - Hierarchy: outer graph whose nodes contain subgraphs of the inner
   graph; traverse both levels. The test binds the keyed arrows —
   `sub.subnode: hash_index`, `sub.subedge: hash_index`, the spike-11
@@ -627,6 +782,19 @@ impossible by construction.
   `out_edges` walk (a generic `OutEdges<M>` traversal applied unchanged),
   and the unchecked intrusive-ownership hazard was reproduced — which is
   where the `validate()` partition check above comes from.
+- Negative tests — the milestone's largest spec section is validation,
+  and positive tests alone leave it untested. Following M1 step 8's
+  precedent: trybuild compile-fail fixtures for the structural checks
+  (the open-as-source `pattern!`-time check, each of the compose-time
+  five — unknown fusion endpoint, `<->` arity/endpoint violations,
+  double reference closure, unclosed open entity, placement conflicts —
+  the generated-name-uniqueness check, the implement!-time home and
+  addressability rejections, and the new keyed-cardinality mismatches);
+  a `#[should_panic]` test for duplicate-key rejection at the insert
+  call; and `validate()` failure tests driving the canonical inventory —
+  ghost keys, out-of-range and cross-host path-id values, corrupted
+  intrusive chains hitting both halves of the partition check (shared
+  membership vs. cycle, distinguished in the report).
 
 ## Deferred details
 
@@ -655,5 +823,14 @@ Pinned down during the milestone, not before:
 M1 complete: courier mechanics (including the target-parameterized rule
 this milestone's composition chain reuses), marker infrastructure,
 root registration couriers (the Subgraph sketch's local roots need them),
-the insert-hook interface, and the `validate()` boundary. M2 is the stress
-test of all five; expect the hook interface to grow (keyed insert).
+the insert-hook interface, and the `validate()` boundary. All five are
+verified present in merged M1 (3c016e7). M1 additionally shipped three
+things earlier drafts of this plan treated as M2 work: the `(open)`
+entity declaration machinery, the registration metadata's key slot, and
+both `pattern!`-time structural checks. Two things this plan describes
+as M1 commitments are M1-*plan* commitments its code does not yet
+provide, and are M2 work: named hooks for anything but `intrusive_list`
+(field writes currently move into the record literal inline) and the
+store-level backing contribution site. M2 is the stress
+test of all five; expect the hook interface to grow (keyed insert —
+and, per Builder shape, field-write hooks as well).
