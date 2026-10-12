@@ -1,46 +1,380 @@
 //! Flat (non-composed) store codegen — the codegen stage of
-//! `__implement_gen!`, entered once every registration courier has
-//! published its metadata tuple. All codegen lives here, in real Rust, not
-//! tt-munching.
+//! `__implement_gen!`, entered once every backing declaration and root
+//! metadata tuple has been collected. All codegen lives here, in real
+//! Rust, not tt-munching.
 //!
-//! Layout rules (plans/milestone-1):
-//! - every non-root entity gets a `Vec` arena, an id newtype, a record
-//!   struct, and a `Copy` handle, unconditionally;
-//! - the root-marked entity owns nothing but its handle and the root
-//!   accessor — no root id, record, arena, or count (spike 10);
-//! - trait identity (method, GAT, associated types) comes from the
-//!   registration metadata, never the instantiation's local alias;
-//! - handles hand-write `Eq`/`Hash` forwarding to (store pointer, id);
-//! - backing mutations live in named doc-hidden hook functions; `add_*`
-//!   constructors are thin orchestration over them.
+//! M3: the four built-ins are no longer special. Every bound arrow's
+//! storage is driven by its resolved `backing!` declaration — contributed
+//! fields (renamed per the declaration's naming formulas), hook bodies,
+//! the access protocols, and validate bodies are the declaration's
+//! authored tokens, bound per placement by the role-substitution engine
+//! ([`crate::roles`]). What stays uniform (the plan's (b) half): the
+//! entity kit (`Id(pub u32)` newtype, record, `Copy` handle with
+//! hand-written `Eq`/`Hash` by (store pointer, id)), placement of
+//! contributions (self record, or the store when the self is the unfused
+//! root), the doc-hidden hook-method naming, the `__validate_<arrow>`
+//! convention with its uniform range pre-pass, and collision-free
+//! generated names.
 
 use std::collections::HashMap;
 
-use proc_macro2::{Ident as Ident2, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use proc_macro2::{Ident as Ident2, Span, TokenStream as TokenStream2};
+use quote::{format_ident, quote, ToTokens};
 
+use crate::backing::{formula_name, BackingCard, BackingDecl, Clause, ContribField, NameFormula, OnTarget, ValidateVariant};
 use crate::grammar::{
     arena_fld, data_ty, id_ty, iter_ty, link_stem, marker_ty, path_tokens, snake, Binding,
     Cardinality, RootMeta,
 };
+use crate::roles::{self, Ent, RoleBinding};
 use crate::ChainConfig;
 
-/// A resolved arrow: declaration plus its root's metadata and backing.
+/// A resolved arrow: declaration plus its root's metadata and backing
+/// declaration (`None` for derived `:= sum` arrows — never bound).
 struct ArrowInfo<'a> {
     decl: &'a crate::grammar::ArrowDecl,
     meta: &'a RootMeta,
-    /// `None` for derived (`:= sum`) arrows — never bound to a backing.
-    backing: Option<String>,
+    backing: Option<&'a BackingDecl>,
+}
+
+fn card_of_decl(d: &BackingDecl) -> Cardinality {
+    match d.card {
+        BackingCard::One => Cardinality::One,
+        BackingCard::Many => Cardinality::Many,
+        BackingCard::Keyed => Cardinality::Keyed,
+    }
 }
 
 /// Codegen entry: dispatch on the schema kind. Flat codegen is M1's;
-/// composed codegen (fusion classes, placement, path ids) is step 7.
+/// composed codegen (fusion classes, placement, path ids) is M2's.
 pub(crate) fn expand(config: &ChainConfig) -> syn::Result<TokenStream2> {
     match &config.schema {
         crate::grammar::GenSchema::Flat(_) => expand_flat(config),
         crate::grammar::GenSchema::Composed(_) => crate::codegen_composed::expand_composed(config),
     }
 }
+
+// ---------------------------------------------------------------------------
+// The flat role binding
+// ---------------------------------------------------------------------------
+
+/// Flat placement of one binding's roles: store-level arenas, plain ids,
+/// the self record (or the store itself at an unfused-root self).
+struct FlatRoles {
+    store: TokenStream2,
+    a: Option<TokenStream2>,
+    k: Option<TokenStream2>,
+    w: Option<TokenStream2>,
+    root_self: bool,
+    id_ty: [TokenStream2; 3],
+    arena: [Ident2; 3],
+    map_field: Option<Ident2>,
+    det_field: Option<Ident2>,
+    tgt_handle: Ident2,
+    walk_ty: Option<Ident2>,
+    renames: Vec<(String, Ident2)>,
+    walk_fields: Vec<(Ident2, TokenStream2)>,
+}
+
+impl FlatRoles {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        decl: &BackingDecl,
+        arrow: &crate::grammar::ArrowDecl,
+        root_self: bool,
+        tgt_handle: Ident2,
+    ) -> Self {
+        let id_a = id_ty(&arrow.source);
+        let id_b = id_ty(&arrow.target);
+        let id_k = arrow.key.as_ref().map(id_ty);
+        let renames = contributed_fields(decl)
+            .into_iter()
+            .map(|f| (f.logical.to_string(), formula_name(&f, f.formula, &arrow.name, &link_stem(&arrow.name))))
+            .collect();
+        let walk_fields = decl
+            .clause(|c| matches!(c, Clause::Iter { .. }))
+            .map(|c| match c {
+                Clause::Iter { fields, .. } => fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.to_token_stream()))
+                    .collect::<Vec<_>>(),
+                _ => unreachable!(),
+            })
+            .unwrap_or_default();
+        FlatRoles {
+            store: quote!(self),
+            a: None,
+            k: None,
+            w: None,
+            root_self,
+            id_ty: [
+                quote!(#id_a),
+                quote!(#id_b),
+                id_k.map(|i| quote!(#i)).unwrap_or(quote!(())),
+            ],
+            arena: [
+                arena_fld(&arrow.source),
+                arena_fld(&arrow.target),
+                arrow.key.as_ref().map(arena_fld).unwrap_or_else(|| arena_fld(&arrow.target)),
+            ],
+            map_field: contributed_fields(decl)
+                .find(|f| f.formula == NameFormula::Suffix)
+                .map(|f| formula_name(&f, f.formula, &arrow.name, &link_stem(&arrow.name))),
+            det_field: None,
+            tgt_handle,
+            walk_ty: None,
+            renames,
+            walk_fields,
+        }
+    }
+
+    fn at(mut self, store: TokenStream2) -> Self {
+        self.store = store;
+        self
+    }
+
+    fn with_a(mut self, a: TokenStream2) -> Self {
+        self.a = Some(a);
+        self
+    }
+
+    fn with_k(mut self, k: TokenStream2) -> Self {
+        self.k = Some(k);
+        self
+    }
+
+    fn with_w(mut self, w: TokenStream2) -> Self {
+        self.w = Some(w);
+        self
+    }
+
+    fn with_walk_ty(mut self, w: Ident2) -> Self {
+        self.walk_ty = Some(w);
+        self
+    }
+
+    fn with_det(mut self, det: Ident2) -> Self {
+        self.det_field = Some(det);
+        self
+    }
+}
+
+impl RoleBinding for FlatRoles {
+    fn store(&self) -> TokenStream2 {
+        self.store.clone()
+    }
+    fn param(&self, name: &str) -> Option<TokenStream2> {
+        match name {
+            "a" => self.a.clone().or_else(|| self.root_self.then(|| quote!(()))),
+            "k" => self.k.clone(),
+            "w" => self.w.clone(),
+            _ => None,
+        }
+    }
+    fn id_ty(&self, e: Ent) -> TokenStream2 {
+        self.id_ty[match e {
+            Ent::A => 0,
+            Ent::B => 1,
+            Ent::K => 2,
+        }]
+        .clone()
+    }
+    fn rec(&self, arg: TokenStream2, e: Ent) -> TokenStream2 {
+        if self.root_self && e == Ent::A {
+            // The unfused root's record is the store itself.
+            return self.store();
+        }
+        let arena = &self.arena[match e {
+            Ent::A => 0,
+            Ent::B => 1,
+            Ent::K => 2,
+        }];
+        let s = self.store();
+        quote!(#s.#arena[(#arg).0 as usize])
+    }
+    fn records(&self, e: Ent) -> TokenStream2 {
+        if self.root_self && e == Ent::A {
+            return quote!(::core::iter::once(()));
+        }
+        let arena = &self.arena[match e {
+            Ent::A => 0,
+            Ent::B => 1,
+            Ent::K => 2,
+        }];
+        let idt = self.id_ty(e);
+        let s = self.store();
+        quote!((0..#s.#arena.len() as u32).map(#idt))
+    }
+    fn maps(&self) -> TokenStream2 {
+        let f = self.map_field.as_ref().expect("hash_index contributes its map field");
+        let s = self.store();
+        if self.root_self {
+            // One store-level pair; the owner is the vacuous host.
+            quote!(::core::iter::once(((), &#s.#f)))
+        } else {
+            let aa = &self.arena[0];
+            quote!(#s.#aa.iter().map(|d| ((), &d.#f)))
+        }
+    }
+    fn host_of(&self, _arg: TokenStream2, _e: Ent) -> TokenStream2 {
+        quote!(())
+    }
+    fn idx(&self, arg: TokenStream2, _e: Ent) -> TokenStream2 {
+        quote!((#arg).0 as usize)
+    }
+    fn arena_of(&self, e: Ent, _arg: TokenStream2) -> TokenStream2 {
+        let arena = &self.arena[match e {
+            Ent::A => 0,
+            Ent::B => 1,
+            Ent::K => 2,
+        }];
+        let s = self.store();
+        quote!(#s.#arena)
+    }
+    fn map_from(&self, arg: TokenStream2) -> TokenStream2 {
+        let f = self.map_field.as_ref().expect("hash_index contributes its map field");
+        if self.root_self {
+            let s = self.store();
+            quote!(#s.#f)
+        } else {
+            let r = self.rec(arg, Ent::A);
+            quote!(#r.#f)
+        }
+    }
+    fn determining(&self, arg: TokenStream2) -> TokenStream2 {
+        let f = self.det_field.as_ref().expect("validate by binds det_label and the determinant field");
+        let r = self.rec(arg, Ent::B);
+        quote!(#r.#f)
+    }
+    fn handle(&self, arg: TokenStream2, raw: bool) -> TokenStream2 {
+        let h = &self.tgt_handle;
+        let s = self.store();
+        if raw {
+            let idt = self.id_ty(Ent::B);
+            quote!(#h { store: #s, id: #idt(#arg) })
+        } else {
+            quote!(#h { store: #s, id: #arg })
+        }
+    }
+    fn walk_ty(&self) -> Option<Ident2> {
+        self.walk_ty.clone()
+    }
+    fn rename_field(&self, logical: &str) -> Option<Ident2> {
+        self.renames
+            .iter()
+            .find(|(l, _)| l == logical)
+            .map(|(_, e)| e.clone())
+    }
+    fn walk_field_is_raw(&self, field: &str) -> bool {
+        self.walk_fields
+            .iter()
+            .any(|(n, t)| n.to_string() == field && t.to_string() == "u32")
+    }
+    fn is_walk_field(&self, field: &str) -> bool {
+        self.walk_fields.iter().any(|(n, _)| n.to_string() == field)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Declaration helpers
+// ---------------------------------------------------------------------------
+
+/// All contributed fields of a declaration, in clause order.
+fn contributed_fields(decl: &BackingDecl) -> impl Iterator<Item = &ContribField> {
+    decl.clauses.iter().filter_map(|c| match c {
+        Clause::On { fields, .. } => Some(fields.iter().map(|f| f)),
+        _ => None,
+    })
+    .flatten()
+}
+
+fn on_clause<'a>(decl: &'a BackingDecl, target: OnTarget) -> Option<&'a Clause> {
+    decl.clause(|c| matches!(c, Clause::On { target: t, .. } if *t == target))
+}
+
+fn body_of<'a>(decl: &'a BackingDecl, f: fn(&Clause) -> bool) -> Option<&'a TokenStream2> {
+    decl.clause(f).map(|c| match c {
+        Clause::Read { body, .. }
+        | Clause::Lookup { body, .. }
+        | Clause::Iterate { body, .. }
+        | Clause::Advance { body, .. }
+        | Clause::OnInsert { body, .. }
+        | Clause::OnAdd { body, .. }
+        | Clause::Compact { body, .. }
+        | Clause::Validate { body, .. } => body,
+        _ => unreachable!("selector matches body-carrying clauses only"),
+    })
+}
+
+/// How one contributed field initializes in the record literal: the ctor
+/// arg when its declaration carries `ctor_arg` (and the field rides the
+/// self record), else the uniform init rule.
+enum FieldInit {
+    CtorArg(Ident2),
+    None_,
+    New,
+}
+
+fn init_of(decl: &BackingDecl, on_self_record: bool, field: &ContribField, arrow: &Ident2) -> syn::Result<FieldInit> {
+    if decl.has(|c| matches!(c, Clause::CtorArg { .. })) && on_self_record {
+        return Ok(FieldInit::CtorArg(arrow.clone()));
+    }
+    let t = field.ty.to_token_stream().to_string().replace(' ', "");
+    if t.starts_with("Option<") {
+        Ok(FieldInit::None_)
+    } else if t.starts_with("Vec<") || t.starts_with("HashMap<") {
+        Ok(FieldInit::New)
+    } else {
+        Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "field `{}` of backing `{}` is hook-maintained with type `{}`, but the uniform init rule covers only `Option<_>`, `Vec<_>`, and `HashMap<_, _>`",
+                field.logical, decl.name, t
+            ),
+        ))
+    }
+}
+
+fn scaffold_lets(
+    body: &TokenStream2,
+    label: &str,
+    det_label: Option<&str>,
+    errs_always: bool,
+) -> TokenStream2 {
+    let s = body.to_string();
+    let mut out = TokenStream2::new();
+    if errs_always || s.contains("errs") {
+        let e = Ident2::new("errs", Span::mixed_site());
+        out.extend(quote!(let mut #e: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();));
+    }
+    if s.contains("arrow_label") {
+        let a = Ident2::new("arrow_label", Span::mixed_site());
+        out.extend(quote!(let #a: &str = #label;));
+    }
+    if s.contains("det_label") {
+        let d = Ident2::new("det_label", Span::mixed_site());
+        let det = det_label.unwrap_or("");
+        out.extend(quote!(let #d: &str = #det;));
+    }
+    out
+}
+
+/// One collected record/store field with everything emission needs.
+struct CollectedField {
+    emitted: Ident2,
+    ty: TokenStream2,
+    init: FieldInit,
+    /// `Some(entity)` for a record field, `None` for a store field.
+    owner: Option<Ident2>,
+    arrow: Ident2,
+    backing_name: Ident2,
+    /// For the range pre-pass: the field's id type is `Option<id>`.
+    option_id: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Flat codegen
+// ---------------------------------------------------------------------------
 
 pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     let schema = match &config.schema {
@@ -56,7 +390,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     let unique_roots = crate::resolved_roots(schema)?;
     if unique_roots.len() != config.metas.len() {
         return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
+            Span::call_site(),
             format!(
                 "internal: resolved {} root metadata tuples for {} roots",
                 config.metas.len(),
@@ -78,7 +412,14 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         body.entities.iter().filter(|e| !e.root).collect();
     let is_root = |name: &proc_macro2::Ident| root_entity.name == *name;
 
-    // ---- resolve arrows: backing bindings against root cardinalities ----
+    // ---- resolve arrows: backing declarations against root cardinalities ----
+    let decl_of = |key: &str| -> Option<&BackingDecl> {
+        config
+            .backing_decls
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, p)| &p.decl)
+    };
     let binding_of = |name: &str| -> Option<&Binding> {
         config.bindings.iter().find(|b| b.arrow == name)
     };
@@ -93,7 +434,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         match (meta.card, &decl.key) {
             (Cardinality::Keyed, None) => {
                 return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
+                    Span::call_site(),
                     format!(
                         "arrow `{}` instantiates the keyed root `{}` but does not bind a key sort (`key(LocalEntity)`)",
                         decl.name,
@@ -103,7 +444,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             }
             (card, Some(k)) if card != Cardinality::Keyed => {
                 return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
+                    Span::call_site(),
                     format!(
                         "arrow `{}` declares `key({k})` but its root `{}` is not a keyed root",
                         decl.name,
@@ -115,22 +456,14 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         }
         let backing = if decl.sum.is_some() {
             None
-        } else if let Some(b) = binding_of(&decl.name.to_string()) {
-            let b = b.backing.to_string();
-            // Wrong-cardinality check, both directions (M1's three backings
-            // plus the keyed directions). Spans have degraded to the call
-            // site; quote the offending tokens in the message.
-            let ok = match b.as_str() {
-                "field" => meta.card == Cardinality::One,
-                "arena" | "intrusive_list" => meta.card == Cardinality::Many,
-                "hash_index" => meta.card == Cardinality::Keyed,
-                _ => true, // unknown backings get their own error below
-            };
-            if !ok {
+        } else if let Some(key) = binding_of(&decl.name.to_string()).map(|_| decl.name.to_string()) {
+            let d = decl_of(&key).expect("stage1 queued every explicit binding's courier");
+            if card_of_decl(d) != meta.card {
                 return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
+                    Span::call_site(),
                     format!(
-                        "backing `{b}` has wrong cardinality for arrow `{}` (a `{}` arrow)",
+                        "backing `{}` has wrong cardinality for arrow `{}` (a `{}` arrow)",
+                        d.name,
                         decl.name,
                         match meta.card {
                             Cardinality::Many => "many",
@@ -140,10 +473,10 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     ),
                 ));
             }
-            Some(b)
+            Some(d)
         } else if meta.card == Cardinality::Many {
             return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
+                Span::call_site(),
                 format!(
                     "missing backing binding for `many` arrow `{}` (`arena` vs `intrusive_list` is an explicit choice)",
                     decl.name
@@ -151,28 +484,73 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             ));
         } else if meta.card == Cardinality::Keyed {
             return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
+                Span::call_site(),
                 format!(
                     "missing backing binding for keyed arrow `{}` (`hash_index` is the only keyed-legal backing)",
                     decl.name
                 ),
             ));
         } else {
-            Some("field".to_string()) // `one` arrows default to `field`
+            // `one` arrows default to `field`; the default-decl hop has
+            // collected its declaration under the arrow's key.
+            Some(decl_of(&decl.name.to_string()).expect("defaulted one arrow's field declaration collected"))
         };
         infos.push(ArrowInfo { decl, meta, backing });
     }
-    for b in &config.bindings {
-        if !["arena", "field", "intrusive_list", "hash_index"]
-            .contains(&b.backing.to_string().as_str())
+
+    // ---- per-declaration applicability (flat placements) ----
+    for info in &infos {
+        let Some(d) = info.backing else { continue };
+        let named = info.decl.name.to_string();
+        if d.is_phased()
+            || d.has(|c| matches!(c, Clause::Compact { .. }))
+            || d.clauses.iter().any(|c| matches!(c, Clause::On { label: Some(_), .. }))
         {
             return Err(syn::Error::new(
-                b.arrow.span(),
+                Span::call_site(),
                 format!(
-                    "unknown backing `{}` for arrow `{}` (built-ins: `arena`, `field`, `intrusive_list`, `hash_index`)",
-                    b.backing, b.arrow
+                    "backing `{}` (arrow `{named}`) is phased (`phase:`/`compact`/labeled `on store` clauses); phased backings and the type-state store land with M3 step 8",
+                    d.name
                 ),
             ));
+        }
+        // Constructor-orchestrated clauses need an `add_<A>`-orchestrated
+        // self: an unfused root owns no constructor (Store::new() takes no
+        // arguments) and no self id.
+        let orchestrated = d.has(|c| matches!(c, Clause::CtorArg { .. }))
+            || d.has(|c| matches!(c, Clause::OnAdd { .. }));
+        if orchestrated && is_root(&info.decl.source) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "arrow `{named}` is sourced at the root-marked entity `{}`; the `{}` backing needs a field on the self record, and the root owns no record (it *is* the store)",
+                    info.decl.source, d.name
+                ),
+            ));
+        }
+        // Validate-variant selection: the arrow's membership facts pick the
+        // body; a declaration that does not author it is rejected here.
+        if card_of_decl(d) == Cardinality::Many {
+            let wanted = if info.decl.by.is_some() {
+                ValidateVariant::By
+            } else {
+                ValidateVariant::Primitive
+            };
+            let has_it = d.has(|c| matches!(c, Clause::Validate { variant: v, .. } if *v == wanted));
+            if !has_it && d.has(|c| matches!(c, Clause::Validate { .. })) {
+                let missing = match wanted {
+                    ValidateVariant::By => "`validate by`",
+                    ValidateVariant::Primitive => "`validate primitive`",
+                    ValidateVariant::Plain => "`validate`",
+                };
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "backing `{}` authors no {missing} body, but arrow `{named}` needs it (the declaration binds only the other membership kind)",
+                        d.name
+                    ),
+                ));
+            }
         }
     }
 
@@ -180,16 +558,14 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     for info in &infos {
         let Some(det_name) = &info.decl.by else { continue };
         let det = infos.iter().find(|i| &i.decl.name == det_name).ok_or_else(|| {
-            // pattern! already guarantees the determinant is declared and
-            // opposite; reaching here means it is not instantiable.
             syn::Error::new(
-                proc_macro2::Span::call_site(),
+                Span::call_site(),
                 format!("`by {}` does not name a resolvable arrow", det_name),
             )
         })?;
         if det.meta.card != Cardinality::One {
             return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
+                Span::call_site(),
                 format!(
                     "`by {}` names arrow `{}`, which is not total (`one`) — membership would be undefined",
                     det_name, det.decl.name
@@ -198,67 +574,42 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         }
     }
 
-    // Backings that need a self record cannot be sourced at the root-marked
-    // entity: it owns no record to hold their fields.
-    for info in &infos {
-        let needs_self_record = matches!(info.backing.as_deref(), Some("field" | "intrusive_list"));
-        if needs_self_record && is_root(&info.decl.source) {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!(
-                    "arrow `{}` is sourced at the root-marked entity `{}`; the `{}` backing needs a field on the self record, and the root owns no record (it *is* the store)",
-                    info.decl.name, info.decl.source,
-                    info.backing.as_deref().unwrap_or("?")
-                ),
-            ));
-        }
-    }
-
-    // ---- record fields per element entity ----
-    let mut field_decls: HashMap<String, Vec<TokenStream2>> =
+    // ---- collect contributed fields (records + store) ----
+    let mut rec_fields: HashMap<String, Vec<CollectedField>> =
         elements.iter().map(|e| (e.name.to_string(), Vec::new())).collect();
+    let mut store_fields: Vec<CollectedField> = Vec::new();
     for info in &infos {
-        let d = info.decl;
-        match info.backing.as_deref() {
-            Some("field") => {
-                let f = &d.name;
-                let tid = id_ty(&d.target);
-                field_decls.get_mut(&d.source.to_string()).unwrap().push(quote!(
-                    #[doc = concat!("field backing of arrow `", stringify!(#f), "`")]
-                    #f: #tid,
-                ));
-            }
-            Some("intrusive_list") => {
-                let arrow_doc_name = &d.name;
-                let head = format_ident!("first_{}", link_stem(&d.name));
-                let next = format_ident!("next_{}", link_stem(&d.name));
-                let tid = id_ty(&d.target);
-                field_decls.get_mut(&d.source.to_string()).unwrap().push(quote!(
-                    #[doc = concat!("intrusive-list head of arrow `", stringify!(#arrow_doc_name), "`")]
-                    #head: ::core::option::Option<#tid>,
-                ));
-                field_decls.get_mut(&d.target.to_string()).unwrap().push(quote!(
-                    #[doc = concat!("intrusive-list link of arrow `", stringify!(#arrow_doc_name), "`")]
-                    #next: ::core::option::Option<#tid>,
-                ));
-            }
-            // hash_index: per-self-object map from key id to target id,
-            // maintained by the insert hook. A root-marked self owns no
-            // record, so its map is a store-level field (the store-level
-            // contribution site).
-            Some("hash_index") => {
-                let arrow_doc_name = &d.name;
-                let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
-                let tid = id_ty(&d.target);
-                let idx = format_ident!("{}_index", d.name);
-                if !is_root(&d.source) {
-                    field_decls.get_mut(&d.source.to_string()).unwrap().push(quote!(
-                        #[doc = concat!("hash_index map of arrow `", stringify!(#arrow_doc_name), "`")]
-                        #idx: ::std::collections::HashMap<#kid, #tid>,
-                    ));
+        let Some(d) = info.backing else { continue };
+        let a = info.decl;
+        for (target, owner_name, on_self_record) in [
+            (OnTarget::A, Some(&a.source), true),
+            (OnTarget::B, Some(&a.target), false),
+        ] {
+            let Some(Clause::On { fields, .. }) = on_clause(d, target) else { continue };
+            for f in fields {
+                let emitted = formula_name(f, f.formula, &a.name, &link_stem(&a.name));
+                let ty = roles::rewrite_ty(&f.ty.to_token_stream(), &FlatRoles::new(d, a, false, a.target.clone()));
+                let init = init_of(d, on_self_record && d.has(|c| matches!(c, Clause::CtorArg { .. })), f, &a.name)?;
+                // A field contributed at the root-marked self folds to the
+                // store (the unfused root's record is the store).
+                let owner = match owner_name {
+                    Some(name) if !is_root(name) => Some(name.clone()),
+                    _ => None,
+                };
+                let cf = CollectedField {
+                    option_id: f.ty.to_token_stream().to_string().replace(' ', "").starts_with("Option<"),
+                    emitted,
+                    ty,
+                    init,
+                    owner,
+                    arrow: a.name.clone(),
+                    backing_name: d.name.clone(),
+                };
+                match &cf.owner {
+                    Some(o) => rec_fields.get_mut(&o.to_string()).unwrap().push(cf),
+                    None => store_fields.push(cf),
                 }
             }
-            _ => {}
         }
     }
 
@@ -269,7 +620,21 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let ent_doc_name = &e.name;
         let idt = id_ty(&e.name);
         let dat = data_ty(&e.name);
-        let fields = &field_decls[&e.name.to_string()];
+        let fields = rec_fields[&e.name.to_string()]
+            .iter()
+            .map(|f| {
+                let name = &f.emitted;
+                let doc = format!(
+                    "field backing of arrow `{}` (backing `{}`)",
+                    f.arrow, f.backing_name
+                );
+                let ty = &f.ty;
+                quote!(
+                    #[doc = #doc]
+                    #name: #ty,
+                )
+            })
+            .collect::<Vec<_>>();
         out.extend(quote! {
             #[doc = concat!("Index of a `", stringify!(#ent_doc_name), "` in its arena.")]
             #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -280,51 +645,55 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         });
     }
 
-    // ---- constructors + named insert hooks ----
+    // ---- constructors + hooks + write ops ----
     let mut ctor_impls = TokenStream2::new();
     let mut hook_impls = TokenStream2::new();
     for e in &elements {
         let ent_doc_name = &e.name;
         // One argument per total `one` arrow originating at this entity
-        // (all bound `one` arrows are field-backed; total by construction).
+        // whose backing contributes `ctor_arg`.
         let args: Vec<&ArrowInfo> = infos
             .iter()
-            .filter(|i| i.backing.as_deref() == Some("field") && i.decl.source == e.name)
+            .filter(|i| {
+                i.decl.source == e.name
+                    && i.backing
+                        .map(|d| d.has(|c| matches!(c, Clause::CtorArg { .. })))
+                        .unwrap_or(false)
+            })
             .collect();
         let arg_defs = args.iter().map(|i| {
             let n = &i.decl.name;
             let tid = id_ty(&i.decl.target);
             quote!(#n: #tid,)
         });
-        // Record literal: field args move in; intrusive links start empty —
-        // the hooks below relink on insert.
+        // Record literal: every contributed field of this record inits per
+        // the uniform rule (ctor args move in; links start empty — the
+        // hooks relink on insert).
         let mut record_fields = TokenStream2::new();
-        for info in &infos {
-            let d = info.decl;
-            match info.backing.as_deref() {
-                Some("field") if d.source == e.name => {
-                    let n = &d.name;
-                    record_fields.extend(quote!(#n,));
+        for f in &rec_fields[&e.name.to_string()] {
+            let n = &f.emitted;
+            match &f.init {
+                FieldInit::CtorArg(a) => record_fields.extend(quote!(#n: #a,)),
+                FieldInit::None_ => {
+                    record_fields.extend(quote!(#n: ::core::option::Option::None,));
                 }
-                Some("intrusive_list") if d.source == e.name => {
-                    let head = format_ident!("first_{}", link_stem(&d.name));
-                    record_fields.extend(quote!(#head: ::core::option::Option::None,));
-                }
-                Some("intrusive_list") if d.target == e.name => {
-                    let next = format_ident!("next_{}", link_stem(&d.name));
-                    record_fields.extend(quote!(#next: ::core::option::Option::None,));
-                }
-                _ => {}
+                FieldInit::New => record_fields.extend(quote!(#n: ::std::default::Default::default(),)),
             }
         }
-        // `by`-derived many arrows whose determining `one` arrow originates
-        // here: the new record becomes that arrow's first member, inserted
-        // by the arrow's named hook reading the determining argument.
+        // `by`-derived arrows whose determining `one` arrow originates here:
+        // the new record becomes that arrow's first member, inserted by the
+        // arrow's named hook reading the determining argument.
         let mut hook_calls = TokenStream2::new();
         for info in &infos {
             let Some(det_name) = &info.decl.by else { continue };
-            let det = args.iter().find(|i| &i.decl.name == det_name);
-            if let Some(det) = det {
+            let Some(det) = args.iter().find(|i| &i.decl.name == det_name) else {
+                continue;
+            };
+            if info
+                .backing
+                .map(|d| d.has(|c| matches!(c, Clause::OnInsert { .. })))
+                .unwrap_or(false)
+            {
                 let hook = format_ident!("__insert_{}", info.decl.name);
                 let det_arg = &det.decl.name;
                 hook_calls.extend(quote!(self.#hook(#det_arg, id);));
@@ -345,340 +714,267 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         });
     }
 
-    // Named field-write hooks + `set_<arrow>` builder ops: post-construction
-    // writes of `field`-backed arrows go through the hook, so every storage
-    // mutation is replayable by name (M4's flush replays change sets through
-    // exactly these). Construction initializes the field inline — a Rust
-    // record literal cannot leave it unset — which is construction, not
-    // mutation; the hook is the single *write* path thereafter. Method names
-    // are already shaped as M4's write-trait methods (`set_<one-arrow>`).
+    // Hook methods + public write ops, per binding. Emitted hook/param
+    // names keep the authored spelling (`a`, `b`, `k`) with mixed-site
+    // spans; `w` rewrites to `self` inside `next()`.
     for info in &infos {
-        if info.backing.as_deref() != Some("field") {
-            continue;
-        }
-        let d = info.decl;
-        let arrow_doc_name = &d.name;
-        let hook = format_ident!("__set_{}", d.name);
-        let set_name = format_ident!("set_{}", d.name);
-        let f = &d.name;
-        let sid = id_ty(&d.source);
-        let tid = id_ty(&d.target);
-        let s_arena = arena_fld(&d.source);
-        hook_impls.extend(quote! {
-            #[doc(hidden)]
-            #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc_name), "`: set `self_id`'s field to `value`")]
-            fn #hook(&mut self, self_id: #sid, value: #tid) {
-                self.#s_arena[self_id.0 as usize].#f = value;
-            }
-        });
-        ctor_impls.extend(quote! {
-            #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc_name), "` to `value` (field-backed `one` arrow).")]
-            pub fn #set_name(&mut self, self_id: #sid, value: #tid) {
-                self.#hook(self_id, value);
-            }
-        });
-    }
+        let Some(d) = info.backing else { continue };
+        let a = info.decl;
+        let arrow_doc_name = &a.name;
+        let label = format!("arrow `{arrow_doc_name}`");
+        let root_self = is_root(&a.source);
 
-    // Named insert hooks: the single write path for list maintenance.
-    // Push-front (reverse insertion order) is part of the backing's
-    // contract — the test suite's traversal orders depend on it.
-    for info in &infos {
-        if info.backing.as_deref() != Some("intrusive_list") {
-            continue;
-        }
-        let d = info.decl;
-        let arrow_doc_name = &d.name;
-        let hook = format_ident!("__insert_{}", d.name);
-        let head = format_ident!("first_{}", link_stem(&d.name));
-        let next = format_ident!("next_{}", link_stem(&d.name));
-        let sid = id_ty(&d.source);
-        let tid = id_ty(&d.target);
-        let s_arena = arena_fld(&d.source);
-        let t_arena = arena_fld(&d.target);
-        hook_impls.extend(quote! {
-            #[doc(hidden)]
-            #[doc = concat!("intrusive_list insert hook of arrow `", stringify!(#arrow_doc_name), "`: push `member` onto the front of `self_id`'s list")]
-            fn #hook(&mut self, self_id: #sid, member: #tid) {
-                let next = self.#s_arena[self_id.0 as usize].#head;
-                self.#t_arena[member.0 as usize].#next = next;
-                self.#s_arena[self_id.0 as usize].#head = ::core::option::Option::Some(member);
+        // on_insert hook (+ primitive insert op).
+        if let Some(body) = body_of(d, |c| matches!(c, Clause::OnInsert { .. })) {
+            let d_name = &d.name;
+            let hook = format_ident!("__insert_{}", a.name);
+            let ida = id_ty(&a.source);
+            let idb = id_ty(&a.target);
+            let idk = a.key.as_ref().map(id_ty);
+            let mut roles = FlatRoles::new(d, a, root_self, a.target.clone());
+            if root_self {
+                roles = roles.with_a(quote!(()));
             }
-        });
-        // Primitive membership (no `by`): the builder gets an explicit
-        // insert operation; `by`-derived membership can never contradict
-        // the determining field, so those arrows generate no insert op.
-        if d.by.is_none() {
-            let insert_name = format_ident!("insert_{}", d.name);
-            ctor_impls.extend(quote! {
-                #[doc = concat!("Insert `member` into `self_id`'s `", stringify!(#arrow_doc_name), "` list (primitive membership).")]
-                pub fn #insert_name(&mut self, self_id: #sid, member: #tid) {
-                    self.#hook(self_id, member);
-                }
-            });
-        }
-    }
-
-    // Keyed insert hooks, factored check-then-write: the live-key predicate
-    // is callable without performing the write (M4's staging needs it as a
-    // pure check over old store + staged ops); the hook panics on a live
-    // key — a keyed arrow is a function, and the plain-HashMap overwrite
-    // the probe reproduced would orphan the old target silently.
-    for info in &infos {
-        if info.backing.as_deref() != Some("hash_index") {
-            continue;
-        }
-        let d = info.decl;
-        let arrow_doc_name = &d.name;
-        let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
-        let tid = id_ty(&d.target);
-        let idx = format_ident!("{}_index", d.name);
-        let pred = format_ident!("__{}_key_live", d.name);
-        let hook = format_ident!("__insert_{}", d.name);
-        let insert_name = format_ident!("insert_{}", d.name);
-        if is_root(&d.source) {
-            // Unfused-root self: exactly one self, no id to pass; the map is
-            // a store-level field.
+            let body_rw = roles::rewrite(body, &roles);
+            let scaffolds = scaffold_lets(body, &label, None, false);
+            let (sig, op_sig, op_args) = match (root_self, idk.as_ref()) {
+                (true, Some(kid)) => (
+                    {
+                        let k = Ident2::new("k", Span::mixed_site());
+                        let b = Ident2::new("b", Span::mixed_site());
+                        quote!(#k: #kid, #b: #idb)
+                    },
+                    quote!(key: #kid, target: #idb),
+                    quote!(key, target),
+                ),
+                (true, None) => (
+                    {
+                        let b = Ident2::new("b", Span::mixed_site());
+                        quote!(#b: #idb)
+                    },
+                    quote!(member: #idb),
+                    quote!(member),
+                ),
+                (false, Some(kid)) => (
+                    {
+                        let a = Ident2::new("a", Span::mixed_site());
+                        let k = Ident2::new("k", Span::mixed_site());
+                        let b = Ident2::new("b", Span::mixed_site());
+                        quote!(#a: #ida, #k: #kid, #b: #idb)
+                    },
+                    quote!(self_id: #ida, key: #kid, target: #idb),
+                    quote!(self_id, key, target),
+                ),
+                (false, None) => (
+                    {
+                        let a = Ident2::new("a", Span::mixed_site());
+                        let b = Ident2::new("b", Span::mixed_site());
+                        quote!(#a: #ida, #b: #idb)
+                    },
+                    quote!(self_id: #ida, member: #idb),
+                    quote!(self_id, member),
+                ),
+            };
             hook_impls.extend(quote! {
                 #[doc(hidden)]
-                #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc_name), "` (store-level map)")]
-                fn #pred(&self, key: #kid) -> bool {
-                    self.#idx.contains_key(&key)
-                }
-                #[doc(hidden)]
-                #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc_name), "` (store-level map)")]
-                fn #hook(&mut self, key: #kid, target: #tid) {
-                    if self.#pred(key) {
-                        ::core::panic!("duplicate key {:?} for arrow `{}`: a keyed arrow is a function", key, stringify!(#arrow_doc_name));
-                    }
-                    self.#idx.insert(key, target);
+                #[doc = concat!("insert hook of arrow `", stringify!(#arrow_doc_name), "` (backing `", stringify!(#d_name), "`)")]
+                fn #hook(&mut self, #sig) {
+                    #scaffolds
+                    #body_rw
                 }
             });
-            ctor_impls.extend(quote! {
-                #[doc = concat!("Map `key` to `target` in the `", stringify!(#arrow_doc_name), "` index (root-sourced keyed arrow; no self id).")]
-                pub fn #insert_name(&mut self, key: #kid, target: #tid) {
-                    self.#hook(key, target);
-                }
-            });
-        } else {
-            let sid = id_ty(&d.source);
-            let s_arena = arena_fld(&d.source);
-            hook_impls.extend(quote! {
-                #[doc(hidden)]
-                #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc_name), "` on one self object")]
-                fn #pred(&self, self_id: #sid, key: #kid) -> bool {
-                    self.#s_arena[self_id.0 as usize].#idx.contains_key(&key)
-                }
-                #[doc(hidden)]
-                #[doc = concat!("hash_index insert hook of arrow `", stringify!(#arrow_doc_name), "`")]
-                fn #hook(&mut self, self_id: #sid, key: #kid, target: #tid) {
-                    if self.#pred(self_id, key) {
-                        ::core::panic!("duplicate key {:?} for arrow `{}` on {:?}: a keyed arrow is a function", key, stringify!(#arrow_doc_name), self_id);
-                    }
-                    self.#s_arena[self_id.0 as usize].#idx.insert(key, target);
-                }
-            });
-            ctor_impls.extend(quote! {
-                #[doc = concat!("Map `key` to `target` in `self_id`'s `", stringify!(#arrow_doc_name), "` index.")]
-                pub fn #insert_name(&mut self, self_id: #sid, key: #kid, target: #tid) {
-                    self.#hook(self_id, key, target);
-                }
-            });
-        }
-    }
-
-    // ---- validate(): the canonical runtime inventory (M2 step 12) ----
-    // Everything M4's flush will run, and nothing more: key existence and
-    // value-in-arena for keyed maps (flat stores have no embedded classes,
-    // so no host component to agree); endpoint range checks plus the
-    // intrusive-ownership check for list backings — the partition walk for
-    // primitive membership, consistency against the determining field for
-    // `by`-derived membership. `arena` backing stores no endpoints to
-    // check: membership is presence in the target arena.
-    let mut checks: Vec<TokenStream2> = Vec::new();
-    for info in &infos {
-        let d = info.decl;
-        let arrow_doc_name = &d.name;
-        match info.backing.as_deref() {
-            Some("field") => {
-                let f = &d.name;
-                let sid = id_ty(&d.source);
-                let s_arena = arena_fld(&d.source);
-                let t_arena = arena_fld(&d.target);
-                checks.push(quote! {
-                    for (si, rec) in self.#s_arena.iter().enumerate() {
-                        let v = rec.#f;
-                        if v.0 as usize >= self.#t_arena.len() {
-                            errs.push(::std::format!(
-                                "arrow `{}`: {:?} points at {:?}, which is not a live record",
-                                stringify!(#arrow_doc_name), #sid(si as u32), v,
-                            ));
-                        }
+            // Primitive membership (no `by`) and keyed arrows expose the
+            // insert op; `by`-derived membership can never contradict the
+            // determining field, so those arrows generate no insert op.
+            if a.by.is_none() {
+                let insert_name = format_ident!("insert_{}", a.name);
+                ctor_impls.extend(quote! {
+                    #[doc = concat!("Insert through the `", stringify!(#arrow_doc_name), "` insert hook (backing `", stringify!(#d_name), "`).")]
+                    pub fn #insert_name(&mut self, #op_sig) {
+                        self.#hook(#op_args);
                     }
                 });
             }
-            Some("intrusive_list") => {
-                let head = format_ident!("first_{}", link_stem(&d.name));
-                let next = format_ident!("next_{}", link_stem(&d.name));
-                let sid = id_ty(&d.source);
-                let tid = id_ty(&d.target);
-                let s_arena = arena_fld(&d.source);
-                let t_arena = arena_fld(&d.target);
-                // Range pre-pass over every endpoint the backing stores.
-                checks.push(quote! {
-                    for (ti, trec) in self.#t_arena.iter().enumerate() {
-                        if let Some(n) = trec.#next {
-                            if n.0 as usize >= self.#t_arena.len() {
-                                errs.push(::std::format!(
-                                    "arrow `{}`: `{}` link of {:?} points at {:?}, which is not a live record",
-                                    stringify!(#arrow_doc_name), stringify!(#next), #tid(ti as u32), n,
-                                ));
-                            }
-                        }
-                    }
-                    for (si, srec) in self.#s_arena.iter().enumerate() {
-                        if let Some(h) = srec.#head {
-                            if h.0 as usize >= self.#t_arena.len() {
-                                errs.push(::std::format!(
-                                    "arrow `{}`: `{}` head of {:?} points at {:?}, which is not a live record",
-                                    stringify!(#arrow_doc_name), stringify!(#head), #sid(si as u32), h,
-                                ));
-                            }
-                        }
-                    }
-                });
-                if d.by.is_none() {
-                    // Primitive membership: the intrusive-ownership
-                    // partition check. Per-walk repeats are cycles (traversal
-                    // diverges); cross-list repeats are shared membership
-                    // (insert silently truncated the older list).
-                    checks.push(quote! {
-                        {
-                            let mut seen: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
-                            for (si, srec) in self.#s_arena.iter().enumerate() {
-                                let self_id = #sid(si as u32);
-                                let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
-                                let mut cur = srec.#head;
-                                while let Some(mid) = cur {
-                                    if !walk.insert(mid) {
-                                        errs.push(::std::format!(
-                                            "arrow `{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
-                                            stringify!(#arrow_doc_name), self_id, mid,
-                                        ));
-                                        break;
-                                    }
-                                    if !seen.insert(mid) {
-                                        errs.push(::std::format!(
-                                            "arrow `{}`: {:?} appears in more than one list — shared membership; the insert silently truncated the older list",
-                                            stringify!(#arrow_doc_name), mid,
-                                        ));
-                                        break;
-                                    }
-                                    cur = match self.#t_arena.get(mid.0 as usize) {
-                                        ::core::option::Option::Some(r) => r.#next,
-                                        ::core::option::Option::None => break,
-                                    };
-                                }
-                            }
-                        }
-                    });
-                } else {
-                    // `by`-derived membership: consistency against the
-                    // determining field plus exactly-once coverage — every
-                    // record must appear in the list its determinant names
-                    // (membership anywhere else already contradicts the
-                    // determinant, so a per-determinant seen set suffices).
-                    let detf = d.by.as_ref().unwrap();
-                    checks.push(quote! {
-                        {
-                            let mut seen_by_self: ::std::collections::HashMap<#sid, ::std::collections::HashSet<#tid>> = ::std::collections::HashMap::new();
-                            for (si, srec) in self.#s_arena.iter().enumerate() {
-                                let self_id = #sid(si as u32);
-                                let mut walk: ::std::collections::HashSet<#tid> = ::std::collections::HashSet::new();
-                                let mut cur = srec.#head;
-                                while let Some(mid) = cur {
-                                    let mrec = match self.#t_arena.get(mid.0 as usize) {
-                                        ::core::option::Option::Some(r) => r,
-                                        ::core::option::Option::None => break,
-                                    };
-                                    if mrec.#detf != self_id {
-                                        errs.push(::std::format!(
-                                            "arrow `{}`: {:?} is in the list of {:?} but its `{}` field says {:?} — membership contradicts the determinant",
-                                            stringify!(#arrow_doc_name), mid, self_id, stringify!(#detf), mrec.#detf,
-                                        ));
-                                    }
-                                    if !walk.insert(mid) {
-                                        errs.push(::std::format!(
-                                            "arrow `{}`: the list of {:?} repeats {:?} — a cycle; traversal would diverge",
-                                            stringify!(#arrow_doc_name), self_id, mid,
-                                        ));
-                                        break;
-                                    }
-                                    seen_by_self.entry(self_id).or_default().insert(mid);
-                                    cur = mrec.#next;
-                                }
-                            }
-                            for (ti, trec) in self.#t_arena.iter().enumerate() {
-                                let mid = #tid(ti as u32);
-                                let listed = seen_by_self
-                                    .get(&trec.#detf)
-                                    .is_some_and(|members| members.contains(&mid));
-                                if !listed {
-                                    errs.push(::std::format!(
-                                        "arrow `{}`: {:?} is missing from the list of its `{}` ({:?})",
-                                        stringify!(#arrow_doc_name), mid, stringify!(#detf), trec.#detf,
-                                    ));
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-            Some("hash_index") => {
-                let t_arena = arena_fld(&d.target);
-                let k_arena = arena_fld(d.key.as_ref().expect("keyed arrows bind a key sort"));
-                let idx = format_ident!("{}_index", d.name);
-                if is_root(&d.source) {
-                    checks.push(quote! {
-                        for (k, v) in self.#idx.iter() {
-                            if k.0 as usize >= self.#k_arena.len() {
-                                errs.push(::std::format!(
-                                    "arrow `{}`: key {:?} does not name a record",
-                                    stringify!(#arrow_doc_name), k,
-                                ));
-                            }
-                            if v.0 as usize >= self.#t_arena.len() {
-                                errs.push(::std::format!(
-                                    "arrow `{}`: value {:?} of key {:?} is not a live record",
-                                    stringify!(#arrow_doc_name), v, k,
-                                ));
-                            }
-                        }
-                    });
-                } else {
-                    let s_arena = arena_fld(&d.source);
-                    let sid = id_ty(&d.source);
-                    checks.push(quote! {
-                        for (si, srec) in self.#s_arena.iter().enumerate() {
-                            for (k, v) in srec.#idx.iter() {
-                                if k.0 as usize >= self.#k_arena.len() {
-                                    errs.push(::std::format!(
-                                        "arrow `{}`: key {:?} does not name a record",
-                                        stringify!(#arrow_doc_name), k,
-                                    ));
-                                }
-                                if v.0 as usize >= self.#t_arena.len() {
-                                    errs.push(::std::format!(
-                                        "arrow `{}`: value {:?} of key {:?} on {:?} is not a live record",
-                                        stringify!(#arrow_doc_name), v, k, #sid(si as u32),
-                                    ));
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-            _ => {}
         }
+
+        // Field-write hook + `set_` op: the single write path after
+        // construction for a `ctor_arg`-fed field (M2's named hook; M4's
+        // flush replays through it).
+        if d.has(|c| matches!(c, Clause::CtorArg { .. })) {
+            let field = contributed_fields(d)
+                .find(|f| f.formula == NameFormula::Arrow)
+                .map(|f| formula_name(f, f.formula, &a.name, &link_stem(&a.name)))
+                .unwrap_or_else(|| a.name.clone());
+            let hook = format_ident!("__set_{}", a.name);
+            let set_name = format_ident!("set_{}", a.name);
+            let sid = id_ty(&a.source);
+            let tid = id_ty(&a.target);
+            let s_arena = arena_fld(&a.source);
+            let f = &field;
+            hook_impls.extend(quote! {
+                #[doc(hidden)]
+                #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc_name), "`: set `self_id`'s field to `value`")]
+                fn #hook(&mut self, self_id: #sid, value: #tid) {
+                    self.#s_arena[self_id.0 as usize].#f = value;
+                }
+            });
+            ctor_impls.extend(quote! {
+                #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc_name), "` to `value` (field-backed `one` arrow).")]
+                pub fn #set_name(&mut self, self_id: #sid, value: #tid) {
+                    self.#hook(self_id, value);
+                }
+            });
+        }
+    }
+
+    // ---- validate methods (the round-4 convention) ----
+    // One doc-hidden `__validate_<arrow>` per bound backing, summoned from
+    // `validate()` in binding order (then defaulted arrows in schema
+    // order). A uniform range pre-pass over contributed `Option<id>` fields
+    // runs before the authored body and returns early on damage, so
+    // authored walks may assume links in range and use `rec(x)` freely.
+    let mut validate_order: Vec<String> = config.bindings.iter().map(|b| b.key_str()).collect();
+    for info in &infos {
+        if info.backing.is_some() && info.decl.sum.is_none() {
+            let key = info.decl.name.to_string();
+            if !validate_order.contains(&key) {
+                validate_order.push(key);
+            }
+        }
+    }
+    let mut validate_methods = TokenStream2::new();
+    let mut validate_calls = TokenStream2::new();
+    for key in &validate_order {
+        let Some(info) = infos.iter().find(|i| i.decl.name.to_string() == *key) else {
+            continue;
+        };
+        let Some(d) = info.backing else { continue };
+        let a = info.decl;
+        let label = format!("arrow `{}`", a.name);
+        let wanted_variant = match card_of_decl(d) {
+            Cardinality::Many => {
+                if a.by.is_some() {
+                    ValidateVariant::By
+                } else {
+                    ValidateVariant::Primitive
+                }
+            }
+            _ => ValidateVariant::Plain,
+        };
+        let Some(vbody) = d.clause(|c| matches!(c, Clause::Validate { variant, .. } if *variant == wanted_variant)).map(|c| match c {
+            Clause::Validate { body, .. } => body,
+            _ => unreachable!(),
+        }) else {
+            continue; // arena: nothing — existence cannot dangle
+        };
+        let det_label = a.by.as_ref().map(|b| b.to_string()).unwrap_or_default();
+        let det_field = a
+            .by
+            .as_ref()
+            .map(|det_name| {
+                let det = body.arrows.iter().find(|x| &x.name == det_name).expect("pattern! validated the determinant");
+                formula_name(
+                    contributed_fields(
+                        infos
+                            .iter()
+                            .find(|i| &i.decl.name == det_name)
+                            .and_then(|i| i.backing)
+                            .expect("the determinant is a bound `one` arrow"),
+                    )
+                    .find(|f| f.formula == NameFormula::Arrow)
+                    .expect("the determinant is field-backed"),
+                    NameFormula::Arrow,
+                    &det.name,
+                    &link_stem(&det.name),
+                )
+            });
+        let mut roles = FlatRoles::new(d, a, is_root(&a.source), a.target.clone()).with_det(
+            det_field.unwrap_or_else(|| a.name.clone()),
+        );
+        if is_root(&a.source) {
+            roles = roles.with_a(quote!(()));
+        }
+        let body_rw = roles::rewrite(vbody, &roles);
+        let scaffolds = scaffold_lets(vbody, &label, Some(&det_label), true);
+
+        // The uniform range pre-pass over this binding's contributed
+        // `Option<id>` fields (the (b)-class half — derivable from the
+        // declaration, so authored bodies never hand-roll it).
+        let mut pre_pass = TokenStream2::new();
+        let errs = Ident2::new("errs", Span::mixed_site());
+        let arrow_label_id = Ident2::new("arrow_label", Span::mixed_site());
+        for cf in rec_fields.values().flatten().chain(store_fields.iter()) {
+            if cf.arrow != a.name || !cf.option_id {
+                continue;
+            }
+            let f = &cf.emitted;
+            let b_arena = arena_fld(&a.target);
+            let head = match &cf.owner {
+                Some(o) => *o == a.source,
+                None => is_root(&a.source),
+            };
+            let what = if head { "head" } else { "link" };
+            match &cf.owner {
+                Some(owner) => {
+                    let o_arena = arena_fld(owner);
+                    let oid = id_ty(owner);
+                    let fmt = format!(
+                        "{{}}: `{{}}` {what} of {{:?}} points at {{:?}}, which is not a live record"
+                    );
+                    pre_pass.extend(quote! {
+                        for (ri, r) in self.#o_arena.iter().enumerate() {
+                            if let ::core::option::Option::Some(n) = r.#f {
+                                if n.0 as usize >= self.#b_arena.len() {
+                                    #errs.push(::std::format!(
+                                        #fmt,
+                                        #arrow_label_id, stringify!(#f), #oid(ri as u32), n,
+                                    ));
+                                }
+                            }
+                        }
+                    });
+                }
+                None => {
+                    let fmt = format!(
+                        "{{}}: `{{}}` {what} of the store points at {{:?}}, which is not a live record"
+                    );
+                    pre_pass.extend(quote! {
+                        if let ::core::option::Option::Some(n) = self.#f {
+                            if n.0 as usize >= self.#b_arena.len() {
+                                #errs.push(::std::format!(
+                                    #fmt,
+                                    #arrow_label_id, stringify!(#f), n,
+                                ));
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        let method = format_ident!("__validate_{}", a.name);
+        let a_name = &a.name;
+        validate_methods.extend(quote! {
+            #[doc(hidden)]
+            #[doc = concat!("validate contribution of arrow `", stringify!(#a_name), "`: the authored body with the uniform range pre-pass.")]
+            fn #method(&self) -> ::core::result::Result<(), ::std::string::String> {
+                #scaffolds
+                #pre_pass
+                if !#errs.is_empty() {
+                    return ::core::result::Result::Err(#errs.join("; "));
+                }
+                #body_rw
+                if #errs.is_empty() {
+                    ::core::result::Result::Ok(())
+                } else {
+                    ::core::result::Result::Err(#errs.join("; "))
+                }
+            }
+        });
+        validate_calls.extend(quote! {
+            if let ::core::result::Result::Err(e) = self.#method() {
+                errs.push(e);
+            }
+        });
     }
 
     // ---- store struct ----
@@ -687,18 +983,14 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         let dat = data_ty(&e.name);
         quote!(#f: ::std::vec::Vec<#dat>,)
     });
-    // Store-level hash_index maps: keyed arrows sourced at the root-marked
-    // entity (an unfused root owns exactly one self per store and no record,
-    // so the per-self-object map is a field of the store itself).
-    let root_maps = infos.iter().filter_map(|info| {
-        if info.backing.as_deref() != Some("hash_index") || !is_root(&info.decl.source) {
-            return None;
-        }
-        let d = info.decl;
-        let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
-        let tid = id_ty(&d.target);
-        let idx = format_ident!("{}_index", d.name);
-        Some(quote!(#idx: ::std::collections::HashMap<#kid, #tid>,))
+    let store_contrib = store_fields.iter().map(|f| {
+        let n = &f.emitted;
+        let ty = &f.ty;
+        let doc = format!(
+            "store-level contribution of arrow `{}` (backing `{}`)",
+            f.arrow, f.backing_name
+        );
+        quote!(#[doc = #doc] #n: #ty,)
     });
     let count_fns = elements.iter().map(|e| {
         let ent_doc_name = &e.name;
@@ -711,57 +1003,65 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             }
         }
     });
-    // The builder's read view: generated id-based getters on the store,
-    // taking and returning ids and copies — never handles (during
-    // construction there is exactly one store, being read and mutated at
-    // once, so no handle can coexist with the `&mut` builder). One
-    // field-read getter per bound `one` arrow, named after the arrow whose
-    // field it reads, plus one keyed lookup per keyed arrow. Pattern-level
+
+    // The builder's read view: id-based getters derived from the authored
+    // access protocols — one field-read getter per bound `one` arrow (named
+    // after the arrow), one keyed lookup per keyed arrow. Pattern-level
     // constructor logic (induction, dedup) is user code over this view; the
     // getter names are contract.
-    let read_view = infos.iter().filter_map(|info| {
-        let d = info.decl;
-        match info.backing.as_deref() {
-            Some("field") => {
-                let getter = &d.name;
-                let sid = id_ty(&d.source);
-                let tid = id_ty(&d.target);
-                let s_arena = arena_fld(&d.source);
-                let arrow_doc = &d.name;
-                Some(quote! {
+    let mut read_view = TokenStream2::new();
+    for info in &infos {
+        let Some(d) = info.backing else { continue };
+        let a = info.decl;
+        let arrow_doc = &a.name;
+        let root_self = is_root(&a.source);
+        match card_of_decl(d) {
+            Cardinality::One => {
+                let Some(body) = body_of(d, |c| matches!(c, Clause::Read { .. })) else { continue };
+                let getter = &a.name;
+                let sid = id_ty(&a.source);
+                let tid = id_ty(&a.target);
+                let roles = FlatRoles::new(d, a, root_self, a.target.clone())
+                    .at(quote!(self))
+                    .with_a(quote!(self_id));
+                let body_rw = roles::rewrite(body, &roles);
+                read_view.extend(quote! {
                     #[doc = concat!("Builder read view: the `", stringify!(#arrow_doc), "` field of `self_id`.")]
                     pub fn #getter(&self, self_id: #sid) -> #tid {
-                        self.#s_arena[self_id.0 as usize].#getter
+                        #body_rw
                     }
-                })
+                });
             }
-            Some("hash_index") => {
-                let getter = format_ident!("{}_by_key", d.name);
-                let kid = id_ty(d.key.as_ref().expect("keyed arrows bind a key sort"));
-                let tid = id_ty(&d.target);
-                let idx = format_ident!("{}_index", d.name);
-                let arrow_doc = &d.name;
-                if is_root(&d.source) {
-                    Some(quote! {
-                        #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup.")]
+            Cardinality::Keyed => {
+                let Some(body) = body_of(d, |c| matches!(c, Clause::Lookup { .. })) else { continue };
+                let getter = format_ident!("{}_by_key", a.name);
+                let kid = id_ty(a.key.as_ref().expect("keyed arrows bind a key sort"));
+                let tid = id_ty(&a.target);
+                let roles = FlatRoles::new(d, a, root_self, a.target.clone())
+                    .at(quote!(self))
+                    .with_a(quote!(self_id))
+                    .with_k(quote!(key));
+                let body_rw = roles::rewrite(body, &roles);
+                if root_self {
+                    read_view.extend(quote! {
+                        #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup (root-sourced; no self id).")]
                         pub fn #getter(&self, key: #kid) -> ::core::option::Option<#tid> {
-                            self.#idx.get(&key).copied()
+                            #body_rw
                         }
-                    })
+                    });
                 } else {
-                    let sid = id_ty(&d.source);
-                    let s_arena = arena_fld(&d.source);
-                    Some(quote! {
+                    let sid = id_ty(&a.source);
+                    read_view.extend(quote! {
                         #[doc = concat!("Builder read view: `", stringify!(#arrow_doc), "` keyed lookup on one self object.")]
                         pub fn #getter(&self, self_id: #sid, key: #kid) -> ::core::option::Option<#tid> {
-                            self.#s_arena[self_id.0 as usize].#idx.get(&key).copied()
+                            #body_rw
                         }
-                    })
+                    });
                 }
             }
-            _ => None,
+            _ => {}
         }
-    });
+    }
     let root_snake = Ident2::new(&snake(&root_entity.name.to_string()), root_entity.name.span());
     let root_handle = &root_entity.name;
     let store_pattern_name = config
@@ -775,7 +1075,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         #[derive(Default, Debug)]
         pub struct #store {
             #(#arena_fields)*
-            #(#root_maps)*
+            #(#store_contrib)*
         }
 
         impl #store {
@@ -788,19 +1088,21 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
 
             #hook_impls
 
+            #validate_methods
+
             #(#count_fns)*
 
-            #(#read_view)*
+            #read_view
 
             #[doc = concat!("The root handle: the \"object\" view of this store (root entity `", stringify!(#root_handle), "`).")]
             pub fn #root_snake(&self) -> #root_handle<'_> {
                 #root_handle { store: self }
             }
 
-            #[doc = "Structural validation: the canonical runtime inventory. Key existence and value-in-arena for keyed maps; endpoint ranges and the intrusive-ownership check for list backings (the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
+            #[doc = "Structural validation: the canonical runtime inventory, one authored contribution per bound backing (key existence, value-in-arena, value-host agreement for keyed maps; endpoint ranges and the intrusive-ownership contract for lists — the partition walk for primitive membership, determinant consistency for `by`-derived membership). M4's flush calls this unconditionally."]
             pub fn validate(&self) -> ::core::result::Result<(), ::std::string::String> {
                 let mut errs: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
-                #(#checks)*
+                #validate_calls
                 if errs.is_empty() {
                     ::core::result::Result::Ok(())
                 } else {
@@ -891,62 +1193,61 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     let marker_base_ts = path_tokens(&marker_base);
     let marker_mod = Ident2::new(
         &snake(&config.pattern_path.segments.last().unwrap().ident.to_string()),
-        proc_macro2::Span::call_site(),
+        Span::call_site(),
     );
 
-    // Iterator expression for a bound sibling many-arrow read through the
-    // sum arrow's self handle `self_h` (sums chain sibling iterators
-    // directly, so generated code never depends on trait imports).
-    let iter_expr = |d: &crate::grammar::ArrowDecl, self_h: &proc_macro2::Ident| -> syn::Result<TokenStream2> {
-        let it = iter_ty(&d.name);
-        match binding_of(&d.name.to_string()).map(|b| b.backing.to_string()) {
-            Some(b) if b == "arena" => {
-                let tgt_arena = arena_fld(&d.target);
-                Ok(quote!(#it { store: self.store, next: 0, len: self.store.#tgt_arena.len() as u32 }))
-            }
-            Some(b) if b == "intrusive_list" => {
-                let head = format_ident!("first_{}", link_stem(&d.name));
-                let self_arena = arena_fld(self_h);
-                Ok(quote!(#it {
-                    store: self.store,
-                    next: self.store.#self_arena[self.id.0 as usize].#head,
-                }))
-            }
-            _ => Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!("sum sibling `{}` is not a bound `many` arrow", d.name),
-            )),
-        }
+    // The iterate-body emission for one bound many arrow, read off a handle
+    // binding `self` — the shared shape of the trait method and a sum's
+    // sibling expressions.
+    let iterate_expr = |info: &ArrowInfo, d: &BackingDecl| -> syn::Result<TokenStream2> {
+        let a = info.decl;
+        let body = body_of(d, |c| matches!(c, Clause::Iterate { .. }))
+            .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no iterate(a) body", d.name)))?;
+        let it = iter_ty(&a.name);
+        let roles = FlatRoles::new(d, a, is_root(&a.source), a.target.clone())
+            .at(quote!(self.store))
+            .with_a(quote!(self.id))
+            .with_walk_ty(it);
+        Ok(roles::rewrite(body, &roles))
     };
 
     let mut iter_defs = TokenStream2::new();
     let mut trait_impls = TokenStream2::new();
 
     for info in &infos {
-        let d = info.decl;
+        let d_expr = info.decl;
         let meta = info.meta;
-        let arrow_doc_name = &d.name;
-        let marker = marker_ty(&d.name);
+        let arrow_doc_name = &d_expr.name;
+        let marker = marker_ty(&d_expr.name);
         let marker_path = quote!(#marker_base_ts::#marker_mod::markers::#marker);
-        let trait_path = crate::resolve_schema_path(d.inst.as_ref().unwrap(), &schema.pkg)?;
-        let self_h = &d.source;
-        let tgt_h = &d.target;
+        let trait_path = crate::resolve_schema_path(d_expr.inst.as_ref().unwrap(), &schema.pkg)?;
+        let self_h = &d_expr.source;
+        let tgt_h = &d_expr.target;
         let m = &meta.method;
         let assoc = &meta.assoc;
-        let it = iter_ty(&d.name);
-        let tid = id_ty(&d.target);
+        let it = iter_ty(&d_expr.name);
 
-        if let Some((ua, ub)) = &d.sum {
+        if let Some((ua, ub)) = &d_expr.sum {
             let da = body.arrows.iter().find(|x| x.name == *ua).ok_or_else(|| {
-                syn::Error::new(proc_macro2::Span::call_site(), format!("sum names unknown sibling `{ua}`"))
+                syn::Error::new(Span::call_site(), format!("sum names unknown sibling `{ua}`"))
             })?;
             let db = body.arrows.iter().find(|x| x.name == *ub).ok_or_else(|| {
-                syn::Error::new(proc_macro2::Span::call_site(), format!("sum names unknown sibling `{ub}`"))
+                syn::Error::new(Span::call_site(), format!("sum names unknown sibling `{ub}`"))
             })?;
+            let info_of = |n: &Ident2| -> syn::Result<ArrowInfo> {
+                let i = infos.iter().find(|i| i.decl.name == *n).ok_or_else(|| {
+                    syn::Error::new(Span::call_site(), format!("sum names unknown sibling `{n}`"))
+                })?;
+                Ok(ArrowInfo { decl: i.decl, meta: i.meta, backing: i.backing })
+            };
+            let ia = info_of(ua)?;
+            let ib = info_of(ub)?;
+            let da_decl = ia.backing.expect("sum siblings are bound many arrows");
+            let db_decl = ib.backing.expect("sum siblings are bound many arrows");
             let ita = iter_ty(&da.name);
             let itb = iter_ty(&db.name);
-            let ea = iter_expr(da, self_h)?;
-            let eb = iter_expr(db, self_h)?;
+            let ea = iterate_expr(&ia, da_decl)?;
+            let eb = iterate_expr(&ib, db_decl)?;
             let gat = meta.gat.as_ref().unwrap();
             iter_defs.extend(quote! {
                 #[doc = concat!("Iterator of derived arrow `", stringify!(#arrow_doc_name), "`: its siblings chained, self-loops twice.")]
@@ -970,123 +1271,115 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             continue;
         }
 
-        match info.backing.as_deref() {
-            Some("arena") => {
-                let tgt_arena = arena_fld(&d.target);
+        let Some(d) = info.backing else { continue };
+        match card_of_decl(d) {
+            Cardinality::Many => {
+                let d_name = &d.name;
                 let gat = meta.gat.as_ref().unwrap();
-                iter_defs.extend(quote! {
-                    #[doc = concat!("Iterator of arena-backed arrow `", stringify!(#arrow_doc_name), "`: index range over the target arena.")]
-                    pub struct #it<'g> {
-                        store: &'g #store,
-                        next: u32,
-                        len: u32,
-                    }
-                    impl<'g> ::core::iter::Iterator for #it<'g> {
-                        type Item = #tgt_h<'g>;
-                        fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
-                            (self.next < self.len).then(|| {
-                                let n = #tgt_h { store: self.store, id: #tid(self.next) };
-                                self.next += 1;
-                                n
+                let walk_ty = it.clone();
+                let walk_fields = d
+                    .clause(|c| matches!(c, Clause::Iter { .. }))
+                    .map(|c| match c {
+                        Clause::Iter { fields, .. } => fields
+                            .iter()
+                            .map(|(n, t)| {
+                                let ty = roles::rewrite_ty(
+                                    &t.to_token_stream(),
+                                    &FlatRoles::new(d, d_expr, false, d_expr.target.clone()),
+                                );
+                                let field = Ident2::new(&n.to_string(), Span::mixed_site());
+                                quote!(#field: #ty,)
                             })
-                        }
-                        fn size_hint(&self) -> (usize, ::core::option::Option<usize>) {
-                            let remaining = (self.len - self.next) as usize;
-                            (remaining, ::core::option::Option::Some(remaining))
-                        }
-                    }
-                });
-                trait_impls.extend(quote! {
-                    impl<'g> #trait_path<#marker_path> for #self_h<'g> {
-                        type #assoc = #tgt_h<'g>;
-                        type #gat<'a> = #it<'g> where Self: 'a;
-                        fn #m(&self) -> #it<'g> {
-                            #it { store: self.store, next: 0, len: self.store.#tgt_arena.len() as u32 }
-                        }
-                    }
-                });
-            }
-            Some("intrusive_list") => {
-                let head = format_ident!("first_{}", link_stem(&d.name));
-                let next = format_ident!("next_{}", link_stem(&d.name));
-                let self_arena = arena_fld(self_h);
-                let tgt_arena = arena_fld(&d.target);
-                let gat = meta.gat.as_ref().unwrap();
+                            .collect::<Vec<_>>(),
+                        _ => unreachable!(),
+                    })
+                    .unwrap_or_default();
+                let adv = body_of(d, |c| matches!(c, Clause::Advance { .. }))
+                    .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no advance(w) body", d.name)))?;
+                let adv_roles = FlatRoles::new(d, d_expr, is_root(self_h), tgt_h.clone())
+                    .at(quote!(self.store))
+                    .with_w(quote!(self))
+                    .with_walk_ty(walk_ty.clone());
+                let adv_rw = roles::rewrite(adv, &adv_roles);
+                let iter_doc = match d
+                    .clause(|c| matches!(c, Clause::IterationOrder { .. }))
+                    .map(|c| match c {
+                        Clause::IterationOrder { value, .. } => value.to_string(),
+                        _ => unreachable!(),
+                    })
+                    .as_deref()
+                {
+                    Some("forward_insertion") => "forward insertion order",
+                    _ => "reverse insertion order",
+                };
                 iter_defs.extend(quote! {
-                    #[doc = concat!("Iterator of intrusive-backed arrow `", stringify!(#arrow_doc_name), "`: linked-list walk, reverse insertion order.")]
+                    #[doc = concat!("Iterator of `", stringify!(#arrow_doc_name), "' (backing `", stringify!(#d_name), "`): authored Walk, ", #iter_doc, ".")]
                     pub struct #it<'g> {
                         store: &'g #store,
-                        next: ::core::option::Option<#tid>,
+                        #(#walk_fields)*
                     }
                     impl<'g> ::core::iter::Iterator for #it<'g> {
                         type Item = #tgt_h<'g>;
                         fn next(&mut self) -> ::core::option::Option<#tgt_h<'g>> {
-                            let id = self.next?;
-                            let data = &self.store.#tgt_arena[id.0 as usize];
-                            self.next = data.#next;
-                            ::core::option::Option::Some(#tgt_h { store: self.store, id })
+                            #adv_rw
                         }
                     }
                 });
+                let ie = iterate_expr(info, d)?;
                 trait_impls.extend(quote! {
                     impl<'g> #trait_path<#marker_path> for #self_h<'g> {
                         type #assoc = #tgt_h<'g>;
                         type #gat<'a> = #it<'g> where Self: 'a;
                         fn #m(&self) -> #it<'g> {
-                            #it {
-                                store: self.store,
-                                next: self.store.#self_arena[self.id.0 as usize].#head,
-                            }
+                            #ie
                         }
                     }
                 });
             }
-            Some("field") => {
-                let f = &d.name;
-                let self_arena = arena_fld(self_h);
+            Cardinality::One => {
+                let body = body_of(d, |c| matches!(c, Clause::Read { .. }))
+                    .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no read(a) body", d.name)))?;
+                let roles = FlatRoles::new(d, d_expr, false, tgt_h.clone())
+                    .at(quote!(self.store))
+                    .with_a(quote!(self.id));
+                let body_rw = roles::rewrite(body, &roles);
                 trait_impls.extend(quote! {
                     impl<'g> #trait_path<#marker_path> for #self_h<'g> {
                         type #assoc = #tgt_h<'g>;
                         fn #m(&self) -> #tgt_h<'g> {
                             #tgt_h {
                                 store: self.store,
-                                id: self.store.#self_arena[self.id.0 as usize].#f,
+                                id: #body_rw,
                             }
                         }
                     }
                 });
             }
-            // Keyed partial: one hash lookup; the associated-type bindings
-            // name the impl lifetime ('g — the E0637-pinned emission).
-            Some("hash_index") => {
-                let kid = id_ty(&d.key.clone().expect("keyed arrows bind a key sort"));
+            // Keyed partial: one authored lookup; the associated-type
+            // bindings name the impl lifetime ('g — the E0637-pinned
+            // emission).
+            Cardinality::Keyed => {
+                let kid = id_ty(d_expr.key.as_ref().expect("keyed arrows bind a key sort"));
                 let key_assoc = meta.key.as_ref().expect("keyed roots publish the key assoc name");
-                let idx = format_ident!("{}_index", d.name);
-                let lookup = if is_root(self_h) {
-                    quote!(self.store.#idx.get(&key).copied())
-                } else {
-                    let self_arena = arena_fld(self_h);
-                    quote!(self.store.#self_arena[self.id.0 as usize].#idx.get(&key).copied())
-                };
+                let body = body_of(d, |c| matches!(c, Clause::Lookup { .. }))
+                    .ok_or_else(|| syn::Error::new(Span::call_site(), format!("backing `{}` authors no lookup(a, k) body", d.name)))?;
+                let root_self = is_root(self_h);
+                let mut roles = FlatRoles::new(d, d_expr, root_self, tgt_h.clone())
+                    .at(quote!(self.store))
+                    .with_k(quote!(key));
+                if !root_self {
+                    roles = roles.with_a(quote!(self.id));
+                }
+                let body_rw = roles::rewrite(body, &roles);
                 trait_impls.extend(quote! {
                     impl<'g> #trait_path<#marker_path> for #self_h<'g> {
                         type #assoc = #tgt_h<'g>;
                         type #key_assoc = #kid;
                         fn #m(&self, key: #kid) -> ::core::option::Option<#tgt_h<'g>> {
-                            #lookup.map(|id| #tgt_h { store: self.store, id })
+                            #body_rw.map(|id| #tgt_h { store: self.store, id })
                         }
                     }
                 });
-            }
-            other => {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "backing `{}` is not implemented for arrow `{}`",
-                        other.unwrap_or("?"),
-                        d.name
-                    ),
-                ));
             }
         }
     }

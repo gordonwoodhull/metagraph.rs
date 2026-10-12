@@ -38,12 +38,12 @@ pub enum BackingCard {
 }
 
 impl BackingDecl {
-    /// The first clause of the given kind, if any.
-    pub fn clause(&self, kind: fn(&Clause) -> bool) -> Option<&Clause> {
-        self.clauses.iter().find(|c| kind(c))
+    /// The first clause matching the selector, if any.
+    pub fn clause(&self, sel: impl Fn(&Clause) -> bool) -> Option<&Clause> {
+        self.clauses.iter().find(|c| sel(c))
     }
-    pub fn has(&self, kind: fn(&Clause) -> bool) -> bool {
-        self.clauses.iter().any(|c| kind(c))
+    pub fn has(&self, sel: impl Fn(&Clause) -> bool) -> bool {
+        self.clauses.iter().any(|c| sel(c))
     }
     /// `true` when the declaration carries `phase:` annotations (csr is the
     /// only phased backing in M3).

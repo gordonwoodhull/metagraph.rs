@@ -33,7 +33,7 @@ backing! {
         read(a) { rec(a).value }
         validate {
             for ra in records(A) {
-                let v = rec(a).value;
+                let v = rec(ra).value;
                 if idx(v) >= b_arena_of(host_of(v)).len() {
                     errs.push(format!(
                         "{}: {:?} points at {:?}, which is not a live record",
@@ -80,7 +80,7 @@ backing! {
         advance(w) {
             let id = w.cur?;
             w.cur = rec(id).next;
-            handle(id)
+            Some(handle(id))
         }
         iteration_order: reverse_insertion
         contract: exclusive_membership

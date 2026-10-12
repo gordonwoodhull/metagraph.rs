@@ -14,6 +14,7 @@ mod codegen;
 mod codegen_composed;
 mod compose;
 mod grammar;
+mod roles;
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -1627,17 +1628,114 @@ fn stage1_composed(
 /// Queue state machine: bounce through the remaining backing couriers
 /// first (one per binding, in binding order), then the root registration
 /// couriers, or — both queues empty — run codegen with everything
-/// collected.
+/// collected. Defaulted `one` arrows (no explicit binding) bind `field`,
+/// whose declaration must ride the chain like any other: before codegen,
+/// synthesize one more hop per defaulted arrow whose declaration is not
+/// collected yet (cardinalities are known by then — every root tuple has
+/// arrived).
 fn advance_chain(mut config: ChainConfig) -> syn::Result<TokenStream2> {
     if let Some(hop) = config.backing_queue.first().cloned() {
         config.backing_queue.remove(0);
         return emit_backing_hop(&hop, config);
     }
-    if config.roots.is_empty() {
-        return codegen::expand(&config);
+    if !config.roots.is_empty() {
+        let next = config.roots.remove(0);
+        return emit_hop(&next, config);
     }
-    let next = config.roots.remove(0);
-    emit_hop(&next, config)
+    if let Some(hop) = default_backing_hop(&config) {
+        return emit_backing_hop(&hop, config);
+    }
+    codegen::expand(&config)
+}
+
+/// The first defaulted `one` arrow with no collected declaration, as a hop
+/// to the runtime's `field` courier keyed by the arrow's binding key.
+fn default_backing_hop(config: &ChainConfig) -> Option<BackingHop> {
+    for key in unbound_one_arrow_keys(config)? {
+        if !config.backing_decls.iter().any(|(k, _)| *k == key) {
+            let rt = runtime_target();
+            let courier = syn::parse2(quote!(#rt::backings::__metagraph_backing_field))
+                .expect("runtime field courier path is parseable");
+            return Some(BackingHop { key, courier });
+        }
+    }
+    None
+}
+
+/// Arrows that will default to `field` (a `one` root cardinality, no
+/// explicit binding, not derived), by binding key. `None` on any
+/// resolution trouble — codegen reports those with its own errors.
+fn unbound_one_arrow_keys(config: &ChainConfig) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    match &config.schema {
+        grammar::GenSchema::Flat(p) => {
+            let roots = crate::resolved_roots(p).ok()?;
+            if roots.len() != config.metas.len() {
+                return None;
+            }
+            let mut meta_of: std::collections::HashMap<String, &RootMeta> =
+                std::collections::HashMap::new();
+            for (path, m) in roots.iter().zip(&config.metas) {
+                meta_of.insert(path_tokens(path).to_string(), m);
+            }
+            for a in &p.body.arrows {
+                if a.sum.is_some() {
+                    continue;
+                }
+                if config.bindings.iter().any(|b| b.instance.is_none() && b.arrow == a.name) {
+                    continue;
+                }
+                let card = meta_of
+                    .get(&crate::resolve_schema_path(a.inst.as_ref()?, &p.pkg).ok()?.to_string())?
+                    .card;
+                if card == grammar::Cardinality::One {
+                    out.push(a.name.to_string());
+                }
+            }
+        }
+        grammar::GenSchema::Composed(c) => {
+            let mut queue: Vec<syn::Path> = Vec::new();
+            for (_, pkg, body) in &c.members {
+                for a in &body.arrows {
+                    let p = a.inst.as_ref()?;
+                    let ts = crate::resolve_schema_path(p, pkg).ok()?;
+                    let key = ts.to_string();
+                    if !queue.iter().any(|r| path_tokens(r).to_string() == key) {
+                        queue.push(syn::parse2(ts).ok()?);
+                    }
+                }
+            }
+            if queue.len() != config.metas.len() {
+                return None;
+            }
+            let mut meta_of: std::collections::HashMap<String, &RootMeta> =
+                std::collections::HashMap::new();
+            for (path, m) in queue.iter().zip(&config.metas) {
+                meta_of.insert(path_tokens(path).to_string(), m);
+            }
+            for (inst, pkg, body) in &c.members {
+                for a in &body.arrows {
+                    if a.sum.is_some() {
+                        continue;
+                    }
+                    if config
+                        .bindings
+                        .iter()
+                        .any(|b| b.instance.as_ref() == Some(inst) && b.arrow == a.name)
+                    {
+                        continue;
+                    }
+                    let card = meta_of
+                        .get(&crate::resolve_schema_path(a.inst.as_ref()?, pkg).ok()?.to_string())?
+                        .card;
+                    if card == grammar::Cardinality::One {
+                        out.push(format!("{inst}.{}", a.name));
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
 fn emit_hop(root: &Path, config: ChainConfig) -> syn::Result<TokenStream2> {
