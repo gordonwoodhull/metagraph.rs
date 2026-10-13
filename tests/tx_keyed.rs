@@ -104,26 +104,9 @@ fn staged_insert_with_existing_key_reads_through() {
     out.store.validate().expect("validate");
 }
 
-#[test]
-#[should_panic(expected = "exists in the borrowed old store")]
-fn live_key_in_old_store_panics_at_staging() {
-    let base = old_store();
-    let mut tx = base.edit();
-    let m = tx.add_m();
-    tx.insert_marks(NId(0), m); // n0 keys m0: live
-}
-
-#[test]
-#[should_panic(expected = "already staged in this transaction")]
-fn already_staged_key_panics_at_staging() {
-    let base = old_store();
-    let mut tx = base.edit();
-    let n = tx.add_n();
-    let m0 = tx.add_m();
-    let m1 = tx.add_m();
-    tx.insert_marks(n, m0);
-    tx.insert_marks(n, m1); // the same Pending key twice
-}
+// The two keyed staging panics (live key in the old store; key already
+// staged in this transaction) moved to tx_staging_panics.rs — the step-13
+// collection of every panic exerciseable over the flat surfaces.
 
 #[test]
 fn existing_and_pending_keys_do_not_collide() {

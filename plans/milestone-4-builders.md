@@ -780,7 +780,7 @@ the probe crate under `/tmp` as the reference implementation.
 
 **Stage 4 — hardening**
 
-- [ ] 13. Negative suite: trybuild fixtures (read-on-ref, wrong-marker
+- [x] 13. Negative suite: trybuild fixtures (read-on-ref, wrong-marker
       bounds, handle survival under `into_edit`), the `should_panic`
       staging tests collected, a downstream-crate transform
       portability test (M1 step 9's pattern).

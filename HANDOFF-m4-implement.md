@@ -244,7 +244,49 @@ Step-9 notes (scope decisions, each reasoned):
   The fixture has exactly one host (OuterNode); the general rule is
   codegen-review surface, not tested.
 
-Not started: steps 13–14.
+Not started: step 14.
+
+- **Step 13** (this commit): negative suite. Three new trybuild fixtures:
+  `write_wrong_marker.rs` (a generic transform bounded on a write trait
+  at the WRONG entity marker — `AddNode<markers::Edge>` /
+  `HandleToRef<markers::OutEdges>` — refuses at instantiation, E0277;
+  the help text even names the correct marker),
+  `handle_survives_into_edit.rs` (a handle outlives the `into_edit`
+  move, E0505 — the pass discipline's compile-time half), and
+  `phased_no_into_edit.rs` (a phased store's frozen face has no
+  `into_edit`, E0599 — pins the step-12 borrowed-only scope decision).
+  The staging should_panics are collected: tx_staging_panics.rs now
+  holds every panic exerciseable over the flat surfaces (the 5 core
+  ref-discipline panics + the 2 flat keyed panics moved from
+  tx_keyed.rs; the keyed store lives in a `mod keyed` submodule because
+  each implement! emits the Tx types unqualified — one Tx-emitting
+  store per module), with the file doc listing the fixture-bound
+  remainder (hosted keyed carry, nested, induction, phased re-runs,
+  builder-side duplicates) and why each stays. Downstream portability:
+  tests/downstream/basic gained a write-side module — a concrete
+  edit/flush smoke and `splice_node`, a generic transform bounded on
+  `Add`/`Remove`/`HandleToRef` at the per-entity markers, instantiated
+  at the downstream crate's own `Tx` (the handle type arrives through
+  `HandleToRef::Handle` — `Tx` is not a read surface, so the `Nodes`
+  bound rides the SOURCE side in transforms, not `Dst`). 48/48 suites
+  green incl. trybuild + downstream, zero warnings.
+
+Step-13 notes (decisions, each reasoned):
+
+- **One Tx-emitting `implement!` per module** is a hard rule, now
+  documented by the collection: the emitted `Op`/`Tx`/`Resolve`/
+  `OldStore`/iterators are unqualified module items. The collected
+  panic file needed the keyed store in a submodule for exactly this.
+- **The generic transform's handle bound rides `HandleToRef::Handle`,
+  not a read-trait bound on `Dst`** — `Dst` is the transaction, not a
+  graph; conflating the two was the first downstream draft's E0277.
+  `AddNode<MN>` pins `MN` for inference (the unique impl), which then
+  fixes `HandleToRef<MN>`.
+- **`splice_node` splices an unconnected node** — removing an incident
+  edge's endpoint without staging the edge's removal is a kept-dangler
+  FlushError (the test's first draft proved the pipeline rejects it);
+  the portability test is about the trait web resolving, not about
+  cascade policies.
 
 - **Step 12** (this commit): phased stores — the Tx gate lifts for flat
   stores binding a phased (`csr_adjacency`) backing. `TxModel` grew
@@ -844,6 +886,19 @@ plan text, note disagreements in step notes; do not merge to main —
 leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
+
+- 2026-10-13 (impl-m4-8): step 13 DONE (see "Where things stand" and the
+  step-13 notes — three new trybuild fixtures: write_wrong_marker E0277
+  with the correct marker named in the help, handle_survives_into_edit
+  E0505, phased_no_into_edit E0599; the staging should_panics collected
+  into tx_staging_panics.rs with the fixture-bound inventory documented;
+  downstream/basic gained the write-side portability module: concrete
+  edit/flush smoke + the splice_node generic transform over the
+  Add/Remove/HandleToRef bound web). One module rule documented: one
+  Tx-emitting implement! per module (emitted Tx types are
+  unqualified). 48/48 suites green incl. trybuild + downstream, zero
+  warnings at the commit. Next: step 14 (doc pass — crate-root docs for
+  transaction/flush/pass discipline, macro docs).
 
 - 2026-10-13 (impl-m4-8): step 12 DONE (see "Where things stand" and the
   step-12 notes — TxModel phased/csr, the flat gate lifting for
