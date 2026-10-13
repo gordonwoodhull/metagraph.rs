@@ -164,7 +164,27 @@ The load-bearing ones (the full list is in `plans/epic.md`):
 
 ## Roadmap
 
-Unscoped threads visible from here (see `plans/epic.md`):
+Two further milestones are planned in detail but not yet landed
+(`plans/milestone-5-data.md` and `plans/milestone-6-crossing.md`,
+currently on their own branches):
+
+- **M5 — implement-time data.** User payload types bind at `implement!`
+  as data on records — not entities, not arrows, so patterns stay
+  type-abstract and the same pattern implements with data, without data,
+  or with different data (layout locations, labels, cached computations).
+  Reads ride a `.data()` gateway; writes ride the ordinary ladder —
+  constructor argument, builder assignment, staged field-sets through
+  flush. The maintenance boundary: *arrows are maintained by the
+  toolkit; data is maintained by you.*
+- **M6 — the crossing.** Ports, portals, and the hosted inner graph
+  traversing as a graph: an edge leaves the outer graph, attaches at a
+  port on a host node, crosses a portal, and continues among the inner
+  graph's own nodes, with every hop a stock root-trait call. Three
+  growths get there: optional-`one` arrows, intrusive list heads at
+  embedded records, and `set_`/flush remap extended into nested stores.
+
+Beyond those, threads we can see but haven't scoped (see
+`plans/epic.md`):
 
 - Automatic backing selection (backings declare applicability and cost
   hints; `implement!` picks, user overrides).
@@ -174,8 +194,8 @@ Unscoped threads visible from here (see `plans/epic.md`):
   composition.
 - Compile-time schema introspection for codegen of serializers,
   visualizers, fuzzers.
-- Payloads (node/edge weights) — likely `one` arrows into value arenas;
-  how user data binds is an open design question.
+- Arrow-shaped payloads (trait-visible weights as arrows into value
+  arenas) — M5 covers data-on-records; this spelling stays open.
 
 ## Design documents
 
