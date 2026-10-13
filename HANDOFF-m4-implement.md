@@ -244,7 +244,29 @@ Step-9 notes (scope decisions, each reasoned):
   The fixture has exactly one host (OuterNode); the general rule is
   codegen-review surface, not tested.
 
-Not started: step 14.
+- **Step 14** (this commit): doc pass. The crate root gains a
+  "Transactions (M4)" section between the validate pre-pass paragraph and
+  the closing builder paragraph: edit/into_edit (borrowed-only for
+  phased), the staging verbs and their argument shapes (handles, raw
+  ids, Pending refs), the panic-vs-FlushError dividing line (keyed
+  live-key panics, the survivors-only cascade), the flush pipeline
+  (old-id analysis, compaction report, carry classes, replay, finish),
+  `check()`, the write-trait bound web for generic transforms, and the
+  `__stage_custom` escape hatch — with a compiling no_run flush example
+  (doctest). The `implement!` macro doc gains the write-side paragraph
+  (Tx emission, the carry classification, the trait web, the unclassified
+  → no-edit() rule). No `pattern!`/`backing!` changes: the keyed
+  live-key pinch already documents there (M2/M3), and on_unlink landed
+  with M3. Intra-doc links to per-store emitted types (`Tx`, `FlushError`)
+  are plain code spans — bracket links would not resolve. 48/48 suites
+  green incl. trybuild + downstream + doctests, zero warnings.
+
+**ALL 14 STEPS DONE** — the plan's implementation checklist is complete
+(ticks at 769–788 land in this and the step commits). The branch is ready
+for review: do not merge to main; retire this file to .handoffs/ with the
+worktree per the header.
+
+Not started: nothing — M4 implementation is complete.
 
 - **Step 13** (this commit): negative suite. Three new trybuild fixtures:
   `write_wrong_marker.rs` (a generic transform bounded on a write trait
@@ -886,6 +908,13 @@ plan text, note disagreements in step notes; do not merge to main —
 leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
+
+- 2026-10-13 (impl-m4-8): step 14 DONE — **ALL 14 STEPS COMPLETE** (see
+  "Where things stand" — crate-root "Transactions (M4)" section with a
+  compiling flush example, the implement! write-side paragraph; intra-doc
+  links to per-store emitted types are plain code spans). 48/48 suites
+  green incl. trybuild + downstream + doctests, zero warnings at the
+  commit. Leave the branch for review — do not merge to main.
 
 - 2026-10-13 (impl-m4-8): step 13 DONE (see "Where things stand" and the
   step-13 notes — three new trybuild fixtures: write_wrong_marker E0277

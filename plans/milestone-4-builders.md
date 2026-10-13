@@ -784,7 +784,7 @@ the probe crate under `/tmp` as the reference implementation.
       bounds, handle survival under `into_edit`), the `should_panic`
       staging tests collected, a downstream-crate transform
       portability test (M1 step 9's pattern).
-- [ ] 14. Doc pass: crate-root docs for transaction/flush/pass
+- [x] 14. Doc pass: crate-root docs for transaction/flush/pass
       discipline, macro docs updated (M1 step 11's pattern).
 
 Dependencies: 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 12); 9 → 11;

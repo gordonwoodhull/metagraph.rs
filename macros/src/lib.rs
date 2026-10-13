@@ -1250,6 +1250,23 @@ impl Parse for ImplementInput {
 /// `validate()` on `Store<Frozen>`, and the compaction at the consuming
 /// `freeze()`.
 ///
+/// A store whose every bound arrow classifies — existence, field-one,
+/// intrusive, store-level keyed, the hosted per-record keyed map, or the
+/// csr walk on a phased backing — also emits its transaction:
+/// `edit()`/`into_edit()` stage a change set as a plain op queue (adds,
+/// removals, primitive/keyed inserts, `set_` re-points) and `flush()`
+/// rebuilds through the same constructors and hooks direct construction
+/// uses — removals and dangler analysis in old-id space, compaction with
+/// an old→new id report, kept-record carry (maps filtered and remapped,
+/// never rebuilt; intrusive chains and phased buckets rebuilt by walking
+/// the old frozen state), submission-order replay, then `validate()`
+/// (`finish()` on a phased store). The marker-generic `Add`/`Remove`/
+/// `Insert`/`Set` traits and `HandleToRef` (old-store handles → refs)
+/// bound the whole web for generic transforms — one marker parameter
+/// per entity, the same equality web the read side uses. A store with
+/// an unclassified shape emits no transaction: its `edit()` arrives
+/// with the milestone step that defines the carry.
+///
 /// For a composition, binding keys are instance-qualified and the
 /// generated names follow the collision rules: entity types take the
 /// instance prefix only on collision (`OuterNodeId` beside `NodeId`),

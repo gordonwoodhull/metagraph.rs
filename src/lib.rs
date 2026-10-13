@@ -166,6 +166,87 @@
 //! early: the authored walk never runs, so it may assume links in range
 //! and use `rec(x)` freely. M4's flush calls `validate()` unconditionally.
 //!
+//! # Transactions (M4)
+//!
+//! A store whose every bound arrow classifies — existence, field-one,
+//! intrusive, store-level keyed, the hosted per-record keyed map, or the
+//! csr walk on a phased backing — also emits its write side beside the
+//! read side. A store with an unclassified shape emits no transaction:
+//! its `edit()` arrives with the milestone step that defines the carry.
+//!
+//! `edit()` borrows the store sharedly and starts a transaction;
+//! `into_edit()` (non-phased stores only) consumes it, and the
+//! flush then reuses its arena allocations. A phased store's
+//! transaction is borrowed-only and presupposes the frozen old store —
+//! the csr carry reads its frozen ranges, and reads exist only on
+//! `Frozen`.
+//!
+//! Staging queues ops and never touches the store. The verbs are the
+//! per-entity `add_*`/`remove_*`, the primitive `insert_<arrow>`
+//! (membership asserted directly), the keyed `insert_<arrow>(key,
+//! target)` (a key live in the borrowed old store or already staged
+//! panics at the call — a staged removal frees no key), and `set_<arrow>`
+//! re-points on kept records. Verbs take old-store handles, raw ids
+//! (accepted as `Existing`), or the refs other verbs returned
+//! (`Pending`, stamped with the transaction's token — a foreign or stale
+//! ref panics at staging). The dividing line: staging *panics* are for
+//! ops whose acceptance would silently corrupt the change set;
+//! `FlushError` is for individually legal ops invalid against the
+//! store or change set as a whole — unknown old ids, double removals,
+//! danglers (a removed key with live map entries included: the map is
+//! carried, never rebuilt, and staged inserts keyed by a removed key
+//! count as live references, attributed to the removal op).
+//!
+//! `flush()` consumes the queue and rebuilds: removals and range checks
+//! in old-id space, dangler detection attributed to the op that caused
+//! it, compaction with an old→new id report, the kept skeleton
+//! (intrusive lists carried by walking the old chains; keyed maps
+//! filtered and remapped; a phased store's buckets fed from the old
+//! frozen ranges), then submission-order replay through the same
+//! constructors and hooks direct construction uses — replay order is
+//! observable, and a re-pointed membership takes its replay-time
+//! position. The outcome pairs the new store with the report; a phased
+//! store's flush ends in `finish()` (freeze, then validate — finalize
+//! before validate). `check()` predicates the flush's analysis
+//! without building anything. The old store is untouched; a rejection
+//! leaves nothing half-applied.
+//!
+//! Generic algorithms over the write side bound the marker-generic
+//! traits — `Add<Entity>`, `Remove<Entity>`, `Insert<Arrow>`,
+//! `Set<Arrow>`, and `tx::HandleToRef` (old-store handles → refs) — one
+//! marker parameter per entity, the same equality web the read side
+//! uses; an inducing constructor that computes its own membership rides
+//! the `__stage_custom` escape hatch.
+//!
+//! ```no_run
+//! use metagraph_exper::implement;
+//!
+//! implement! {
+//!     metagraph_exper::stdlib::Digraph as GraphStore {
+//!         nodes:     arena,
+//!         out_edges: intrusive_list,
+//!         in_edges:  intrusive_list,
+//!     }
+//! }
+//!
+//! let mut s = GraphStore::new();
+//! let a = s.add_node();
+//! let b = s.add_node();
+//! let e = s.add_edge(a, b);
+//!
+//! let mut tx = s.edit();
+//! tx.remove_edge(e);
+//! let c = tx.add_node();
+//! tx.add_edge(a, c);
+//! let out = tx.flush().expect("coherent change set");
+//!
+//! // Report maps index OLD ids; staged adds land past the map's end.
+//! assert_eq!(out.report.node_map, vec![Some(0), Some(1)]);
+//! assert_eq!(out.report.edge_map, vec![None, Some(0)]);
+//! assert_eq!(out.store.edge_count(), 2);
+//! out.store.validate().expect("flushed store valid");
+//! ```
+//!
 //! Stores are append-only while being built; handles borrow the store,
 //! so the borrow checker freezes it once handles exist — handle identity
 //! is (store pointer, id), never the id alone.
