@@ -103,7 +103,37 @@ be exercised before its staging call exists. Recorded here per the plan's
   inherent + trait + self-less replay, dangler + oob rejections).
   Suite green incl. trybuild + downstream.
 
-Not started: steps 7–14.
+- **Step 7** (this commit): `set_` + grown hooks. `__set_<arrow>` grew
+  into the re-point orchestration in BOTH codegens (flat: codegen.rs;
+  composed: instance-qualified, codegen_composed.rs): unlink each
+  by-derived derivative authored `on_unlink` (old host read from the
+  record's own field — the by-derivation invariant, the only spelling
+  that works in the honor case), write the field, insert each derivative
+  authored `on_insert`; phased derivatives skipped entirely and keyed
+  derivatives skipped (decision 6 + keyed relink lands with step 11).
+  TxModel gained `sets` (every `ctor_arg` arrow — the same condition as
+  the re-point hook; the `Set<Arrow>` trait impl wires the courier's
+  write slot like the insert verbs, no inherent-only form since a
+  `ctor_arg` self at an unfused root is rejected). tx.rs emits:
+  `Op::Set<Arrow> { a, b }`, the `set_<arrow>` staging verb (Pending
+  self → staging panic — step 2's deferred fourth panic), step-1
+  last-wins effective-value tables (`eff_<arrow>`, riding the shared
+  `__TxAnalysis`), a step-2 set-op pass (`SetOfRemoved{op, arena, id,
+  removed_by}` + set-names-removed danglers attributed to the set op,
+  emitted BEFORE the kept pass per the probe's discovery order), the
+  honor guard in the kept-dangler pass (a re-pointed field skips its
+  old-target check), the skeleton honor init (effective endpoint,
+  born unlinked; Pending endpoint predicted as kept-count + preceding
+  target adds, asserted at replay), and replay through `__set_<arrow>`
+  against the rebuilt state. Tests: tests/tx_set_unlink.rs (12 — probe
+  3's mid/head/tail + interleaved adds, honor, honor-with-pending,
+  same-set-dangles contrast, skeleton replay order, SetOfRemoved, double
+  last-wins, target-uncurable, names-removed attribution, oob-id listed
+  error, Set-trait equivalence, check↔flush parity), plus the set_-of-
+  Pending panic in tests/tx_staging_panics.rs. Suite green incl.
+  trybuild + downstream.
+
+Not started: steps 8–14.
 
 Step-6 notes (deviations from this handoff's pre-work, each reasoned):
 
@@ -147,6 +177,40 @@ Step-6 notes (deviations from this handoff's pre-work, each reasoned):
   the primitive insert verb) corrupts the intrusive chain — same hazard
   as the raw store op; the Tx does not guard it, and the plan's
   staging-panic list doesn't ask it to. Noted on the verb's doc.
+
+## Step 7 notes (deviations/adjustments, each reasoned)
+
+- **Three existing tests pinned the field-only-write semantics and were
+  adjusted, not kept verbatim.** The handoff's "keep it (it pins the
+  hooks)" for tests/unlink.rs's by_derived trio predates the grown hook:
+  with `__set_source` orchestrating unlink+write+relink, the manual trio
+  double-links. Adjusted: by_derived + composed_impl now exercise the
+  builder op as the one-call orchestration (the `primitive` module still
+  pins `__unlink` head/middle/tail individually; composed keeps the
+  instance-qualified hooks pinned via the total-absence answer).
+  tests/koenigsberg.rs's `set_one_arrow_writes_through_named_hook`
+  asserted "by-derived membership is not re-derived, by design" — that
+  design died with this step; the test now pins the re-derivation (c's
+  in-list gains, b's loses, validate green).
+  tests/validate_failures.rs's determinant-contradiction/coverage pin
+  corrupted via `set_target(e, a)`; with the orchestration, no public op
+  can leave field and lists disagreeing (no pub un-insert exists — a
+  plan non-goal), so the corruption moved below the orchestration
+  (unlink + wrong-host insert through the private hooks) and the test
+  moved inside `mod flat` for hook access — the file's own `corrupt`
+  submodule pattern.
+- **Step-2 pass order: set-op checks before the kept pass** (probe 3's
+  discovery order — the set op's own violations first, then removal-
+  attributed danglers). Existing suites emit no set ops, so no prior
+  ordering changed; new tests pin exact vectors.
+- **Decision 6 checked and confirmed**: tests/csr.rs exercises no
+  builder `set_` on the csr store (grep-clean), so skipping phased
+  derivatives leaves no stale-bucket test exposure. The csr × set_
+  residual (a set_ re-pointing a determinant of a by-derived csr arrow
+  leaves carried buckets stale) remains noted for a real binding.
+- **`(id).0 as usize < count` needed double parens** — `<` after `as
+  usize` parses as generics (the suite's downstream compiles caught it);
+  the existing `<` checks all double-parenthesize.
 
 ## Architecture decisions (settled in the survey, keep unless forced)
 
@@ -453,6 +517,14 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
+- 2026-10-12 (impl-m4-5): step 7 DONE (see "Where things stand" and the
+  step-7 notes above — the grown-hook emission, the honor pipeline, and
+  the three adjusted legacy tests). Suite green incl. trybuild +
+  downstream at the commit. Next: step 8 (unfused-root forms — self-less
+  insert staging, store-level ops, and the START of composed Tx
+  emission: codegen_composed.rs grows TxModel construction; edge-induced
+  may pull step 11's keyed-carry work forward per the continuation
+  guide).
 - 2026-10-12 (impl-m4-4): step 6 DONE (see "Where things stand" and the
   step-6 notes above — five recorded deviations/reasonings). Suite green
   incl. trybuild + downstream at the commit. Next: step 7 (`set_` +

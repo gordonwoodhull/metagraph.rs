@@ -73,7 +73,11 @@ pub(crate) struct TxCtorArg {
 /// skeleton refines: ctor-arg id fields copy the OLD record's field
 /// remapped through the target's compaction map.
 pub(crate) enum TxFieldInit {
-    CtorArg { target: Ident2 },
+    /// A ctor-arg id field: copies the OLD record's field remapped through
+    /// the target's compaction map — or, when a staged `set_` re-pointed it
+    /// and the old endpoint was removed (the honor case), the EFFECTIVE
+    /// endpoint (predicted when Pending, asserted at replay).
+    CtorArg { target: Ident2, arrow: Ident2 },
     /// `Option` link/head: born `None`; the intrusive carry re-threads.
     None_,
     /// `Vec`/`HashMap` container: born empty (its carry class arrives with
@@ -131,6 +135,25 @@ pub(crate) struct TxInsert {
     pub verb: Option<TxVerb>,
 }
 
+/// The `set_<arrow>` staging verb of one field-backed `one` arrow (a
+/// `ctor_arg` backing — the builder's `__set_<arrow>` hook is the re-point
+/// orchestration: unlink the by-derived derivatives, write, re-link). The
+/// flush honors staged corrections in dangler detection (the probe's honor
+/// reading) and replays through the same hook against the rebuilt skeleton.
+pub(crate) struct TxSet {
+    /// The local arrow name: the op variant `Set<camel>`, the inherent
+    /// staging verb, and the store's `__set_<arrow>` hook are all named
+    /// after it. Also the record field's name (the ctor-arg field is
+    /// arrow-named).
+    pub arrow: Ident2,
+    /// The self entity (whose record's field is re-pointed).
+    pub self_entity: Ident2,
+    /// The field's target entity (the new endpoint's resolution arena).
+    pub target_entity: Ident2,
+    /// The `Set<Arrow>` trait impl (the courier's write slot).
+    pub verb: TxVerb,
+}
+
 /// The whole store as the transaction sees it.
 pub(crate) struct TxModel {
     pub store: Ident2,
@@ -148,6 +171,9 @@ pub(crate) struct TxModel {
     /// arrows with an insert hook — by-derived and existence arrows stage
     /// no insert).
     pub inserts: Vec<TxInsert>,
+    /// `set_<arrow>` verbs in schema arrow order (field-backed `one`
+    /// arrows — every ctor-arg arrow grows the re-point hook).
+    pub sets: Vec<TxSet>,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +283,14 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 });
             }
         }
+    }
+    for s in &m.sets {
+        let variant = format_ident!("Set{}", camel(&s.arrow.to_string()));
+        let a_ref = format_ident!("{}Ref", s.self_entity);
+        let b_ref = format_ident!("{}Ref", s.target_entity);
+        op_variants.extend(quote! {
+            #variant { a: #a_ref, b: #b_ref },
+        });
     }
     let ops_enum = quote! {
         #[doc(hidden)]
@@ -400,6 +434,26 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             });
         }
     }
+    for s in &m.sets {
+        let verb = &s.verb;
+        let trait_path = &verb.trait_path;
+        let marker_path = &verb.marker_path;
+        let method = &verb.method;
+        let inherent = format_ident!("set_{}", s.arrow);
+        let assoc_decls = verb.assocs.iter().map(|(an, av)| quote!(type #an = #av;));
+        let a = Ident2::new("a", proc_macro2::Span::call_site());
+        let b = Ident2::new("b", proc_macro2::Span::call_site());
+        let a_ty = &verb.assocs[0].0;
+        let b_ty = &verb.assocs[1].0;
+        write_impls.extend(quote! {
+            impl<'g> #trait_path<#marker_path> for Tx<'g> {
+                #(#assoc_decls)*
+                fn #method(&mut self, #a: Self::#a_ty, #b: Self::#b_ty) {
+                    Tx::#inherent(self, #a, #b)
+                }
+            }
+        });
+    }
 
     // -- insert_<arrow> staging (primitive many arrows) ---------------------
     // Membership asserted directly on an existing record; the flush
@@ -442,6 +496,47 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     }
 
+    // -- set_<arrow> staging (field-backed `one` arrows) --------------------
+    // A correction op: re-points a KEPT record's field (and the by-derived
+    // membership the field determines — the flush replays through the
+    // grown `__set_<arrow>` hook). The self ref must name an old record: a
+    // staged record's determining fields are fixed by its own add op, so
+    // `set_` of a Pending ref is a staging bug and panics here (the plan's
+    // dividing line: deterministically detectable at the staging call,
+    // silently wrong if missed).
+    let mut set_staging = TokenStream2::new();
+    for s in &m.sets {
+        let method = format_ident!("set_{}", s.arrow);
+        let variant = format_ident!("Set{}", camel(&s.arrow.to_string()));
+        let arrow_str = s.arrow.to_string();
+        let self_into_trait = format_ident!("Into{}Arg", s.self_entity);
+        let self_into_fn = format_ident!("into_{}_ref", snake(&s.self_entity.to_string()));
+        let target_into_trait = format_ident!("Into{}Arg", s.target_entity);
+        let target_into_fn = format_ident!("into_{}_ref", snake(&s.target_entity.to_string()));
+        let doc = format!(
+            "Stage a re-point of arrow `{}` on a kept record: the flush honors the correction in dangler detection (a removed old endpoint is cured on this side only) and replays the op through the store's re-point hook against the rebuilt skeleton, in submission order — a later `set_` of the same record wins.",
+            s.arrow
+        );
+        set_staging.extend(quote! {
+            #[doc = #doc]
+            pub fn #method(&mut self, a: impl #self_into_trait, b: impl #target_into_trait) {
+                let a = a.#self_into_fn(self);
+                let b = b.#target_into_fn(self);
+                match a.kind {
+                    #rt::tx::RefKind::Existing(_) => {
+                        self.ops.push(Op::#variant { a, b });
+                    }
+                    #rt::tx::RefKind::Pending(_) => panic!(
+                        "set_{} of a Pending ref: a staged record's determining \
+                         fields are fixed by its own add op; there is no old \
+                         record to re-point",
+                        #arrow_str
+                    ),
+                }
+            }
+        });
+    }
+
     // -- flush: per-entity derived names -----------------------------------
     struct Ent {
         name: Ident2,
@@ -478,6 +573,28 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         .collect();
     let ent_of = |name: &Ident2| ents.iter().find(|x| &x.name == name).expect("entity");
 
+    // Per-set derived names: the last-wins effective-value table (step 1,
+    // indexed by the self entity's old id) and the skeleton's pending-id
+    // prediction table (indexed by set-op index, asserted at replay).
+    struct SetP<'m> {
+        m: &'m TxSet,
+        variant: Ident2,
+        eff: Ident2,
+        pred: Ident2,
+        hook: Ident2,
+    }
+    let sets: Vec<SetP<'_>> = m
+        .sets
+        .iter()
+        .map(|s| SetP {
+            m: s,
+            variant: format_ident!("Set{}", camel(&s.arrow.to_string())),
+            eff: format_ident!("eff_{}", s.arrow),
+            pred: format_ident!("honor_pred_{}", s.arrow),
+            hook: format_ident!("__set_{}", s.arrow),
+        })
+        .collect();
+
     // -- flush: the error/report surface ------------------------------------
     let report_fields = ents.iter().map(|x| {
         let f = &x.map;
@@ -498,9 +615,17 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             quote!(#removed_by: ::std::vec::Vec<::core::option::Option<usize>>,),
         ]
     });
+    // The set verbs' last-wins tables ride the analysis too: step 4's
+    // skeleton init (the honor case) and step 4c's replay consume them.
+    let analysis_set_fields = sets.iter().map(|s| {
+        let eff = &s.eff;
+        let b_ref = format_ident!("{}Ref", s.m.target_entity);
+        quote!(#eff: ::std::vec::Vec<::core::option::Option<(usize, #b_ref)>>,)
+    });
     let analysis_members: Vec<Ident2> = ents
         .iter()
         .flat_map(|x| [x.count.clone(), x.removed.clone(), x.removed_by.clone()])
+        .chain(sets.iter().map(|s| s.eff.clone()))
         .collect();
     let analysis_fields = analysis_members.iter().map(|m| quote!(#m,));
     let analysis_names = analysis_members.iter().map(|m| quote!(#m,));
@@ -521,6 +646,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             DoubleRemoval { op: usize, arena: &'static str, id: u32 },
             #[doc = "A record (kept or staged) whose field target was removed: a kept record's violation points at the removal op that caused it, a staged add's at the op that named the removed endpoint."]
             DanglingEndpoint { op: usize, record: RecordDesc, endpoint_arena: &'static str, endpoint: u32 },
+            #[doc = "A staged `set_` named a record the same change set removes: re-pointing needs an old record to re-point. Names both ops — the `set_` op and the removal op that got there first."]
+            SetOfRemoved { op: usize, arena: &'static str, id: u32, removed_by: usize },
             #[doc = "Final `validate()` failed — defensive arm; the pipeline should never produce damage."]
             ValidateFailed { detail: ::std::string::String },
         }
@@ -558,9 +685,10 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
 
         #[doc(hidden)]
-        #[doc = "The shared steps 1-2 analysis (per-arena counts, resolved removal sets with attribution) that `check` predicates on and `flush` consumes."]
+        #[doc = "The shared steps 1-2 analysis (per-arena counts, resolved removal sets with attribution, and the set verbs' last-wins effective-value tables) that `check` predicates on and `flush` consumes."]
         struct __TxAnalysis {
             #(#analysis_struct_fields)*
+            #(#analysis_set_fields)*
         }
     };
 
@@ -578,6 +706,19 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         quote!(
             let mut #removed = ::std::vec![false; #c];
             let mut #removed_by: ::std::vec::Vec<::core::option::Option<usize>> =
+                ::std::vec![::core::option::Option::None; #c];
+        )
+    });
+    // The set verbs' effective-value tables: one slot per old record of the
+    // self entity, filled last-wins (a later set_ overwrites an earlier one
+    // on the same record — submission order).
+    let s1_set_state = sets.iter().map(|s| {
+        let eff = &s.eff;
+        let x = ent_of(&s.m.self_entity);
+        let c = &x.count;
+        let b_ref = format_ident!("{}Ref", s.m.target_entity);
+        quote!(
+            let mut #eff: ::std::vec::Vec<::core::option::Option<(usize, #b_ref)>> =
                 ::std::vec![::core::option::Option::None; #c];
         )
     });
@@ -680,10 +821,52 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
+    // Step 1, set ops — both refs range-validate like any other; the op
+    // also records the record's effective value (last-wins) for step 2's
+    // honor reading and step 4's skeleton.
+    let s1_set_arms = sets.iter().map(|s| {
+        let variant = &s.variant;
+        let eff = &s.eff;
+        let x = ent_of(&s.m.self_entity);
+        let t = ent_of(&s.m.target_entity);
+        let (x_count, x_str) = (&x.count, &x.arena_str);
+        let (t_count, t_str) = (&t.count, &t.arena_str);
+        quote! {
+            Op::#variant { a, b } => {
+                if let #rt::tx::RefKind::Existing(id) = a.kind {
+                    if (id).0 as usize >= #x_count {
+                        violations.push(Violation::UnknownOldId {
+                            op: op_index,
+                            arena: #x_str,
+                            id: (id).0,
+                        });
+                    }
+                }
+                if let #rt::tx::RefKind::Existing(id) = b.kind {
+                    if (id).0 as usize >= #t_count {
+                        violations.push(Violation::UnknownOldId {
+                            op: op_index,
+                            arena: #t_str,
+                            id: (id).0,
+                        });
+                    }
+                }
+                if let #rt::tx::RefKind::Existing(id) = a.kind {
+                    if ((id).0 as usize) < #x_count {
+                        #eff[(id).0 as usize] = ::core::option::Option::Some((op_index, *b));
+                    }
+                }
+            }
+        }
+    });
 
     // Step 2, pass A — kept-record danglers over every ctor-arg field (a
     // field-backed `one` arrow): a kept record whose field target was
-    // removed dangles, attributed to the removal op.
+    // removed dangles, attributed to the removal op — unless a staged
+    // `set_` re-pointed the field: the HONOR reading judges the record at
+    // its EFFECTIVE endpoint (the set op's endpoint was checked at the op,
+    // attributed to the naming op), so a re-pointed field skips the
+    // old-target check entirely.
     let s2_kept = m.entities.iter().filter(|e| !e.ctor_args.is_empty()).map(|e| {
         let x = ent_of(&e.name);
         let (c, removed, arena, arena_str) = (&x.count, &x.removed, &x.arena, &x.arena_str);
@@ -691,16 +874,19 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             let t = ent_of(&ca.target_entity);
             let (t_removed, t_removed_by, t_str) = (&t.removed, &t.removed_by, &t.arena_str);
             let f = &ca.arg; // the arg name is the arrow name is the field name
+            let eff = format_ident!("eff_{}", ca.arg);
             quote! {
                 {
-                    let v = rec.#f;
-                    if #t_removed[(v).0 as usize] {
-                        violations.push(Violation::DanglingEndpoint {
-                            op: #t_removed_by[(v).0 as usize].unwrap(),
-                            record: RecordDesc::Kept { arena: #arena_str, id: old_id as u32 },
-                            endpoint_arena: #t_str,
-                            endpoint: (v).0,
-                        });
+                    if #eff[old_id].is_none() {
+                        let v = rec.#f;
+                        if #t_removed[(v).0 as usize] {
+                            violations.push(Violation::DanglingEndpoint {
+                                op: #t_removed_by[(v).0 as usize].unwrap(),
+                                record: RecordDesc::Kept { arena: #arena_str, id: old_id as u32 },
+                                endpoint_arena: #t_str,
+                                endpoint: (v).0,
+                            });
+                        }
                     }
                 }
             }
@@ -779,6 +965,47 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         quote! {
             if let Op::#variant { #(#field_names),* } = op {
                 #(#checks)*
+            }
+        }
+    });
+    // Step 2, set ops — the correction-op checks, attributed to the set op
+    // (the op that NAMED the endpoint, the staged-op precedent): a `set_`
+    // of a removed record is SetOfRemoved, and a `set_` naming a removed
+    // endpoint dangles at the set op. Range-guarded: a flagged id is never
+    // indexed. Runs before the kept-record pass: the honor reading reports
+    // the set op's own violations first, and the kept pass then skips every
+    // field a set re-pointed.
+    let s2_setop_arms = sets.iter().map(|s| {
+        let variant = &s.variant;
+        let x = ent_of(&s.m.self_entity);
+        let t = ent_of(&s.m.target_entity);
+        let (x_count, x_removed, x_removed_by, x_str) =
+            (&x.count, &x.removed, &x.removed_by, &x.arena_str);
+        let (t_count, t_removed, t_str) = (&t.count, &t.removed, &t.arena_str);
+        quote! {
+            if let Op::#variant { a, b } = op {
+                if let #rt::tx::RefKind::Existing(id) = a.kind {
+                    if ((id).0 as usize) < #x_count {
+                        if #x_removed[(id).0 as usize] {
+                            violations.push(Violation::SetOfRemoved {
+                                op: op_index,
+                                arena: #x_str,
+                                id: (id).0,
+                                removed_by: #x_removed_by[(id).0 as usize].unwrap(),
+                            });
+                        }
+                        if let #rt::tx::RefKind::Existing(nid) = b.kind {
+                            if ((nid).0 as usize) < #t_count && #t_removed[(nid).0 as usize] {
+                                violations.push(Violation::DanglingEndpoint {
+                                    op: op_index,
+                                    record: RecordDesc::Kept { arena: #x_str, id: (id).0 },
+                                    endpoint_arena: #t_str,
+                                    endpoint: (nid).0,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     });
@@ -883,10 +1110,58 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     let record_field_init = |entity: &Ident2, field: &TxField| -> TokenStream2 {
         let n = &field.emitted;
         match &field.init {
-            TxFieldInit::CtorArg { target } => {
+            TxFieldInit::CtorArg { target, arrow } => {
                 let t = ent_of(target);
-                let (t_map, t_id) = (&t.map, &t.id_ty);
-                quote!(#n: #t_id(#t_map[(rec.#n).0 as usize].expect("field target kept: step 2 proved it")),)
+                let (t_map, t_id, t_removed) = (&t.map, &t.id_ty, &t.removed);
+                match m.sets.iter().find(|s| s.self_entity == *entity && s.arrow == *arrow) {
+                    Some(set) => {
+                        let eff = format_ident!("eff_{}", set.arrow);
+                        let pred = format_ident!("honor_pred_{}", set.arrow);
+                        let add_variant = format_ident!("Add{}", set.target_entity);
+                        quote! {
+                            #n: #t_id(
+                                if #t_removed[(rec.#n).0 as usize] {
+                                    // HONOR case: the old endpoint was
+                                    // removed and a staged `set_` re-points
+                                    // this field (step 2 proved one exists —
+                                    // otherwise the record dangled). The
+                                    // skeleton record names its EFFECTIVE
+                                    // endpoint and is born UNLINKED: the
+                                    // walk-rebuild visits kept hosts' old
+                                    // chains only, and the removed old
+                                    // host's chain — the only list that
+                                    // held this record — is skipped. A
+                                    // Pending endpoint is predicted (kept
+                                    // count + adds before its op) and
+                                    // asserted at replay, never trusted.
+                                    let (set_op, b) = #eff[old_id].expect(
+                                        "a staged set_ re-points this field: step 2 honor check",
+                                    );
+                                    match b.kind {
+                                        #rt::tx::RefKind::Existing(id) => #t_map[(id).0 as usize]
+                                            .expect("effective endpoint kept: step 2 honor check"),
+                                        #rt::tx::RefKind::Pending(i) => {
+                                            let adds = ops[..(i) as usize]
+                                                .iter()
+                                                .filter(|o| matches!(o, Op::#add_variant { .. }))
+                                                .count() as u32;
+                                            let p = #t_map.iter().flatten().count() as u32 + adds;
+                                            #pred[set_op] = ::core::option::Option::Some(p);
+                                            p
+                                        }
+                                    }
+                                } else {
+                                    #t_map[(rec.#n).0 as usize]
+                                        .expect("field target kept: step 2 proved it")
+                                }
+                            ),
+                        }
+                    }
+                    None => quote! {
+                        #n: #t_id(#t_map[(rec.#n).0 as usize]
+                            .expect("field target kept: step 2 proved it")),
+                    },
+                }
             }
             TxFieldInit::None_ => {
                 if let Some(i) = m.intrusive.iter().find(|i| {
@@ -1006,6 +1281,13 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // REAL constructors (on_add growth + insert hooks fire as construction
     // always fires them). Removals never replay. A `Pending` ref resolves
     // through its entity's replay table; a miss is an internal bug.
+    let s4_honor_preds = sets.iter().map(|s| {
+        let pred = &s.pred;
+        quote!(
+            let mut #pred: ::std::vec::Vec<::core::option::Option<u32>> =
+                ::std::vec![::core::option::Option::None; ops.len()];
+        )
+    });
     let s4c_pending = ents.iter().map(|x| {
         let (p, id_ty) = (&x.pending, &x.id_ty);
         quote!(let mut #p: ::std::vec::Vec<::core::option::Option<#id_ty>> =
@@ -1084,6 +1366,42 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
+    // Set replays lower through the grown re-point hook AGAINST THE
+    // REBUILT STATE: the skeleton left a re-pointed record under its old
+    // host's carried list (or born unlinked in the honor case — the total
+    // unlink legitimately finds nothing), and the hook unlinks, writes,
+    // and re-links in one call. A Pending effective endpoint asserts the
+    // skeleton's prediction (the honor case): the id is deterministic, and
+    // a mismatch is an internal bug, never trusted.
+    let s4c_set_arms = sets.iter().map(|s| {
+        let variant = &s.variant;
+        let hook = &s.hook;
+        let pred = &s.pred;
+        let x = ent_of(&s.m.self_entity);
+        let t = ent_of(&s.m.target_entity);
+        let (x_map, x_id) = (&x.map, &x.id_ty);
+        let (t_map, t_pending, t_id) = (&t.map, &t.pending, &t.id_ty);
+        quote! {
+            Op::#variant { a, b } => {
+                let a = match a.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #x_id(#x_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                    #rt::tx::RefKind::Pending(_) =>
+                        ::core::unreachable!("staging rejects Pending self refs on set_"),
+                };
+                let b = match b.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #t_id(#t_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                    #rt::tx::RefKind::Pending(i) => #t_pending[i as usize]
+                        .expect("an add precedes its use: submission order"),
+                };
+                if let ::core::option::Option::Some(p) = #pred[op_index] {
+                    ::core::assert_eq!(b.0, p, "skeleton pending-id prediction (honor case)");
+                }
+                new_store.#hook(a, b);
+            }
+        }
+    });
 
     let flush_method = quote! {
         #[doc(hidden)]
@@ -1095,21 +1413,26 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             // -- step 1: resolve removals; validate every Existing ref -----
             #(#s1_counts)*
             #(#s1_state)*
+            #(#s1_set_state)*
             let mut violations: ::std::vec::Vec<Violation> = ::std::vec::Vec::new();
             for (op_index, op) in ops.iter().enumerate() {
                 match op {
                     #(#s1_add_arms)*
                     #(#s1_remove_arms)*
                     #(#s1_insert_arms)*
+                    #(#s1_set_arms)*
                 }
             }
 
             // -- step 2: dangler detection, in old-id space ----------------
-            // Kept records first (attributed to the removal op), then
-            // staged adds naming removed endpoints (attributed to the
-            // naming op), then staged inserts naming removed endpoints.
-            // Runs before compaction so the report names the ids the user
-            // actually staged with.
+            // Set ops first (the correction-op checks, attributed to the
+            // set op), then kept records (skipping fields a set re-pointed
+            // — the honor reading), then staged adds and inserts naming
+            // removed endpoints. Runs before compaction so the report
+            // names the ids the user actually staged with.
+            for (op_index, op) in ops.iter().enumerate() {
+                #(#s2_setop_arms)*
+            }
             #(#s2_kept)*
             for (op_index, op) in ops.iter().enumerate() {
                 #(#s2_staged_arms)*
@@ -1134,6 +1457,11 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             let __TxAnalysis {
                 #(#analysis_names)*
             } = Self::__analyze(old.__store(), &ops)?;
+
+            // The skeleton's pending-id prediction tables (the honor case):
+            // filled while a re-pointed field's Pending endpoint is
+            // predicted, asserted at replay.
+            #(#s4_honor_preds)*
 
             // -- step 3: compaction; per-arena old->new id maps ------------
             #(#s3_maps)*
@@ -1169,6 +1497,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 match op {
                     #(#s4c_add_arms)*
                     #(#s4c_insert_arms)*
+                    #(#s4c_set_arms)*
                     #(#remove_patterns)|* => {}
                 }
             }
@@ -1255,6 +1584,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #staging
 
             #insert_staging
+
+            #set_staging
 
             #flush_method
         }

@@ -990,9 +990,19 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             });
         }
 
-        // Field-write hook + `set_` op: the single write path after
-        // construction for a `ctor_arg`-fed field (M2's named hook; M4's
-        // flush replays through it).
+        // Re-point hook + `set_` op: the single write path after
+        // construction for a `ctor_arg`-fed field (M2's named hook, grown
+        // into M4's orchestration). The by-derived arrows this field
+        // determines lose membership before the write and regain it under
+        // the new endpoint after — unlink/insert only where the derivative
+        // backing authors the hook, keyed derivatives skipped (their
+        // relink lands with the keyed carry), phased derivatives skipped
+        // entirely (membership is derived at freeze — decision 6). The old
+        // host is read from the record's own field: exactly the
+        // by-derivation invariant ("the record sits in the list its field
+        // names"), and the only spelling that works in the honor case,
+        // where no live old host exists (probe-verified,
+        // /tmp/m4-probe-set-unlink).
         if d.has(|c| matches!(c, Clause::CtorArg { .. })) {
             let field = contributed_fields(d)
                 .find(|f| f.formula == NameFormula::Arrow)
@@ -1004,15 +1014,53 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             let tid = id_ty(&a.target);
             let s_arena = arena_fld(&a.source);
             let f = &field;
+            let mut unlink_calls = TokenStream2::new();
+            let mut insert_calls = TokenStream2::new();
+            for i2 in infos.iter().filter(|i2| i2.decl.by.as_ref() == Some(&a.name)) {
+                let Some(d2) = i2.backing else { continue };
+                // Decision 6 + the keyed deferral: only a primitive
+                // (non-keyed) many derivative lowers through the hooks
+                // here; a phased derivative needs nothing (freeze
+                // re-derives membership) and a keyed derivative's relink
+                // lands with the keyed carry step.
+                if d2.is_phased() || card_of_decl(d2) != Cardinality::Many {
+                    continue;
+                }
+                let der_root = is_root(&i2.decl.source);
+                if d2.has(|c| matches!(c, Clause::OnUnlink { .. })) {
+                    let un = format_ident!("__unlink_{}", i2.decl.name);
+                    unlink_calls.extend(if der_root {
+                        quote!(self.#un(self_id);)
+                    } else {
+                        quote!(self.#un(old_host, self_id);)
+                    });
+                }
+                if d2.has(|c| matches!(c, Clause::OnInsert { .. })) {
+                    let ins = format_ident!("__insert_{}", i2.decl.name);
+                    insert_calls.extend(if der_root {
+                        quote!(self.#ins(self_id);)
+                    } else {
+                        quote!(self.#ins(value, self_id);)
+                    });
+                }
+            }
+            let old_host_read = if unlink_calls.is_empty() {
+                quote!()
+            } else {
+                quote!(let old_host = self.#s_arena[self_id.0 as usize].#f;)
+            };
             hook_impls.extend(quote! {
                 #[doc(hidden)]
-                #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc_name), "`: set `self_id`'s field to `value`")]
+                #[doc = concat!("re-point hook of arrow `", stringify!(#arrow_doc_name), "`: unlink the by-derived memberships the field determines, write the field, re-link under the new endpoint")]
                 fn #hook(&mut self, self_id: #sid, value: #tid) {
+                    #old_host_read
+                    #unlink_calls
                     self.#s_arena[self_id.0 as usize].#f = value;
+                    #insert_calls
                 }
             });
             ctor_impls.extend(quote! {
-                #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc_name), "` to `value` (field-backed `one` arrow).")]
+                #[doc = concat!("Set `self_id`'s `", stringify!(#arrow_doc_name), "` to `value` (field-backed `one` arrow: the re-point hook unlinks and re-links the by-derived membership in the same call).")]
                 pub fn #set_name(&mut self, self_id: #sid, value: #tid) {
                     self.#hook(self_id, value);
                 }
@@ -1991,6 +2039,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                             let init = match &cf.init {
                                 FieldInit::CtorArg(a) => crate::tx::TxFieldInit::CtorArg {
                                     target: arrow_target_of(a),
+                                    arrow: format_ident!("{}", a),
                                 },
                                 FieldInit::None_ => crate::tx::TxFieldInit::None_,
                                 FieldInit::New => crate::tx::TxFieldInit::New,
@@ -2099,6 +2148,55 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     verb,
                 });
             }
+            // The set verbs: field-backed `one` arrows (the `ctor_arg`
+            // clause — the same condition the re-point hook emits under).
+            // The `Set<Arrow>` trait impl wires the courier's write slot
+            // exactly like the insert verbs; the self is always a record
+            // entity (a `ctor_arg` field at an unfused root is rejected),
+              // so no inherent-only form exists.
+            let mut sets: Vec<crate::tx::TxSet> = Vec::new();
+            for info in &infos {
+                let Some(d) = info.backing else { continue };
+                let a = info.decl;
+                if !d.has(|c| matches!(c, Clause::CtorArg { .. })) {
+                    continue;
+                }
+                let write = info.meta.write.as_ref().ok_or_else(|| {
+                    syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "root `{}` publishes no write metadata (old courier?); \
+                             rebuild the declaring crate",
+                            path_tokens(a.inst.as_ref().unwrap()),
+                        ),
+                    )
+                })?;
+                let mut write_path = a.inst.as_ref().unwrap().clone();
+                write_path.segments.last_mut().unwrap().ident = write.trait_.clone();
+                let trait_path =
+                    crate::resolve_schema_path(&write_path, &schema.pkg)?;
+                let marker_path = {
+                    let marker = marker_ty(&a.name);
+                    quote!(#marker_base_ts::#marker_mod::markers::#marker)
+                };
+                let a_ref_alias = format_ident!("{}Ref", a.source);
+                let b_ref_alias = format_ident!("{}Ref", a.target);
+                let assocs = vec![
+                    (write.a_ref.clone(), quote!(#a_ref_alias)),
+                    (write.b_ref.clone(), quote!(#b_ref_alias)),
+                ];
+                sets.push(crate::tx::TxSet {
+                    arrow: a.name.clone(),
+                    self_entity: a.source.clone(),
+                    target_entity: a.target.clone(),
+                    verb: crate::tx::TxVerb {
+                        trait_path,
+                        marker_path,
+                        method: write.method.clone(),
+                        assocs,
+                    },
+                });
+            }
             let model = crate::tx::TxModel {
                 store: store.clone(),
                 rt: crate::runtime_path(),
@@ -2106,6 +2204,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 store_fields: tx_store_fields,
                 intrusive,
                 inserts,
+                sets,
             };
             out.extend(crate::tx::emit(&model));
         }

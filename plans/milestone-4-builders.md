@@ -732,7 +732,7 @@ the probe crate under `/tmp` as the reference implementation.
       spike 8's write.rs/map.rs (the de facto name contract), same
       assertions, at two marker instantiations, against generated
       code.
-- [ ] 7. `set_` + delete hooks: `__unlink_<arrow>` (total; the
+- [x] 7. `set_` + delete hooks: `__unlink_<arrow>` (total; the
       `on_unlink(a, b)` clause of M3's clause inventory —
       intrusive_list authors the body) and the
       re-point orchestration emitted per binding; builder

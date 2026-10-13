@@ -81,6 +81,33 @@ mod flat {
             in_edges:  intrusive_list,
         }
     }
+
+    // The determinant-contradiction/coverage pins drive their corruption
+    // through the private hooks: M4 step 7 grew `set_target` into the full
+    // re-point orchestration (unlink + write + re-link in one call), so no
+    // public op can leave the field and the lists disagreeing anymore.
+    // Lives inside the implement's module for hook access — the file's
+    // `corrupt` submodule pattern.
+    #[test]
+    fn by_derived_lists_report_determinant_contradiction_and_coverage() {
+        let mut s = FlatStore::new();
+        let (a, b) = (s.add_node(), s.add_node());
+        let e = s.add_edge(a, b);
+        let f = s.add_edge(a, b);
+        assert!(s.validate().is_ok());
+        // e: contradiction — sits in a's `in_edges` list while its
+        // `target` field names b. f: missing coverage — unlinked from b's
+        // list, in no list at all.
+        assert!(s.__unlink_in_edges(b, e));
+        s.__insert_in_edges(a, e);
+        assert!(s.__unlink_in_edges(b, f));
+        let msg = s.validate().unwrap_err();
+        assert!(
+            msg.contains("membership contradicts the determinant")
+                && msg.contains("is missing from the list of its `target`"),
+            "{msg}"
+        );
+    }
 }
 
 use hier::HierStore;
@@ -200,24 +227,6 @@ fn primitive_intrusive_lists_report_cycles() {
     let msg = s.validate().unwrap_err();
     assert!(
         msg.contains("repeats InnerEdgeId(0) — a cycle"),
-        "{msg}"
-    );
-}
-
-#[test]
-fn by_derived_lists_report_determinant_contradiction_and_coverage() {
-    let mut s = flat::FlatStore::new();
-    let (a, b) = (s.add_node(), s.add_node());
-    let e = s.add_edge(a, b);
-    assert!(s.validate().is_ok());
-    // The field write moves e's determinant without relinking the lists:
-    // e stays in a's out_edges list (contradiction) and never appears in
-    // b's (missing coverage).
-    s.set_target(e, a);
-    let msg = s.validate().unwrap_err();
-    assert!(
-        msg.contains("membership contradicts the determinant")
-            && msg.contains("is missing from the list of its `target`"),
         "{msg}"
     );
 }

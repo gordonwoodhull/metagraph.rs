@@ -5,10 +5,10 @@
 //! corrupt or mis-wire the change set; `FlushError` is for individually
 //! legal ops invalid against the store or change set as a whole.
 //!
-//! The remaining two staging panics of the plan's surface arrive with
-//! their verbs: `set_` of a `Pending` ref with step 7's `set_` staging,
-//! keyed insert onto a live key with keyed staging (steps 8/11) — a
-//! panic cannot be exercised before the staging call exists.
+//! The remaining panic of the plan's surface arrives with its verb:
+//! keyed insert onto a live key with keyed staging (steps 8/11) — a panic
+//! cannot be exercised before the staging call exists. (`set_` of a
+//! `Pending` ref landed with step 7's `set_` staging below.)
 
 use metagraph_exper::implement;
 use metagraph_exper::stdlib::Nodes;
@@ -59,6 +59,19 @@ fn remove_of_pending_ref_panics_at_staging() {
     let mut tx = s.edit();
     let p = tx.add_node();
     tx.remove_node(p); // staged entities have no old record to remove
+}
+
+#[test]
+#[should_panic(expected = "no old record to re-point")]
+fn set_of_pending_ref_panics_at_staging() {
+    // Step 7's `set_` staging: a staged record's determining fields are
+    // fixed by its own add op — there is no old record to re-point. The
+    // remaining panic of the plan's surface (keyed insert onto a live
+    // key) lands with keyed staging (steps 8/11).
+    let s = old_store();
+    let mut tx = s.edit();
+    let p = tx.add_edge(NodeId(0), NodeId(1));
+    tx.set_source(p, NodeId(0));
 }
 
 #[test]

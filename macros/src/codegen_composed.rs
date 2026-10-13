@@ -1882,9 +1882,15 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 });
             }
 
-            // Field-write hook + `set_` op: the single write path after
-            // construction for a `ctor_arg`-fed field (M4's flush replays
-            // through it).
+            // Re-point hook + `set_` op: the single write path after
+            // construction for a `ctor_arg`-fed field, grown into M4's
+            // orchestration — unlink the by-derived memberships the field
+            // determines, write, re-link under the new endpoint (the old
+            // host is read from the record's own field: the by-derivation
+            // invariant). Per clause authored; keyed derivatives skipped
+            // (relink lands with the keyed carry), phased derivatives
+            // skipped entirely (membership re-derives at freeze — M4's
+            // decision 6). Hook names are instance-qualified.
             if d.has(|c| matches!(c, Clause::CtorArg { .. })) {
                 let field = field_of_arrow
                     .get(&(i, a.name.to_string()))
@@ -1892,11 +1898,45 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     .clone();
                 let hook = format_ident!("__set_{}_{}", inst_snake, a.name);
                 let sref = rec_ref(&classes, quote!(self), sc, quote!(self_id));
+                let mut unlink_calls = TokenStream2::new();
+                let mut insert_calls = TokenStream2::new();
+                for i2 in infos.iter().filter(|i2| i2.decl.by.as_ref() == Some(&a.name)) {
+                    let Some(d2) = i2.backing else { continue };
+                    if d2.is_phased() || card_of_decl(d2) != Cardinality::Many {
+                        continue;
+                    }
+                    let der_root =
+                        !classes[class_index_of(i, ent_index(i, &i2.decl.source)?)].owns_records;
+                    if d2.has(|c| matches!(c, Clause::OnUnlink { .. })) {
+                        let un = format_ident!("__unlink_{}_{}", inst_snake, i2.decl.name);
+                        unlink_calls.extend(if der_root {
+                            quote!(self.#un(self_id);)
+                        } else {
+                            quote!(self.#un(old_host, self_id);)
+                        });
+                    }
+                    if d2.has(|c| matches!(c, Clause::OnInsert { .. })) {
+                        let ins = format_ident!("__insert_{}_{}", inst_snake, i2.decl.name);
+                        insert_calls.extend(if der_root {
+                            quote!(self.#ins(self_id);)
+                        } else {
+                            quote!(self.#ins(value, self_id);)
+                        });
+                    }
+                }
+                let old_host_read = if unlink_calls.is_empty() {
+                    quote!()
+                } else {
+                    quote!(let old_host = #sref.#field;)
+                };
                 store_impl_build.extend(quote! {
                     #[doc(hidden)]
-                    #[doc = concat!("field-write hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "): set `self_id`'s field to `value`")]
+                    #[doc = concat!("re-point hook of arrow `", stringify!(#arrow_doc), "` (instance ", stringify!(#inst_name), "): unlink the by-derived memberships the field determines, write the field, re-link under the new endpoint")]
                     fn #hook(&mut self, self_id: #sid, value: #tid) {
+                        #old_host_read
+                        #unlink_calls
                         #sref.#field = value;
+                        #insert_calls
                     }
                 });
                 let op = if arrow_users > 1 {

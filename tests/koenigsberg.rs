@@ -145,19 +145,33 @@ fn self_loop_appears_in_both_directions() {
 
 #[test]
 fn set_one_arrow_writes_through_named_hook() {
-    // `set_target` is the field-write builder op (the named `__set_target`
-    // hook under it): it re-points the `one` arrow's field and nothing else —
-    // `by`-derived membership is not re-derived, by design; M4's flush owns
-    // re-derivation.
+    // `set_target` lowers through the named `__set_target` hook, grown by
+    // M4 step 7 into the full re-point orchestration: the field write PLUS
+    // the by-derived membership re-derivation (unlink from the old target's
+    // `in_edges` list, re-link under the new one) in the same call. The
+    // builder and the flush replay share this one write path.
     let mut s = GraphStore::new();
     let a = s.add_node();
     let b = s.add_node();
     let e = s.add_edge(a, b);
     let c = s.add_node();
     s.set_target(e, c);
+    assert!(s.validate().is_ok());
 
     let g = s.graph();
     let edge = g.nodes().next().unwrap().out_edges().next().unwrap();
     assert_eq!(edge.source().id(), a);
     assert_eq!(edge.target().id(), c);
+    // The by-derived in-list followed the field: c gained the membership,
+    // b lost it — no stale list, no duplicate.
+    let in_list_of = |n: NodeId| {
+        g.nodes()
+            .find(|x| x.id() == n)
+            .unwrap()
+            .in_edges()
+            .map(|x| x.id())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(in_list_of(c), vec![e]);
+    assert!(in_list_of(b).is_empty());
 }

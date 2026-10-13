@@ -4,10 +4,10 @@
 //! legitimate answer, never a panic.
 //!
 //! Three placements drive the flat emission (primitive membership,
-//! `by`-derived membership with the full re-point trio, and the
-//! root-sourced store-level head), and one composed implement drives
-//! the instance-qualified emission. One implement! per module — the
-//! generated names would collide.
+//! `by`-derived membership re-pointed through the grown orchestration,
+//! and the root-sourced store-level head), and one composed implement
+//! drives the instance-qualified emission. One implement! per module —
+//! the generated names would collide.
 
 mod primitive {
     use metagraph_exper::implement;
@@ -102,12 +102,11 @@ mod by_derived {
         assert_eq!(out(&s, a), vec![1, 0]);
         assert!(s.validate().is_ok());
 
-        // The re-point: e leaves a's list for c's. Unlink ALONE would
-        // contradict the determinant, so the test drives the full trio —
-        // the exact lowering M4's `set_source` will orchestrate.
-        assert!(s.__unlink_out_edges(a, e));
+        // M4 step 7 grew `__set_source` into the re-point orchestration, so
+        // the builder op IS the trio now: unlink from the old host, write
+        // the field, re-link under the new endpoint, one call. (The
+        // `primitive` module above still pins the hooks individually.)
         s.set_source(e, c);
-        s.__insert_out_edges(c, e);
         assert!(s.validate().is_ok());
         assert_eq!(out(&s, a), vec![1]);
         assert_eq!(out(&s, c), vec![0]);
@@ -189,11 +188,12 @@ mod composed_impl {
         let c = s.add_node();
         let e = s.add_edge(a, b);
         assert!(s.validate().is_ok());
-        // The hook names are instance-qualified even on a single-instance
-        // composition; the public op stays unqualified (no collision).
-        assert!(s.__unlink_d_out_edges(a, e));
+        // The builder op is the grown orchestration (M4 step 7): one call
+        // unlinks from the old host, writes, and re-links under the new
+        // endpoint — through the instance-qualified hooks. The hooks stay
+        // pinned through the total-absence answer below.
         s.set_source(e, c);
-        s.__insert_d_out_edges(c, e);
+        assert!(!s.__unlink_d_out_edges(a, e));
         assert!(s.validate().is_ok());
         fn out(s: &UniStore, n: NodeId) -> Vec<u32> {
             s.d_graph()
