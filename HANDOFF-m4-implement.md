@@ -78,7 +78,8 @@ be exercised before its staging call exists. Recorded here per the plan's
   TxIntrusive regained its `arrow` field (the arrays are named after
   the binding).
 
-Not started: steps 6–14.
+Not started: steps 6–14. Step 6's design question is SETTLED
+(2026-10-12, Gordon — see "Step 6 pre-work"); no step-6 code written.
 
 ## Architecture decisions (settled in the survey, keep unless forced)
 
@@ -166,31 +167,75 @@ Not started: steps 6–14.
    where the verb is real (existence many → no Insert impl; by-derived →
    none; keyed → Insert with key).
 
-## Step 6 pre-work — read before starting (impl-m4-2 session)
+## Step 6 pre-work — Add<E> ctor-arg arity SETTLED (impl-m4-3)
 
-The emission mechanics are clear; ONE design question is open and
-should be settled (likely with Gordon) before writing code:
+The emission mechanics are clear; the one design question — whose
+trait signature carries the entity's ctor args when one-ness of an
+instantiation's arrows is ROOT-side data the declaring pattern cannot
+see at expansion time (`pattern!` for Digraph cannot resolve
+`stdlib::Source`'s cardinality; the plan says "the constructor
+argument list is the entity's total `one` arrows" but never how the
+declaring block learns it) — was settled with Gordon 2026-10-12:
 
-**Add\<E\> ctor-arg arity.** The acceptance bounds on `AddNode +
-AddEdge` where `AddEdge::add_edge(source, target)` — the trait carries
-the entity's ctor args. Traits must be emitted at the DECLARING
-pattern's site (two implement!s of Digraph share them; that is the
-marker-genericity spike 8 pinned), but one-ness of an instantiation's
-arrows is ROOT-side data (stdlib::Source declares `one`) that reaches
-the pattern only through implement-time metadata tuples — `pattern!`
-for Digraph cannot resolve `stdlib::Source`'s cardinality at emission
-time. The plan says "the constructor argument list is the entity's
-total `one` arrows" but never how the declaring block learns it.
-Candidates found:
-(a) **Determinant-derived arity**: an arrow named by a sibling `by`
-    clause is provably total at pattern time (`by` requires one).
-    Covers Digraph exactly (source and target are both determinants);
-    does NOT cover plain one-arrows (Hierarchy's `main_node`) — those
-    entities' Add traits would emit argless and get no Tx impl ("verb
-    not real"), deferring that shape.
-(b) Courier-delivered arity — no mechanism exists (a consumer's
-    implement! cannot emit items into the declaring crate's module).
-(a) is implementable today and covers the acceptance; flag the gap.
+**By-derived only, skip opaque.** An `Add<E>` trait's ctor args are
+the arrows the declaring pattern can PROVE total at expansion time:
+
+1. inline-declared `one` arrows (a root pattern knows its own
+   cardinality), and
+2. arrows named by a sibling `by` clause — `by` requires a total
+   `one` determinant; the pattern-time check (macros/src/lib.rs:304)
+   already validates the determinant is a declared opposite-running
+   sibling, and implement-time codegen enforces the bound-`one`
+   requirement (macros/src/codegen.rs:1124), so a contradicting
+   instantiation fails at `implement!` before any store compiles —
+   the derived arity cannot be silently wrong.
+
+Args in arrow-declaration order (Digraph's Edge: source, target —
+exactly spike 8's `add_edge(source, target)`). An entity with ANY
+*opaque* outgoing arrow (a plain instantiation — Subgraph's SubNode
+via `main_node: stdlib::MainNode`) gets NO Add trait emitted:
+`Remove<E>` and the per-entity marker still emit, and the verb stays
+Tx-inherent (step 1 already emits `add_<entity>` with the real
+implement-time arity). Gap flagged in step notes; when a real
+mechanism lands, the skipped Add traits appear additively.
+
+Rejected alternatives (for the record): an argless placeholder Add
+trait would falsely read as "zero ctor args" — indistinguishable from
+Digraph's Node, which legitimately has none — and its shape must
+break later; an assoc-type arg tuple (`args: Self::CtorArgs`) covers
+every shape today but deviates from the spike-8-pinned and
+plan-reviewed multi-param contract; a grammar clause asserting
+cardinality at instantiation restates root-side truth, which M1's
+"instantiation blocks never restate cardinality" rule single-sources
+at the root.
+
+Facts verified this session, before writing code:
+
+- The runtime piece of decision 8 already landed with step 1:
+  `HandleToRef<M>` in src/tx.rs with assoc types `Handle`/`Ref` and
+  method `to_ref` (NOT spike 8's per-entity `node_ref`/`edge_ref`
+  traits — the plan's single marker-generic trait, one impl per
+  entity under the per-entity marker).
+- Spike 8's `Commit` trait is NOT part of the generated surface —
+  "flush is deliberately not marker-generic"; the acceptance test
+  calls `tx.flush()` concretely.
+- The recast copy bounds on `AddNode + AddEdge` only (Digraph's
+  out_edges is by-derived — no InsertOutEdges for it): AddEdge's
+  assoc types are `EdgeRef` (the entity, `<Entity>Ref` naming) plus
+  `Source`/`Target` (camel of the ctor arrows), with the copy's
+  equality web setting `Source = Target = AddNode::NodeRef`. Within
+  one Add trait, a cheap assoc-name collision check (camel(arrow)
+  vs `<Entity>Ref` vs sibling camels) belongs beside the marker
+  collision check.
+- Starting points read and current: RootMeta is five slots today
+  (method, assoc, gat, card, key — grammar.rs:682, parse 724, emit
+  763, round-trip test 996); the sixth braced write slot
+  `{ Trait, method, ARef, KRef?, BRef }` extends it like M2's key
+  slot. expand_root_pattern (lib.rs:374) grows the write traits
+  beside the read trait; expand_instantiation_pattern (lib.rs:452)
+  and finish_compose (lib.rs:925, marker minting ~964) grow the
+  per-entity traits/markers; macros/src/tx.rs holds the TxModel and
+  the whole Tx emission.
 
 Everything else about step 6 is settled reading: sixth braced slot
 `{ Trait, method, ARef, KRef?, BRef }` on RootMeta (grammar.rs parse/
@@ -341,6 +386,11 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
+- 2026-10-12 (impl-m4-3): step 6's Add<E> ctor-arg arity question
+  settled with Gordon (by-derived only, skip opaque — see the
+  pre-work section). No step-6 code written; session stopped at
+  Gordon's request so the next agent implements from the settled
+  decision. Worktree clean at 0a8124e before this handoff commit.
 - 2026-10-12 (impl-m4-2): steps 3, 4, 5 DONE (4cbddf0, c22cbb2,
   20f1bda — see "Where things stand"). Step 6 investigated, not
   started; see the pre-work note below. Suite green incl. trybuild +
