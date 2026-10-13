@@ -9,12 +9,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pin the nightly the trybuild .stderr files were generated with;
       # diagnostics formatting drifts between toolchain versions.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-03-13
+          toolchain: nightly-2026-10-13
+      # cache-targets off: trybuild deletes its scratch dir (target/tests/target)
+      # before the post-job cleanup, and rust-cache's cleanup errors on the
+      # missing directory. Registry/git caching still covers the downloads.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
       - name: Run tests
         run: cargo test --workspace --all-targets

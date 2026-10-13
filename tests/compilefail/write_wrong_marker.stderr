@@ -39,7 +39,7 @@ help: the trait `HandleToRef<metagraph::stdlib::digraph::markers::OutEdges>` is 
 ...  |
 18 | | }
    | |_^
-help: the following other types implement trait `HandleToRef<M>`
+help: `Tx<'_>` implements trait `HandleToRef<M>`
   --> tests/compilefail/write_wrong_marker.rs:12:1
    |
 12 | / implement! {
@@ -50,8 +50,8 @@ help: the following other types implement trait `HandleToRef<M>`
 18 | | }
    | | ^
    | | |
-   | |_`Tx<'_>` implements `HandleToRef<metagraph::stdlib::digraph::markers::Edge>`
-   |   `Tx<'_>` implements `HandleToRef<metagraph::stdlib::digraph::markers::Node>`
+   | |_`HandleToRef<metagraph::stdlib::digraph::markers::Edge>`
+   |   `HandleToRef<metagraph::stdlib::digraph::markers::Node>`
 note: required by a bound in `handle_map_at_arrow_marker`
   --> tests/compilefail/write_wrong_marker.rs:22:34
    |

@@ -12,5 +12,4 @@ error[E0599]: no method named `insert_out` found for struct `Store` in the curre
 20 |       f.insert_out(x, e); // E0599: no method `insert_out` on `Store<Frozen>`
    |         ^^^^^^^^^^ method not found in `Store`
    |
-   = note: the method was found for
-           - `Store<Build>`
+   = note: the method was found for `Store<Build>`
