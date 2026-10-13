@@ -766,7 +766,7 @@ the probe crate under `/tmp` as the reference implementation.
       self-less keyed forms and step 11's carried keyed map.
       Acceptance: the edge-induced probe's tests plus that probe's,
       as generated equivalents.
-- [ ] 11. Removal + keyed carry: id-remap report (old ids only),
+- [x] 11. Removal + keyed carry: id-remap report (old ids only),
       survivors-only cascade, composed remap at carry and
       staged-insert replay, `Existing`-only keyed host/target.
       Builds on step 9's per-level maps — the composed remap

@@ -157,31 +157,52 @@ pub(crate) struct TxInsert {
     pub verb: Option<TxVerb>,
 }
 
-/// The `insert_<arrow>(key, target)` staging verb of one store-level
-/// keyed arrow (the self is the unfused root — a per-record keyed map
-/// carries per-host state and lands with the keyed-carry step). A keyed
+/// The `insert_<arrow>` staging verb of one bound keyed arrow. A keyed
 /// arrow is a function: the staging call rejects a live key — checked
 /// against the borrowed old store and the already-staged inserts (a
 /// staged removal frees no key; re-pointing one is two flushes). The
 /// flush carries the map as state (filter to entries whose key and
-/// target both survive, remap both) and replays staged inserts through
-/// the backing's check-then-write hook on top of the carry.
+/// target both survive, remap through the compaction maps) and replays
+/// staged inserts through the backing's check-then-write hook on top of
+/// the carry. Two placements: a store-level map (the self is the
+/// unfused root; the verb is `insert_<arrow>(key, target)`) and a
+/// per-record map riding the host entity's records (the verb is
+/// `insert_<arrow>(host, key, target)`). A per-record map whose target
+/// is embedded rides the target as a RAW PATH ID (`member_host` names
+/// the target's host entity) — no ref can name an embedded record, so
+/// the probe's `Existing`-only restriction pins the staging shape.
 pub(crate) struct TxKeyed {
     /// The arrow's unique local basis: the op variant, the inherent
-    /// staging verb, and the derived carry map are named after it.
+    /// staging verb, and the derived carry map are named after it (the
+    /// composed codegen qualifies it with the instance on cross-instance
+    /// arrow-name collision).
     pub arrow: Ident2,
+    /// The map-owning host entity for a per-record map (`None` = a
+    /// store-level map at the unfused root).
+    pub host: Option<Ident2>,
     /// The key entity — whose arena, compaction map, and pending table
-    /// the key ref resolves through at flush.
+    /// the key ref resolves through at flush. Always root-level.
     pub key_entity: Ident2,
     /// The target (value) entity.
     pub member: Ident2,
-    /// The map field on the store.
+    /// The target's host entity when the target is embedded (`Some`) —
+    /// the op then rides the target as a raw path id, and the flush
+    /// remaps it through the composed maps (host map ∘ per-host sub map)
+    /// at carry AND staged-insert replay.
+    pub member_host: Option<Ident2>,
+    /// The map field (on the store at a store-level placement; on the
+    /// host record at a per-record placement).
     pub map_field: Ident2,
     /// The backing's insert hook (check-then-write — the replay target).
     pub hook: Ident2,
     /// The old-store live-key predicate (the pure form of the check the
     /// staging call makes).
     pub key_live: Ident2,
+    /// The `Insert<Arrow>` trait impl (the courier's write slot) — a
+    /// per-record map's self ref makes the canonical arity available;
+    /// `None` on the store-level (self-less) form and wherever the
+    /// declaring-block surface is not wired.
+    pub verb: Option<TxVerb>,
 }
 
 /// The `set_<arrow>` staging verb of one field-backed `one` arrow (a
@@ -315,6 +336,38 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // single segment), and a nested removal names its target by host ref +
     // old embedded-arena index (a path id is a resolved id — exactly what
     // staging must not require).
+    let ents: Vec<Ent> = m
+        .entities
+        .iter()
+        .map(|e| {
+            let snake_name = format_ident!("{}", snake(&e.name.to_string()));
+            Ent {
+                name: e.name.clone(),
+                arena: e.arena.clone(),
+                data: format_ident!("{}Data", e.name),
+                id_ty: format_ident!("{}Id", e.name),
+                arena_str: snake(&e.name.to_string()),
+                host: None, // linked below, once every name is known
+                count: format_ident!("old_{}_count", snake(&e.name.to_string())),
+                map: format_ident!("{}_map", snake(&e.name.to_string())),
+                removed: format_ident!("removed_{}", snake(&e.name.to_string())),
+                removed_by: format_ident!("removed_by_{}", snake(&e.name.to_string())),
+                pending: format_ident!("pending_{}", snake(&e.name.to_string())),
+                snake: snake_name,
+            }
+        })
+        .collect();
+    // Link each embedded entity to its host's index (a host is itself a
+    // root-level entity — embedding depth 1).
+    let mut ents = ents;
+    for (i, e) in m.entities.iter().enumerate() {
+        if let Some(h) = &e.host {
+            let hi = ents.iter().position(|x| &x.name == h).expect("host entity");
+            ents[i].host = Some(hi);
+        }
+    }
+    let ents = ents;
+    let ent_of = |name: &Ident2| ents.iter().find(|x| &x.name == name).expect("entity");
     let mut op_variants = TokenStream2::new();
     for e in &m.entities {
         let add = format_ident!("Add{}", e.name);
@@ -369,9 +422,30 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
         let k_ref = format_ident!("{}Ref", kk.key_entity);
         let b_ref = format_ident!("{}Ref", kk.member);
-        op_variants.extend(quote! {
-            #variant { k: #k_ref, b: #b_ref },
-        });
+        match (&kk.host, &kk.member_host) {
+            (None, None) => op_variants.extend(quote! {
+                #variant { k: #k_ref, b: #b_ref },
+            }),
+            (Some(host), None) => {
+                let a_ref = format_ident!("{}Ref", host);
+                op_variants.extend(quote! {
+                    #variant { a: #a_ref, k: #k_ref, b: #b_ref },
+                });
+            }
+            (Some(host), Some(_)) => {
+                // An embedded target rides as a raw path id: no ref can
+                // name an embedded record (the probe's Existing-only pin).
+                let a_ref = format_ident!("{}Ref", host);
+                let b_id = &ent_of(&kk.member).id_ty;
+                op_variants.extend(quote! {
+                    #variant { a: #a_ref, k: #k_ref, b: #b_id },
+                });
+            }
+            (None, Some(_)) => unreachable!(
+                "a store-level keyed map naming an embedded target has no \
+                 host to agree with — gated off at classification"
+            ),
+        }
     }
     // The induction escape hatch (step 10): a user-staged opaque op. The
     // `run` closure replays against the rebuilt store during step 4c (the
@@ -463,11 +537,24 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     }
     for kk in &m.keyed {
         let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
-        op_debug_arms.extend(quote! {
-            Op::#variant { k, b } => {
-                f.debug_struct(stringify!(#variant)).field("k", k).field("b", b).finish()
-            }
-        });
+        match (&kk.host, &kk.member_host) {
+            (None, None) => op_debug_arms.extend(quote! {
+                Op::#variant { k, b } => {
+                    f.debug_struct(stringify!(#variant)).field("k", k).field("b", b).finish()
+                }
+            }),
+            (Some(_), None) => op_debug_arms.extend(quote! {
+                Op::#variant { a, k, b } => {
+                    f.debug_struct(stringify!(#variant)).field("a", a).field("k", k).field("b", b).finish()
+                }
+            }),
+            (Some(_), Some(_)) => op_debug_arms.extend(quote! {
+                Op::#variant { a, k, b } => {
+                    f.debug_struct(stringify!(#variant)).field("a", a).field("k", k).field("b", b).finish()
+                }
+            }),
+            (None, Some(_)) => unreachable!("gated off at classification"),
+        }
     }
     let ops_debug_impl = quote! {
         impl ::core::fmt::Debug for Op {
@@ -784,6 +871,51 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             });
         }
     }
+    // The hosted keyed verbs' `Insert<Arrow>` impls — a per-record map's
+    // self ref makes the canonical arity available, wired exactly like
+    // the hosted primitive inserts. An embedded-target verb is inherent-
+    // only: the canonical arity takes a target REF, and the probe pins
+    // the raw-path-id staging shape (no ref can name an embedded record).
+    for kk in &m.keyed {
+        if kk.member_host.is_some() {
+            continue;
+        }
+        if let Some(verb) = &kk.verb {
+            let trait_path = &verb.trait_path;
+            let marker_path = &verb.marker_path;
+            let method = &verb.method;
+            let inherent = format_ident!("insert_{}", kk.arrow);
+            let assoc_decls = verb.assocs.iter().map(|(an, av)| quote!(type #an = #av;));
+            let (params, args): (Vec<Ident2>, Vec<Ident2>) = match &kk.host {
+                Some(_) => (
+                    vec![
+                        Ident2::new("a", proc_macro2::Span::call_site()),
+                        Ident2::new("k", proc_macro2::Span::call_site()),
+                        Ident2::new("b", proc_macro2::Span::call_site()),
+                    ],
+                    vec![
+                        Ident2::new("a", proc_macro2::Span::call_site()),
+                        Ident2::new("k", proc_macro2::Span::call_site()),
+                        Ident2::new("b", proc_macro2::Span::call_site()),
+                    ],
+                ),
+                None => {
+                    let k = Ident2::new("k", proc_macro2::Span::call_site());
+                    let b = Ident2::new("b", proc_macro2::Span::call_site());
+                    (vec![k.clone(), b.clone()], vec![k, b])
+                }
+            };
+            let param_tys = verb.assocs.iter().map(|(an, _)| an);
+            write_impls.extend(quote! {
+                impl<'g> #trait_path<#marker_path> for Tx<'g> {
+                    #(#assoc_decls)*
+                    fn #method(&mut self, #(#params: Self::#param_tys),*) {
+                        Tx::#inherent(self, #(#args),*)
+                    }
+                }
+            });
+        }
+    }
 
     // -- insert_<arrow> staging (primitive many arrows) ---------------------
     // Membership asserted directly on an existing record; the flush
@@ -867,14 +999,25 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         });
     }
 
-    // -- insert_<arrow>(key, target) staging (store-level keyed arrows) ---
+    // -- insert_<arrow> staging (keyed arrows, both placements) -----------
     // A keyed arrow is a function: the staging call rejects a live key —
     // against the borrowed old store (a staged removal frees no key;
     // re-pointing one is two flushes) and against the inserts already
     // staged in this transaction. `Existing` and `Pending` keys never
     // collide: the ref equality compares the kind, and an `Existing` ref
     // carries the unstamped sentinel where a `Pending` one carries this
-    // transaction's token (the staged-key probe's t3 pin).
+    // transaction's token (the staged-key probe's t3 pin). Store-level
+    // maps check the key against the whole map; a per-record map checks
+    // it within the NAMED HOST's map only (the duplicate-key probe's
+    // two arms, old-map and staged-vs-staged, both host-scoped), and a
+    // `Pending` host has no old map at all — the staged arm is its only
+    // live-key check. The staged-vs-staged arm compares the host ref too:
+    // the same key under a different host is a different slot. An
+    // embedded target rides as a raw path id (no conversion — the
+    // probe's Existing-only pin). Only store-level arrows answer custom
+    // ops' key reservations: a reservation names a key alone, and a
+    // per-record slot is (host, key) — custom ops stay root-level, so
+    // per-record reservations are out of the acceptance shape.
     let mut keyed_staging = TokenStream2::new();
     for kk in &m.keyed {
         let method = format_ident!("insert_{}", kk.arrow);
@@ -882,78 +1025,154 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let arrow_str = kk.arrow.to_string();
         let key_into_trait = format_ident!("Into{}Arg", kk.key_entity);
         let key_into_fn = format_ident!("into_{}_ref", snake(&kk.key_entity.to_string()));
-        let member_into_trait = format_ident!("Into{}Arg", kk.member);
-        let member_into_fn = format_ident!("into_{}_ref", snake(&kk.member.to_string()));
         let key_live = &kk.key_live;
         let key_ref = format_ident!("{}Ref", kk.key_entity);
-        let matches_fn = format_ident!("__{}_key_matches", kk.arrow);
-        let reserve_variant = format_ident!("{}", camel(&kk.arrow.to_string()));
         let doc = format!(
             "Stage a keyed insert through arrow `{}`: a live key is rejected here — checked against the old store's map and the inserts already staged in this transaction (a staged removal frees no key; re-pointing one is two flushes). The flush carries the map (entries whose key and target both survive, remapped) and replays the op through the backing's insert hook on top of the carry.",
             kk.arrow
         );
-        keyed_staging.extend(quote! {
-            #[doc(hidden)]
-            #[doc = concat!("Submission-space key equality for arrow `", stringify!(#arrow_str), "`: an `Existing` ref matches only an `Old` key (and a `Pending` ref only a `Pending` one) — the two kinds never collide.")]
-            fn #matches_fn(k: &#key_ref, key: &__SubmissionKey) -> bool {
-                match (k.kind, key) {
-                    (
-                        #rt::tx::RefKind::Existing(id),
-                        __SubmissionKey::Old(id2),
-                    ) => (id).0 == *id2,
-                    (
-                        #rt::tx::RefKind::Pending(i),
-                        __SubmissionKey::Pending(i2),
-                    ) => i == *i2,
-                    _ => false,
-                }
-            }
+        match &kk.host {
+            None => {
+                let member_into_trait = format_ident!("Into{}Arg", kk.member);
+                let member_into_fn =
+                    format_ident!("into_{}_ref", snake(&kk.member.to_string()));
+                let matches_fn = format_ident!("__{}_key_matches", kk.arrow);
+                let reserve_variant = format_ident!("{}", camel(&kk.arrow.to_string()));
+                keyed_staging.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("Submission-space key equality for arrow `", stringify!(#arrow_str), "`: an `Existing` ref matches only an `Old` key (and a `Pending` ref only a `Pending` one) — the two kinds never collide.")]
+                    fn #matches_fn(k: &#key_ref, key: &__SubmissionKey) -> bool {
+                        match (k.kind, key) {
+                            (
+                                #rt::tx::RefKind::Existing(id),
+                                __SubmissionKey::Old(id2),
+                            ) => (id).0 == *id2,
+                            (
+                                #rt::tx::RefKind::Pending(i),
+                                __SubmissionKey::Pending(i2),
+                            ) => i == *i2,
+                            _ => false,
+                        }
+                    }
 
-            #[doc = #doc]
-            pub fn #method(&mut self, k: impl #key_into_trait, b: impl #member_into_trait) {
-                let k = k.#key_into_fn(self);
-                let b = b.#member_into_fn(self);
-                if let #rt::tx::RefKind::Existing(id) = k.kind {
-                    assert!(
-                        !self.old.__store().#key_live(id),
-                        "keyed insert onto a live key (`{}`): {:?} exists in the \
-                         borrowed old store; a staged removal frees no key, so \
-                         re-pointing one is two flushes",
-                        #arrow_str,
-                        id,
-                    );
-                }
-                for op in &self.ops {
-                    match op {
-                        Op::#variant { k: k2, .. } => {
+                    #[doc = #doc]
+                    pub fn #method(&mut self, k: impl #key_into_trait, b: impl #member_into_trait) {
+                        let k = k.#key_into_fn(self);
+                        let b = b.#member_into_fn(self);
+                        if let #rt::tx::RefKind::Existing(id) = k.kind {
                             assert!(
-                                k2 != &k,
-                                "keyed insert onto a live key (`{}`): {:?} already \
-                                 staged in this transaction",
+                                !self.old.__store().#key_live(id),
+                                "keyed insert onto a live key (`{}`): {:?} exists in the \
+                                 borrowed old store; a staged removal frees no key, so \
+                                 re-pointing one is two flushes",
                                 #arrow_str,
-                                k,
+                                id,
                             );
                         }
-                        Op::Custom { reserve, .. } => {
-                            for r in reserve {
-                                if let ReservedKey::#reserve_variant(key2) = r {
+                        for op in &self.ops {
+                            match op {
+                                Op::#variant { k: k2, .. } => {
                                     assert!(
-                                        !Self::#matches_fn(&k, key2),
-                                        "keyed insert onto a live key (`{}`): {:?} is \
-                                         reserved by an already-staged inducing op in \
-                                         this transaction",
+                                        k2 != &k,
+                                        "keyed insert onto a live key (`{}`): {:?} already \
+                                         staged in this transaction",
                                         #arrow_str,
                                         k,
                                     );
                                 }
+                                Op::Custom { reserve, .. } => {
+                                    for r in reserve {
+                                        if let ReservedKey::#reserve_variant(key2) = r {
+                                            assert!(
+                                                !Self::#matches_fn(&k, key2),
+                                                "keyed insert onto a live key (`{}`): {:?} is \
+                                                 reserved by an already-staged inducing op in \
+                                                 this transaction",
+                                                #arrow_str,
+                                                k,
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
+                        self.ops.push(Op::#variant { k, b });
                     }
-                }
-                self.ops.push(Op::#variant { k, b });
+                });
             }
-        });
+            Some(host) => {
+                let h = ent_of(host);
+                let host_into_trait = format_ident!("Into{}Arg", host);
+                let host_into_fn = format_ident!("into_{}_ref", snake(&host.to_string()));
+                let h_arena = &h.arena;
+                let (b_param, b_conv): (TokenStream2, TokenStream2) = match &kk.member_host {
+                    None => {
+                        let member_into_trait =
+                            format_ident!("Into{}Arg", kk.member);
+                        let member_into_fn = format_ident!(
+                            "into_{}_ref",
+                            snake(&kk.member.to_string())
+                        );
+                        (
+                            quote!(b: impl #member_into_trait),
+                            quote!(let b = b.#member_into_fn(self);),
+                        )
+                    }
+                    Some(_) => {
+                        let b_id = &ent_of(&kk.member).id_ty;
+                        (quote!(b: #b_id), TokenStream2::new())
+                    }
+                };
+                keyed_staging.extend(quote! {
+                    #[doc = #doc]
+                    pub fn #method(
+                        &mut self,
+                        a: impl #host_into_trait,
+                        k: impl #key_into_trait,
+                        #b_param,
+                    ) {
+                        let a = a.#host_into_fn(self);
+                        let k = k.#key_into_fn(self);
+                        #b_conv
+                        // The old-map arm: only an Existing host names an
+                        // old record's map, and only an Existing key can
+                        // be live there. Range-guarded — an out-of-range
+                        // host id is a step-1 UnknownOldId at flush, never
+                        // a staging panic; a Pending host has no old map.
+                        if let (
+                            #rt::tx::RefKind::Existing(hid),
+                            #rt::tx::RefKind::Existing(kid),
+                        ) = (a.kind, k.kind)
+                        {
+                            if ((hid).0 as usize) < self.old.__store().#h_arena.len() {
+                                assert!(
+                                    !self.old.__store().#key_live(hid, kid),
+                                    "keyed insert onto a live key (`{}`): {:?} is already \
+                                     live in host {:?}'s map; a staged removal frees no key, \
+                                     so re-pointing one is two flushes",
+                                    #arrow_str,
+                                    kid,
+                                    hid,
+                                );
+                            }
+                        }
+                        for op in &self.ops {
+                            if let Op::#variant { a: a2, k: k2, .. } = op {
+                                assert!(
+                                    !(a2 == &a && k2 == &k),
+                                    "keyed insert onto a live key (`{}`): {:?} is already \
+                                     claimed by a staged insert in this host",
+                                    #arrow_str,
+                                    k,
+                                );
+                            }
+                        }
+                        self.ops.push(Op::#variant { a, k, b });
+                    }
+                });
+            }
+        }
     }
 
     // -- __stage_custom: the induction escape hatch's staging call -----------
@@ -1011,10 +1230,18 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #(#named_ref_variants)*
         }
     };
-    let reserved_key_variants = m.keyed.iter().map(|kk| {
-        let v = format_ident!("{}", camel(&kk.arrow.to_string()));
-        quote!(#v(__SubmissionKey),)
-    });
+    // Reservations name a key alone; a per-record slot is (host, key), and
+    // custom ops are root-level — only store-level keyed arrows get a
+    // ReservedKey variant (per-record reservations are out of the
+    // acceptance shape; noted in the step-11 notes).
+    let reserved_key_variants = m
+        .keyed
+        .iter()
+        .filter(|kk| kk.host.is_none())
+        .map(|kk| {
+            let v = format_ident!("{}", camel(&kk.arrow.to_string()));
+            quote!(#v(__SubmissionKey),)
+        });
     let reserved_key_enum = quote! {
         #[doc(hidden)]
         #[doc = "A keyed slot an already-staged inducing (custom) op will insert, per store-level keyed arrow. The keyed staging verb's live-key check counts these — an insert keyed after a staged induction is a live-key staging panic, exactly as if the keyed insert op itself were already staged (the induct-flush probe's induced-key staging check)."]
@@ -1049,29 +1276,6 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         removed_by: Ident2,
         pending: Ident2, // pending_<snake>
     }
-    let ents: Vec<Ent> = m
-        .entities
-        .iter()
-        .map(|e| {
-            let snake_name = format_ident!("{}", snake(&e.name.to_string()));
-            Ent {
-                name: e.name.clone(),
-                arena: e.arena.clone(),
-                data: format_ident!("{}Data", e.name),
-                id_ty: format_ident!("{}Id", e.name),
-                arena_str: snake(&e.name.to_string()),
-                host: None, // linked below, once every name is known
-                count: format_ident!("old_{}_count", snake(&e.name.to_string())),
-                map: format_ident!("{}_map", snake(&e.name.to_string())),
-                removed: format_ident!("removed_{}", snake(&e.name.to_string())),
-                removed_by: format_ident!("removed_by_{}", snake(&e.name.to_string())),
-                pending: format_ident!("pending_{}", snake(&e.name.to_string())),
-                snake: snake_name,
-            }
-        })
-        .collect();
-    // Link each embedded entity to its host's index (a host is itself a
-    // root-level entity — embedding depth 1).
     let mut ents = ents;
     for (i, e) in m.entities.iter().enumerate() {
         if let Some(h) = &e.host {
@@ -1081,7 +1285,6 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     }
     let ents = ents;
     let ent_of = |name: &Ident2| ents.iter().find(|x| &x.name == name).expect("entity");
-
     // Per-set derived names: the last-wins effective-value table (step 1,
     // indexed by the self entity's old id) and the skeleton's pending-id
     // prediction table (indexed by set-op index, asserted at replay).
@@ -1122,6 +1325,49 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             DoubleNestedRemoval { op: usize, arena: &'static str, host: u32, idx: u32 },
             #[doc = "Ops staged under a nested path whose host the change set removes. The change set must be coherent; a silent discard would hide staging bugs. `nested_ops` is ascending (staged adds AND removals under the host both qualify — a nested removal targets a record the change set is already deleting); `removal_op` names the host's removal op. Attribution: each removed host is claimed by its FIRST removal op; hosts are reported in removal-op submission order."]
             RemovedPathHost { arena: &'static str, host: u32, nested_ops: ::std::vec::Vec<usize>, removal_op: usize },
+        )
+    });
+    // The keyed-carry violations (step 11). Key-as-reference: removing a
+    // key still named from a surviving place is a flush error, never a
+    // silent entry drop. "Live" means SURVIVING THE CHANGE SET at every
+    // reference site (the keyed-carry probe's pin): kept-owner entries
+    // whose target survives, and this change set's own staged inserts
+    // keyed by the removed key — a staged insert names the key from a
+    // new place, so it counts as live (and is attributed to the REMOVAL
+    // op, not the insert). Doomed owners do not count (the map dies with
+    // its owner — the cascade exception), nor do entries whose target
+    // the change set removes (target-as-membership clearing applies
+    // first). Entries are sorted by (owner, key) — never HashMap
+    // iteration order. The owner column names the map-owning record's
+    // old id; a store-level map reports 0 (the store owns its entries).
+    let has_keyed = !m.keyed.is_empty();
+    let keyed_violation_variants = has_keyed.then(|| {
+        quote!(
+            #[doc = "Key-as-reference (keyed carry): removing a key that still has live entries — kept-owner entries whose target survives, or this change set's own staged inserts keyed by it (they name the key from a new place, so they count as live). `entries` is sorted by (owner, key); the owner column is the map-owning record's old id (0 for a store-level map). Attributed to the removal op."]
+            KeyRemovedWithLiveEntries { op: usize, arena: &'static str, key: u32, entries: ::std::vec::Vec<(u32, u32)>, staged_inserts: ::std::vec::Vec<usize> },
+        )
+    });
+    // A per-record keyed map whose target is embedded: a staged insert's
+    // value-host agreement and target liveness are checked at step 2 in
+    // old-id space (the probe's pin: construction panics on mismatch, but
+    // a staged insert is plan-checked and reports alongside RemovedPathHost).
+    let has_path_keyed = m.keyed.iter().any(|kk| kk.member_host.is_some());
+    let host_name_enum = has_path_keyed.then(|| {
+        quote!(
+            #[doc = "How a staged keyed insert's host was named before resolution (path-id targets only): an old owner id, or the op index of a record this change set will create."]
+            #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+            pub enum HostName {
+                Old(u32),
+                Pending(u32),
+            }
+        )
+    });
+    let path_keyed_violation_variants = has_path_keyed.then(|| {
+        quote!(
+            #[doc = "A staged keyed insert through a path-id target whose host component cannot equal the entry's host after remap: the target names a different old owner, or the entry's host is Pending (a fresh id — an Existing path-id target always names an old owner, and remap is identity-preserving, so agreement is unreachable). Attributed to the insert op; checked at step 2 in old-id space."]
+            InsertHostTargetMismatch { op: usize, entry_host: HostName, target_host: u32, target_idx: u32 },
+            #[doc = "A staged keyed insert through a path-id target the change set removes. Attributed to the insert op."]
+            DanglingInsertTarget { op: usize, target_host: u32, target_idx: u32 },
         )
     });
 
@@ -1308,6 +1554,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             Staged(u32),
         }
 
+        #host_name_enum
+
         #[doc = "One flush violation, reported in OLD ids by change-set op index. The listed order is discovery order: step 1 (removals, range validation) then step 2 (dangler detection)."]
         #[derive(Clone, PartialEq, Eq, Debug)]
         pub enum Violation {
@@ -1320,6 +1568,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #[doc = "A staged `set_` named a record the same change set removes: re-pointing needs an old record to re-point. Names both ops — the `set_` op and the removal op that got there first."]
             SetOfRemoved { op: usize, arena: &'static str, id: u32, removed_by: usize },
             #nested_violation_variants
+            #keyed_violation_variants
+            #path_keyed_violation_variants
             #[doc = "Final `validate()` failed — defensive arm; the pipeline should never produce damage."]
             ValidateFailed { detail: ::std::string::String },
         }
@@ -1615,32 +1865,116 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // Step 1, keyed insert ops — the key and target refs range-validate
     // like every other `Existing` ref (an unvalidated id would be indexed
     // at replay — a panic on user error, which the pipeline's contract
-    // forbids).
+    // forbids). A per-record map also range-validates the NAMED HOST;
+    // an embedded target is a raw path id whose host component
+    // range-validates as an old host id and whose index range-validates
+    // against that old host's embedded arena (UnknownNestedIdx — step 9's
+    // shape).
     let s1_keyed_arms = m.keyed.iter().map(|kk| {
         let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
-        let fields = [
-            (Ident2::new("k", proc_macro2::Span::call_site()), kk.key_entity.clone()),
-            (Ident2::new("b", proc_macro2::Span::call_site()), kk.member.clone()),
-        ];
-        let checks = fields.iter().map(|(f, t_name)| {
-            let t = ent_of(t_name);
-            let (t_count, t_str) = (&t.count, &t.arena_str);
+        let k = ent_of(&kk.key_entity);
+        let k_check = {
+            let (k_count, k_str) = (&k.count, &k.arena_str);
             quote! {
-                if let #rt::tx::RefKind::Existing(id) = #f.kind {
-                    if (id).0 as usize >= #t_count {
+                if let #rt::tx::RefKind::Existing(id) = k.kind {
+                    if (id).0 as usize >= #k_count {
                         violations.push(Violation::UnknownOldId {
                             op: op_index,
-                            arena: #t_str,
+                            arena: #k_str,
                             id: (id).0,
                         });
                     }
                 }
             }
-        });
-        quote! {
-            Op::#variant { k, b } => {
-                #(#checks)*
+        };
+        match (&kk.host, &kk.member_host) {
+            (None, None) => {
+                let b = ent_of(&kk.member);
+                let (b_count, b_str) = (&b.count, &b.arena_str);
+                quote! {
+                    Op::#variant { k, b } => {
+                        #k_check
+                        if let #rt::tx::RefKind::Existing(id) = b.kind {
+                            if (id).0 as usize >= #b_count {
+                                violations.push(Violation::UnknownOldId {
+                                    op: op_index,
+                                    arena: #b_str,
+                                    id: (id).0,
+                                });
+                            }
+                        }
+                    }
+                }
             }
+            (Some(host), None) => {
+                let h = ent_of(host);
+                let b = ent_of(&kk.member);
+                let (h_count, h_str) = (&h.count, &h.arena_str);
+                let (b_count, b_str) = (&b.count, &b.arena_str);
+                quote! {
+                    Op::#variant { a, k, b } => {
+                        if let #rt::tx::RefKind::Existing(id) = a.kind {
+                            if (id).0 as usize >= #h_count {
+                                violations.push(Violation::UnknownOldId {
+                                    op: op_index,
+                                    arena: #h_str,
+                                    id: (id).0,
+                                });
+                            }
+                        }
+                        #k_check
+                        if let #rt::tx::RefKind::Existing(id) = b.kind {
+                            if (id).0 as usize >= #b_count {
+                                violations.push(Violation::UnknownOldId {
+                                    op: op_index,
+                                    arena: #b_str,
+                                    id: (id).0,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            (Some(host), Some(mhost)) => {
+                let h = ent_of(host);
+                let mh = ent_of(mhost);
+                let m = ent_of(&kk.member);
+                let (h_count, h_str) = (&h.count, &h.arena_str);
+                let (mh_count, mh_str) = (&mh.count, &mh.arena_str);
+                let (m_arena, m_str) = (&m.arena, &m.arena_str);
+                let mh_arena = &mh.arena;
+                quote! {
+                    Op::#variant { a, k, b } => {
+                        if let #rt::tx::RefKind::Existing(id) = a.kind {
+                            if (id).0 as usize >= #h_count {
+                                violations.push(Violation::UnknownOldId {
+                                    op: op_index,
+                                    arena: #h_str,
+                                    id: (id).0,
+                                });
+                            }
+                        }
+                        #k_check
+                        if ((b.0).0 as usize) >= #mh_count {
+                            violations.push(Violation::UnknownOldId {
+                                op: op_index,
+                                arena: #mh_str,
+                                id: (b.0).0,
+                            });
+                        } else if (b.1 as usize)
+                            >= old.#mh_arena[(b.0).0 as usize].#m_arena.len()
+                        {
+                            violations.push(Violation::UnknownNestedIdx {
+                                op: op_index,
+                                arena: #m_str,
+                                host: (b.0).0,
+                                idx: b.1,
+                            });
+                        }
+                    }
+                }
+            }
+            (None, Some(_)) => unreachable!("gated off at classification"),
         }
     });
 
@@ -1761,7 +2095,18 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                         ::core::matches!(host.kind, #rt::tx::RefKind::Existing(hh) if hh == hid)
                     }
                 }
-            });
+            })
+            .chain(m.keyed.iter().filter(|kk| kk.host.as_ref() == Some(*h)).map(|kk| {
+                // A keyed insert under a removed owner names a map that
+                // dies with the owner — staged-under coherence covers it
+                // (the probe's InsertEntry in the nested_ops list).
+                let insert_variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+                quote! {
+                    Op::#insert_variant { a, .. } => {
+                        ::core::matches!(a.kind, #rt::tx::RefKind::Existing(hh) if hh == hid)
+                    }
+                }
+            }));
         quote! {
             for (removal_op, op) in ops.iter().enumerate() {
                 if let Op::#remove_variant { #payload } = op {
@@ -1791,6 +2136,223 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
+
+    // Step 2, key-as-reference — for each removed key, the surviving
+    // entries naming it and this change set's own staged inserts keyed
+    // by it. "Live" means SURVIVING THE CHANGE SET (the keyed-carry
+    // probe's pin): a kept owner's entry whose target survives counts; a
+    // doomed owner's entry does not (the map dies with its owner); an
+    // entry whose target is removed does not (target-as-membership
+    // clearing); a removed note-style referrer does not (the kept-record
+    // pass skips removed records). A staged insert keyed by the removed
+    // key DOES count — the change set names the key from a new place —
+    // and is attributed to the REMOVAL op, not the insert (one violation
+    // per problem: inserts already reported under RemovedPathHost are
+    // excluded from staged_inserts). Entries are collected and sorted by
+    // (owner, key) — never HashMap iteration order (the determinism pin).
+    let s2_key_removed = m.keyed.iter().map(|kk| {
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        let k = ent_of(&kk.key_entity);
+        let (k_count, k_removed_by, k_str, k_id) = (&k.count, &k.removed_by, &k.arena_str, &k.id_ty);
+        let remove_variant = format_ident!("Remove{}", kk.key_entity);
+        let payload = format_ident!("{}", snake(&kk.key_entity.to_string()));
+        let mf = &kk.map_field;
+        let entry_loop = match (&kk.host, &kk.member_host) {
+            (None, None) => {
+                let b = ent_of(&kk.member);
+                let b_removed = &b.removed;
+                quote! {
+                    let mut entries: ::std::vec::Vec<(u32, u32)> = ::std::vec::Vec::new();
+                    for (key, val) in old.#mf.iter() {
+                        if (key).0 == (id).0 && !#b_removed[(val).0 as usize] {
+                            entries.push((0, (id).0));
+                        }
+                    }
+                }
+            }
+            (Some(host), None) => {
+                let h = ent_of(host);
+                let b = ent_of(&kk.member);
+                let (h_count, h_removed, h_arena) = (&h.count, &h.removed, &h.arena);
+                let b_removed = &b.removed;
+                quote! {
+                    let mut entries: ::std::vec::Vec<(u32, u32)> = ::std::vec::Vec::new();
+                    for old_owner in 0..#h_count {
+                        if #h_removed[old_owner] {
+                            continue; // doomed owner: the map dies with it
+                        }
+                        if let ::core::option::Option::Some(val) =
+                            old.#h_arena[old_owner].#mf.get(&#k_id((id).0))
+                        {
+                            if !#b_removed[(val).0 as usize] {
+                                entries.push((old_owner as u32, (id).0));
+                            }
+                        }
+                    }
+                }
+            }
+            (Some(host), Some(_)) => {
+                let h = ent_of(host);
+                let m = ent_of(&kk.member);
+                let (h_count, h_removed, h_arena) = (&h.count, &h.removed, &h.arena);
+                let m_removed_by = &m.removed_by;
+                quote! {
+                    let mut entries: ::std::vec::Vec<(u32, u32)> = ::std::vec::Vec::new();
+                    for old_owner in 0..#h_count {
+                        if #h_removed[old_owner] {
+                            continue; // doomed owner: the map dies with it
+                        }
+                        if let ::core::option::Option::Some(val) =
+                            old.#h_arena[old_owner].#mf.get(&#k_id((id).0))
+                        {
+                            // Value-host agreement (construction's
+                            // invariant, checked by validate) puts the
+                            // target in the owner's own embedded arena.
+                            if #m_removed_by[old_owner][(val).1 as usize].is_none() {
+                                entries.push((old_owner as u32, (id).0));
+                            }
+                        }
+                    }
+                }
+            }
+            (None, Some(_)) => unreachable!("gated off at classification"),
+        };
+        // One violation per problem: inserts already reported under
+        // RemovedPathHost (a doomed entry owner) are not live references
+        // — their map dies with the owner. The exclusion rides only on
+        // nested stores (the variant does not exist elsewhere, and a
+        // non-nested store can never produce it).
+        let staged_scan = if has_nested {
+            quote! {
+                let staged_inserts: ::std::vec::Vec<usize> = ops
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, other)| {
+                        let is_keyed = ::core::matches!(
+                            other,
+                            Op::#variant { k: k2, .. }
+                                if ::core::matches!(k2.kind,
+                                    #rt::tx::RefKind::Existing(k3) if k3 == id)
+                        );
+                        if !is_keyed {
+                            return false;
+                        }
+                        !violations.iter().any(|v| {
+                            ::core::matches!(v, Violation::RemovedPathHost { nested_ops, .. }
+                                if nested_ops.contains(i))
+                        })
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+        } else {
+            quote! {
+                let staged_inserts: ::std::vec::Vec<usize> = ops
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, other)| {
+                        ::core::matches!(
+                            other,
+                            Op::#variant { k: k2, .. }
+                                if ::core::matches!(k2.kind,
+                                    #rt::tx::RefKind::Existing(k3) if k3 == id)
+                        )
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+        };
+        quote! {
+            for (op_index, op) in ops.iter().enumerate() {
+                if let Op::#remove_variant { #payload } = op {
+                    if let #rt::tx::RefKind::Existing(id) = #payload.kind {
+                        if ((id).0 as usize) < #k_count
+                            && #k_removed_by[(id).0 as usize] == ::core::option::Option::Some(op_index)
+                        {
+                            #entry_loop
+                            entries.sort();
+                            #staged_scan
+                            if !entries.is_empty() || !staged_inserts.is_empty() {
+                                violations.push(Violation::KeyRemovedWithLiveEntries {
+                                    op: op_index,
+                                    arena: #k_str,
+                                    key: (id).0,
+                                    entries,
+                                    staged_inserts,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Step 2, staged keyed inserts through a PATH-ID target — value-host
+    // agreement and target liveness in old-id space (the keyed-carry
+    // probe's 2c). A Pending entry owner is agreement-unreachable by
+    // construction (an Existing path id names an old owner; remap is
+    // identity-preserving; the Pending owner gets a fresh id) — the
+    // probe's InsertHostTargetMismatch, not a staging panic. A doomed
+    // entry owner is RemovedPathHost's report. Range-guarded: a flagged
+    // component is never indexed.
+    let s2_path_keyed = m
+        .keyed
+        .iter()
+        .filter(|kk| kk.member_host.is_some())
+        .map(|kk| {
+            let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+            let host = kk.host.as_ref().expect("checked: a path-id target implies a host");
+            let mhost = kk.member_host.as_ref().expect("checked: filtered");
+            let h = ent_of(host);
+            let mh = ent_of(mhost);
+            let m = ent_of(&kk.member);
+            let (h_count, h_removed) = (&h.count, &h.removed);
+            let m_removed_by = &m.removed_by;
+            let (mh_arena, m_arena) = (&mh.arena, &m.arena);
+            quote! {
+                for (op_index, op) in ops.iter().enumerate() {
+                    if let Op::#variant { a, k: _, b } = op {
+                        match a.kind {
+                            #rt::tx::RefKind::Pending(i) => {
+                                violations.push(Violation::InsertHostTargetMismatch {
+                                    op: op_index,
+                                    entry_host: HostName::Pending(i),
+                                    target_host: (b.0).0,
+                                    target_idx: b.1,
+                                });
+                            }
+                            #rt::tx::RefKind::Existing(hid) => {
+                                let hidx = (hid).0 as usize;
+                                if hidx >= #h_count || #h_removed[hidx] {
+                                    continue; // step 1 or RemovedPathHost owns this
+                                }
+                                if (b.0).0 != (hid).0 {
+                                    violations.push(Violation::InsertHostTargetMismatch {
+                                        op: op_index,
+                                        entry_host: HostName::Old((hid).0),
+                                        target_host: (b.0).0,
+                                        target_idx: b.1,
+                                    });
+                                } else if (b.1 as usize)
+                                    >= old.#mh_arena[hidx].#m_arena.len()
+                                {
+                                    // step 1's UnknownNestedIdx already owns
+                                    // this; the guard only protects the
+                                    // indexed read below.
+                                } else if #m_removed_by[hidx][b.1 as usize].is_some() {
+                                    violations.push(Violation::DanglingInsertTarget {
+                                        op: op_index,
+                                        target_host: (b.0).0,
+                                        target_idx: b.1,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
     // Step 2, pass B — staged adds naming removed endpoints, attributed to
     // the naming op. Range-guarded: a flagged id is never indexed.
@@ -1858,34 +2420,54 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
-    // Step 2, keyed insert ops — a staged insert naming a removed key or
-    // target dangles at the insert op (a removed record can neither key
-    // nor accept membership), exactly like the primitive insert arms.
-    let s2_keyed_arms = m.keyed.iter().map(|kk| {
+    // Step 2, keyed insert ops — a staged insert naming a removed TARGET
+    // dangles at the insert op (a removed record cannot accept
+    // membership), exactly like the primitive insert arms. The removed-KEY
+    // case is NOT a dangler: a staged insert keyed by a removed key names
+    // the key from a new place — it counts as a LIVE reference and rides
+    // the removal op's `KeyRemovedWithLiveEntries` (the survivors-only
+    // pin). A path-id target's liveness and value-host agreement are the
+    // hosted path pass below. Range-guarded: a flagged id is never
+    // indexed.
+    let s2_keyed_arms = m.keyed.iter().filter(|kk| kk.member_host.is_none()).map(|kk| {
         let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
-        let fields = [
-            (Ident2::new("k", proc_macro2::Span::call_site()), kk.key_entity.clone()),
-            (Ident2::new("b", proc_macro2::Span::call_site()), kk.member.clone()),
-        ];
-        let checks = fields.iter().map(|(f, t_name)| {
-            let t = ent_of(t_name);
-            let (t_count, t_removed, t_str) = (&t.count, &t.removed, &t.arena_str);
-            quote! {
-                if let #rt::tx::RefKind::Existing(id) = #f.kind {
-                    if ((id).0 as usize) < #t_count && #t_removed[(id).0 as usize] {
-                        violations.push(Violation::DanglingEndpoint {
-                            op: op_index,
-                            record: RecordDesc::Staged(op_index as u32),
-                            endpoint_arena: #t_str,
-                            endpoint: (id).0,
-                        });
-                    }
+        let b = ent_of(&kk.member);
+        let (b_count, b_removed, b_str) = (&b.count, &b.removed, &b.arena_str);
+        let b_check = quote! {
+            if let #rt::tx::RefKind::Existing(id) = b.kind {
+                if ((id).0 as usize) < #b_count && #b_removed[(id).0 as usize] {
+                    violations.push(Violation::DanglingEndpoint {
+                        op: op_index,
+                        record: RecordDesc::Staged(op_index as u32),
+                        endpoint_arena: #b_str,
+                        endpoint: (id).0,
+                    });
                 }
             }
-        });
-        quote! {
-            if let Op::#variant { k, b } = op {
-                #(#checks)*
+        };
+        match &kk.host {
+            None => quote! {
+                if let Op::#variant { k: _, b } = op {
+                    #b_check
+                }
+            },
+            Some(host) => {
+                let h = ent_of(host);
+                let (h_count, h_removed) = (&h.count, &h.removed);
+                quote! {
+                    if let Op::#variant { a, k: _, b } = op {
+                        if let #rt::tx::RefKind::Existing(id) = a.kind {
+                            if ((id).0 as usize) < #h_count && #h_removed[(id).0 as usize] {
+                                // a removed host is RemovedPathHost's
+                                // report, not a dangler at the insert op
+                            } else {
+                                #b_check
+                            }
+                        } else {
+                            #b_check
+                        }
+                    }
+                }
             }
         }
     });
@@ -2064,11 +2646,11 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // each store-level map filters to entries whose key and target both
     // survive the change set and remaps both through the compaction maps
     // (keyed maps are carried as state, never rebuilt — a keyed arrow
-    // need not have a companion field to recompute from). Entries under a
-    // removed key drop with it here; the survivors-only refinement of
-    // that rule (a removed key with otherwise-live entries is a
-    // `FlushError` naming them) is the keyed-carry step's.
-    let s4_keyed_maps = m.keyed.iter().map(|kk| {
+    // (a `FlushError` naming them) is the keyed-carry step's — the
+    // KeyRemovedWithLiveEntries pass above. A per-record map is not a
+    // store field: its carry rides the host record's field init
+    // (record_field_init's KeyedMap arm), not this store-level loop.
+    let s4_keyed_maps = m.keyed.iter().filter(|kk| kk.host.is_none()).map(|kk| {
         let carried = format_ident!("__{}_keyed_map", kk.arrow);
         let k = ent_of(&kk.key_entity);
         let b = ent_of(&kk.member);
@@ -2096,6 +2678,65 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // `old_id` (both loop paths bind those names).
     let record_field_init = |entity: &Ident2, field: &TxField| -> TokenStream2 {
         let n = &field.emitted;
+        // A per-record keyed map rides as state, never rebuilt: the kept
+        // owner's new map receives exactly its surviving old entries —
+        // the target survives (target-as-membership clearing), with the
+        // key remapped through the key entity's map and the target
+        // remapped through the compaction maps (a path-id target through
+        // the COMPOSED maps — this owner's new id and its own per-host
+        // sub map; value-host agreement, a construction invariant checked
+        // by validate, puts the target in this owner's embedded arena).
+        // Step 2 proved a surviving entry's key is not removed (else
+        // KeyRemovedWithLiveEntries fired), so the key unwrap is an
+        // internal bug, and the target unwrap likewise (the filter above
+        // is exactly step 2's survival test).
+        if let Some(kk) = m
+            .keyed
+            .iter()
+            .find(|kk| kk.host.as_ref() == Some(entity) && kk.map_field == field.emitted)
+        {
+            let k = ent_of(&kk.key_entity);
+            let b = ent_of(&kk.member);
+            let (k_map, k_id) = (&k.map, &k.id_ty);
+            let (b_map, b_id) = (&b.map, &b.id_ty);
+            let (survives, new_target) = match &kk.member_host {
+                None => {
+                    let b_removed = &b.removed;
+                    (
+                        quote!(if #b_removed[(val).0 as usize] { continue; }),
+                        quote!(#b_id(#b_map[(val).0 as usize]
+                            .expect("carried entry's target kept: step 2 proved it"))),
+                    )
+                }
+                Some(_) => {
+                    let b_removed_by = &b.removed_by;
+                    let h_id = &ent_of(entity).id_ty;
+                    (
+                        quote!(if #b_removed_by[old_id][(val).1 as usize].is_some() { continue; }),
+                        quote!(#b_id(
+                            #h_id(new_id),
+                            #b_map[old_id][(val).1 as usize]
+                                .expect("carried entry's target kept: step 2 proved it"),
+                        )),
+                    )
+                }
+            };
+            return quote! {
+                #n: {
+                    let mut __carried: ::std::collections::HashMap<#k_id, #b_id> =
+                        ::std::collections::HashMap::new();
+                    for (key, val) in rec.#n.iter() {
+                        #survives
+                        __carried.insert(
+                            #k_id(#k_map[(key).0 as usize]
+                                .expect("carried entry's key kept: step 2 proved it")),
+                            #new_target,
+                        );
+                    }
+                    __carried
+                },
+            };
+        }
         match &field.init {
             TxFieldInit::NestedArena(emb_name) => {
                 let emb_e = m
@@ -2532,7 +3173,13 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // call the backing's check-then-write hook on the new store — the
     // insert lands on top of the carried map, and the staging live-key
     // check proved the key free, so the hook's own duplicate check cannot
-    // trip.
+    // trip. A per-record map resolves the NAMED HOST the same way (an
+    // add precedes its keyed inserts in submission order, so pass 1's
+    // replay tables are already filled). An embedded target is a raw
+    // path id remapped through the COMPOSED maps — the same translation
+    // the carry applies (the probe's two-call-site pin); step 2 proved
+    // both components remap (value-host agreement + liveness), so the
+    // unwraps are internal bugs.
     let s4c_keyed_arms = m.keyed.iter().map(|kk| {
         let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
         let hook = &kk.hook;
@@ -2540,22 +3187,74 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let b = ent_of(&kk.member);
         let (k_map, k_p, k_id) = (&k.map, &k.pending, &k.id_ty);
         let (b_map, b_p, b_id) = (&b.map, &b.pending, &b.id_ty);
-        quote! {
-            Op::#variant { k, b } => {
-                let k = match k.kind {
-                    #rt::tx::RefKind::Existing(id) =>
-                        #k_id(#k_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
-                    #rt::tx::RefKind::Pending(i) => #k_p[i as usize]
-                        .expect("an add precedes its use: submission order"),
-                };
-                let b = match b.kind {
-                    #rt::tx::RefKind::Existing(id) =>
-                        #b_id(#b_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
-                    #rt::tx::RefKind::Pending(i) => #b_p[i as usize]
-                        .expect("an add precedes its use: submission order"),
-                };
-                new_store.#hook(k, b);
+        let k_resolve = quote! {
+            let k = match k.kind {
+                #rt::tx::RefKind::Existing(id) =>
+                    #k_id(#k_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                #rt::tx::RefKind::Pending(i) => #k_p[i as usize]
+                    .expect("an add precedes its use: submission order"),
+            };
+        };
+        match (&kk.host, &kk.member_host) {
+            (None, None) => quote! {
+                Op::#variant { k, b } => {
+                    #k_resolve
+                    let b = match b.kind {
+                        #rt::tx::RefKind::Existing(id) =>
+                            #b_id(#b_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                        #rt::tx::RefKind::Pending(i) => #b_p[i as usize]
+                            .expect("an add precedes its use: submission order"),
+                    };
+                    new_store.#hook(k, b);
+                }
+            },
+            (Some(host), None) => {
+                let h = ent_of(host);
+                let (h_map, h_p, h_id) = (&h.map, &h.pending, &h.id_ty);
+                quote! {
+                    Op::#variant { a, k, b } => {
+                        let a = match a.kind {
+                            #rt::tx::RefKind::Existing(id) =>
+                                #h_id(#h_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                            #rt::tx::RefKind::Pending(i) => #h_p[i as usize]
+                                .expect("an add precedes its use: submission order"),
+                        };
+                        #k_resolve
+                        let b = match b.kind {
+                            #rt::tx::RefKind::Existing(id) =>
+                                #b_id(#b_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                            #rt::tx::RefKind::Pending(i) => #b_p[i as usize]
+                                .expect("an add precedes its use: submission order"),
+                        };
+                        new_store.#hook(a, k, b);
+                    }
+                }
             }
+            (Some(host), Some(mhost)) => {
+                let h = ent_of(host);
+                let mh = ent_of(mhost);
+                let (h_map, h_p, h_id) = (&h.map, &h.pending, &h.id_ty);
+                let (mh_map, mh_id) = (&mh.map, &mh.id_ty);
+                quote! {
+                    Op::#variant { a, k, b } => {
+                        let a = match a.kind {
+                            #rt::tx::RefKind::Existing(id) =>
+                                #h_id(#h_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                            #rt::tx::RefKind::Pending(i) => #h_p[i as usize]
+                                .expect("an add precedes its use: submission order"),
+                        };
+                        #k_resolve
+                        let b = #b_id(
+                            #mh_id(#mh_map[(b.0).0 as usize]
+                                .expect("staged entry target host kept: step 2 proved it")),
+                            #b_map[(b.0).0 as usize][b.1 as usize]
+                                .expect("staged entry target kept: step 2 proved it"),
+                        );
+                        new_store.#hook(a, k, b);
+                    }
+                }
+            }
+            (None, Some(_)) => unreachable!("gated off at classification"),
         }
     });
 
@@ -2615,6 +3314,11 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #(#s2_kept)*
             // Path coherence: ops staged under a removed host (nested stores).
             #(#s2_removed_path_hosts)*
+            // Key-as-reference: removed keys with live entries or staged
+            // inserts (the survivors-only cascade).
+            #(#s2_key_removed)*
+            // Path-id keyed inserts: value-host agreement + target liveness.
+            #(#s2_path_keyed)*
             for (op_index, op) in ops.iter().enumerate() {
                 #(#s2_staged_arms)*
                 #(#s2_insert_arms)*

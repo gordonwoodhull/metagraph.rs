@@ -2007,20 +2007,20 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     });
                 }
                 Cardinality::Keyed => {
-                    // The store-level keyed carry (step 8): the self must
-                    // be the unfused root (the map is a store field —
-                    // exactly one contributed field, the map) and the
-                    // backing must author the check-then-write insert and
-                    // a lookup (the live-key predicate derives from it).
-                    // A per-record keyed map gates the Tx off until the
-                    // keyed-carry step.
+                    // The keyed carry (steps 8/11): the self may be the
+                    // unfused root (a store-level map) or a record entity
+                    // (a per-record map — the keyed-carry step's hosted
+                    // placement); either way the backing contributes
+                    // exactly the map, authors the check-then-write
+                    // insert, and publishes a lookup (the live-key
+                    // predicate derives from it). Every entity is
+                    // root-level in a flat pattern — no path-id members.
                     let root_self = is_root(&a.source);
                     let a_fields: Vec<&ContribField> = on_clauses(d, OnTarget::A)
                         .iter()
                         .flat_map(|(_, fs)| fs.iter())
                         .collect();
-                    let shape_ok = root_self
-                        && a_fields.len() == 1
+                    let shape_ok = a_fields.len() == 1
                         && on_clauses(d, OnTarget::B).is_empty()
                         && on_clauses(d, OnTarget::Store).is_empty()
                         && d.has(|c| matches!(c, Clause::OnInsert { .. }))
@@ -2050,13 +2050,56 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                                 })
                         })
                         .expect("checked: one A field");
+                    // The hosted verb's `Insert<Arrow>` trait impl: a
+                    // per-record map's self ref makes the canonical arity
+                    // available — wired exactly like the hosted primitive
+                    // inserts (the store-level form stays inherent-only).
+                    let verb = if root_self {
+                        None
+                    } else {
+                        let write = info.meta.write.as_ref().ok_or_else(|| {
+                            syn::Error::new(
+                                Span::call_site(),
+                                format!(
+                                    "root `{}` publishes no write metadata (old courier?); \
+                                     rebuild the declaring crate",
+                                    path_tokens(a.inst.as_ref().unwrap()),
+                                ),
+                            )
+                        })?;
+                        let mut write_path = a.inst.as_ref().unwrap().clone();
+                        write_path.segments.last_mut().unwrap().ident = write.trait_.clone();
+                        let trait_path =
+                            crate::resolve_schema_path(&write_path, &schema.pkg)?;
+                        let marker_path = {
+                            let marker = marker_ty(&a.name);
+                            quote!(#marker_base_ts::#marker_mod::markers::#marker)
+                        };
+                        let a_ref_alias = format_ident!("{}Ref", a.source);
+                        let b_ref_alias = format_ident!("{}Ref", a.target);
+                        let mut assocs = vec![(write.a_ref.clone(), quote!(#a_ref_alias))];
+                        if let (Some(k_ref), Some(k_ent)) = (&write.k_ref, &a.key) {
+                            let k_ref_alias = format_ident!("{}Ref", k_ent);
+                            assocs.push((k_ref.clone(), quote!(#k_ref_alias)));
+                        }
+                        assocs.push((write.b_ref.clone(), quote!(#b_ref_alias)));
+                        Some(crate::tx::TxVerb {
+                            trait_path,
+                            marker_path,
+                            method: write.method.clone(),
+                            assocs,
+                        })
+                    };
                     keyed.push(crate::tx::TxKeyed {
                         arrow: a.name.clone(),
+                        host: (!root_self).then(|| a.source.clone()),
                         key_entity: a.key.clone().expect("checked: key bound"),
                         member: a.target.clone(),
+                        member_host: None,
                         map_field,
                         hook: format_ident!("__insert_{}", a.name),
                         key_live: format_ident!("__{}_key_live", a.name),
+                        verb,
                     });
                 }
             }

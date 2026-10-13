@@ -152,26 +152,30 @@ fn existing_and_pending_keys_do_not_collide() {
 fn keyed_insert_danglers_and_unknown_ids() {
     let base = old_store();
 
-    // A staged insert naming a REMOVED key or target dangles at the
-    // insert op; an out-of-range raw id is an UnknownOldId, never an
-    // index panic. The removed key must be UNKEYED in the old store — a
-    // live key panics at staging even when its removal is staged (a
-    // staged removal frees no key).
+    // A staged insert naming a REMOVED key is NOT a dangler at the insert
+    // op: it names the key from a new place, so the survivors-only rule
+    // (the keyed-carry probe's pin, step 11) counts it as a LIVE
+    // reference and rejects the KEY REMOVAL, attributing the violation
+    // to the removal op with the insert listed in `staged_inserts`. The
+    // removed key must be UNKEYED in the old store — a live key panics
+    // at staging even when its removal is staged (a staged removal frees
+    // no key).
     let err = base
         .edit()
         .tap_flush(|tx| {
             let m = tx.add_m(); // op 0
             tx.remove_n(NId(2)); // op 1 (unkeyed in the old store)
-            tx.insert_marks(NId(2), m); // op 2: names the removed key
+            tx.insert_marks(NId(2), m); // op 2: re-names the removed key
         })
         .expect_err("removed key");
     assert_eq!(
         err.violations,
-        vec![Violation::DanglingEndpoint {
-            op: 2,
-            record: RecordDesc::Staged(2),
-            endpoint_arena: "n",
-            endpoint: 2,
+        vec![Violation::KeyRemovedWithLiveEntries {
+            op: 1,
+            arena: "n",
+            key: 2,
+            entries: vec![],
+            staged_inserts: vec![2],
         }]
     );
 

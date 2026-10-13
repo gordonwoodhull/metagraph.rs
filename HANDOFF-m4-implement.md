@@ -244,7 +244,93 @@ Step-9 notes (scope decisions, each reasoned):
   The fixture has exactly one host (OuterNode); the general rule is
   codegen-review surface, not tested.
 
-Not started: steps 11–14.
+Not started: steps 12–14.
+
+- **Step 11** (this commit): removal + keyed carry — the per-record keyed
+  map ungated (HierarchyStore's `sub.subnode`, gated since step 8).
+  `TxKeyed` grew `host: Option<Ident2>` (the map-owning entity; None =
+  store-level) and `member_host: Option<Ident2>` (an embedded member's
+  target is a raw path id in the op — no ref can name an embedded
+  record). Flat codegen (`codegen.rs`) classifies keyed with the
+  record-self allowed and wires the verb like a hosted primitive insert;
+  composed codegen (`codegen_composed.rs`) reclassifies: key must be
+  root-level, member root OR embedded-under-the-fused-class, `member_host`
+  from the member's `ClassLoc`, instance-qualified hook/`key_live`
+  emission on the fused class (`__insert_sub_subnode(a, k, b)`,
+  `__sub_subnode_key_live`). tx.rs: keyed op variants in three
+  (host, member_host) shapes; keyed staging arms — store-level keeps the
+  `__<arrow>_key_matches` helper + Custom reserve arm (now filtered to
+  hostless arrows), hosted arm range-guards the old-map live-key check
+  (`old.__store().#key_live(hid, kid)`), staged-vs-staged same-(host,key)
+  panics; step-2 gains `s2_key_removed` (the survivors-only cascade —
+  kept-owner entries whose target survives count, doomed owners don't,
+  staged inserts keyed by a removed key DO count and attribute to the
+  removal op; entries sorted, `KeyRemovedWithLiveEntries{op, arena, key,
+  entries: Vec<(owner, key)>, staged_inserts}` — owner column 0 for
+  store-level maps, one unified variant for both placements) and
+  `s2_path_keyed` (Existing-only path-id targets: Pending host →
+  `InsertHostTargetMismatch`, host≠target.host → mismatch Old, target idx
+  removed → `DanglingInsertTarget`, all range-guarded by the old embedded
+  arena length); `HostName` enum emitted beside RecordDesc when any
+  member_host exists. Step 4a `record_field_init` carries a kept host's
+  keyed map filtered + remapped (embedded target: host map ∘ per-host sub
+  map composed remap); step 4c replays staged keyed inserts through the
+  same composed remap into `new_store.#hook(a, k, b)`. Tests:
+  tests/tx_keyed_carry.rs (15 — probe 4's 15 recast over HierarchyStore,
+  the probe's Tag/Outer/Sub/note vocabulary mapped onto InnerNode/
+  OuterNode/SubNode/`main_node`-field dangler), tests/hierarchy_subgraphs.rs
+  Tx ungated. 47/47 suites green incl. trybuild + downstream, zero
+  warnings.
+
+Step-11 notes (scope decisions + deviations, each reasoned):
+
+- **Store-level staged-arm semantics change** (the survivors-only cascade
+  at the staging site): removing a key that a staged insert references is
+  now `KeyRemovedWithLiveEntries` attributed to the REMOVAL op (the
+  staged op's index in `staged_inserts`), not a `DanglingEndpoint` at the
+  insert. Two legacy tests adjusted with comments:
+  `tests/edge_induced.rs` (`tx_removal_splices_intrusive_and_keyed_carries`
+  gains the KeyRemoved violation; a remove-edge alone now reports it) and
+  `tests/tx_keyed.rs` (`keyed_insert_danglers_and_unknown_ids`: the
+  staged insert keyed by a removed key attributes to op 1). Both match
+  the probe-pinned policy.
+- **Embedded intrusive chains stay gated** (step 9's deferral stands; the
+  plan's step-11 text doesn't name them — per-host intrusive carry is a
+  different surface from the keyed map).
+- **`ReservedKey` variants only for store-level keyed arrows.**
+  Per-record reservations are out of the acceptance shape (probe 4 pins
+  store-level reserve-key flow only); `reserved_key_variants` is filtered
+  `kk.host.is_none()`.
+- **Embedded-target verbs are inherent-only.** The canonical hosted hook
+  takes a target ref; a verb for an embedded member would need a raw
+  path id — emitted inherent, not on the `Insert<...>` trait.
+- **Value-host-agreement damage is validated on the store, not through a
+  flush.** The acceptance test pokes a host's keyed map below the Tx's
+  checks and asserts the composed validate names both hosts (path-id
+  shape); routing through a flush would LAUNDER the damage — step 4a's
+  embedded-target remap assumes the host-agreement invariant (value host
+  = owner) and re-anchors the corrupt value. The probe pinned the
+  validate surface; the flush-side launder is the carry working as
+  designed on already-corrupt state.
+- **The composed remap lives at two call sites** (4a carry, 4c
+  staged-insert replay) and both take host map ∘ per-host sub map;
+  `s4_keyed_maps` (store-level carry) is filtered to hostless arrows —
+  hosted maps carry per host record via `record_field_init`, not the
+  store-level pass (an early unfiltered run misindexed host arenas).
+- **Kept-pass danglers precede KeyRemoved in discovery order.** The
+  kept-record pass runs before the removed-key pass, so a kept sub whose
+  `main_node` is the removed key lists first (the probe's DanglingNoteTag
+  analog); tests assert the full ordered vector.
+- **Report exposure ("old ids only") was step 3's surface**; this step
+  pins the composed-remap read-offs (report maps index OLD ids; staged
+  adds land past the map's end) in the happy-path test.
+- **`InsertHostTargetMismatch` is a step-2 flush error, not a staging
+  panic** (the per-step guide said "staging panic"; the probe chose the
+  flush error — REPORT pin: an Existing path-id target under a Pending
+  or mismatched host is detected at analysis, with the violation
+  attributed to the op like every other step-2 finding).
+- **Spike 7's 14 removal tests landed with step 3** (tests/tx_flush.rs,
+  the Königsberg port); this step's acceptance is probe 4's 15 alone.
 
 - **Step 10** (this commit): induction via the escape hatch (decision 4).
   Emitted by tx.rs from the UNCHANGED TxModel — the custom-op pieces are
@@ -694,6 +780,20 @@ plan text, note disagreements in step notes; do not merge to main —
 leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
+
+- 2026-10-13 (impl-m4-8): step 11 DONE (see "Where things stand" and the
+  step-11 notes — TxKeyed host/member_host, the survivors-only cascade as
+  `s2_key_removed` at BOTH placements, `s2_path_keyed` for Existing-only
+  path-id targets (InsertHostTargetMismatch/DanglingInsertTarget), the
+  composed remap at 4a carry and 4c staged-insert replay, the
+  hosted keyed staging arm with old-map live-key range guards;
+  HierarchyStore's `sub.subnode` Tx ungated; probe 4's 15 tests recast
+  as tests/tx_keyed_carry.rs over HierarchyStore). Two legacy tests
+  adjusted for the survivors-only staging-site semantics (edge_induced,
+  tx_keyed — both pinned by the probe). 47/47 suites green incl.
+  trybuild + downstream, zero warnings at the commit. Next: step 12
+  (phased stores — flush into Store<Build>, kept-fed-then-replay carry,
+  finish() = steps 6-7; acceptance: probe 1's 12 tests).
 
 - 2026-10-13 (impl-m4-7): step 10 DONE (see "Where things stand" and the
   step-10 notes — the escape hatch emitted store-generically from the

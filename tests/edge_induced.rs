@@ -252,19 +252,32 @@ fn tx_removal_splices_intrusive_and_keyed_carries() {
 
     // Removing a main edge requires removing its subedge explicitly (the
     // minimal cascade): alone, the kept SubEdge's `main_edge` field
-    // dangles, attributed to the removal op.
+    // dangles, attributed to the removal op — AND the keyed carry's
+    // key-as-reference rule fires (step 11): the subedge map's entry
+    // keyed by e1 names a surviving target, so the key removal is
+    // rejected naming the entry (sorted (owner, key) pairs; a store-level
+    // map's owner column is 0). Both violations attribute to op 0.
     let err = base
         .edit()
         .tap_flush(|tx| tx.remove_edge(e1))
         .expect_err("dangling main_edge");
     assert_eq!(
         err.violations,
-        vec![Violation::DanglingEndpoint {
-            op: 0,
-            record: RecordDesc::Kept { arena: "sub_edge", id: 1 },
-            endpoint_arena: "edge",
-            endpoint: 1,
-        }]
+        vec![
+            Violation::DanglingEndpoint {
+                op: 0,
+                record: RecordDesc::Kept { arena: "sub_edge", id: 1 },
+                endpoint_arena: "edge",
+                endpoint: 1,
+            },
+            Violation::KeyRemovedWithLiveEntries {
+                op: 0,
+                arena: "edge",
+                key: 1,
+                entries: vec![(0, 1)],
+                staged_inserts: vec![],
+            },
+        ]
     );
 
     // With the subedge removed too, both carries splice: the intrusive

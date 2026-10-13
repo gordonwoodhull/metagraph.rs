@@ -3100,33 +3100,52 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                     });
                 }
                 Cardinality::Keyed => {
-                    // Store-level only (the self is the unfused root); a
-                    // per-record keyed map — including a fused-root self's
-                    // per-host map at an embedded placement — gates the Tx
-                    // off until the keyed-carry step, and so does any
-                    // embedded key or target (path-id remaps).
+                    // The keyed carry (steps 8/11). Store-level: the self
+                    // owns no records (the map rides the store) and the
+                    // key and target are root-level. Per-record (the
+                    // keyed-carry step): the map rides the self class's
+                    // records; the key stays root-level (a path-id key
+                    // has no ref form and no acceptance need), and the
+                    // target may be root-level or embedded IN THE SELF
+                    // CLASS (value-host agreement puts a map's targets in
+                    // its owner's own embedded arena — the keyed-carry
+                    // probe's Hierarchy shape: `sub.subnode` keyed by a
+                    // root-level MainNode fused to `inner.Node`).
                     let Some(k) = &a.key else {
                         tx_ok = false;
                         break 'arrows;
                     };
                     let kc = class_index_of(i, ent_index(i, k)?);
-                    let shape_ok = root_self
-                        && classes[kc].loc == ClassLoc::Root
-                        && classes[tc].loc == ClassLoc::Root
-                        && map_of_arrow.contains_key(&(i, a.name.to_string()))
+                    let map_ok = map_of_arrow.contains_key(&(i, a.name.to_string()))
                         && d.has(|c| matches!(c, Clause::OnInsert { .. }))
                         && body_of(d, |c| matches!(c, Clause::Lookup { .. })).is_some();
+                    let shape_ok = map_ok
+                        && classes[kc].loc == ClassLoc::Root
+                        && (root_self && classes[tc].loc == ClassLoc::Root
+                            || !root_self
+                                && match classes[tc].loc {
+                                    ClassLoc::Root => true,
+                                    // Embedded in the self class only.
+                                    ClassLoc::Embedded(h) => h == sc,
+                                });
                     if !shape_ok {
                         tx_ok = false;
                         break 'arrows;
                     }
+                    let member_host = match classes[tc].loc {
+                        ClassLoc::Root => None,
+                        ClassLoc::Embedded(h) => Some(classes[h].name.clone()),
+                    };
                     tx_keyed.push(crate::tx::TxKeyed {
                         arrow: basis_of(i, &a.name),
+                        host: (!root_self).then(|| classes[sc].name.clone()),
                         key_entity: classes[kc].name.clone(),
                         member: classes[tc].name.clone(),
+                        member_host,
                         map_field: map_of_arrow[&(i, a.name.to_string())].clone(),
                         hook: format_ident!("__insert_{}_{}", inst_snake, a.name),
                         key_live: format_ident!("__{}_{}_key_live", inst_snake, a.name),
+                        verb: None,
                     });
                 }
             }
