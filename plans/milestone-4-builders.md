@@ -748,7 +748,7 @@ the probe crate under `/tmp` as the reference implementation.
 
 **Stage 3 — nesting, induction, keyed, phased**
 
-- [ ] 9. Nested stores: `within()` owned scope threading `&mut Tx`,
+- [x] 9. Nested stores: `within()` owned scope threading `&mut Tx`,
       ref-segment paths, per-level maps + op-index replay table,
       root-before-nested grouping, `RemovedPathHost`. Acceptance:
       probe 2's tests (one-flush hierarchy edit, host-id translation,

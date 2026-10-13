@@ -2959,21 +2959,29 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
     out.extend(iter_defs);
     out.extend(trait_impls);
 
-    // ---- M4 step 8: the transaction (write side) ----
+    // ---- M4 step 8/9: the transaction (write side) ----
     // The composed codegen builds the same normalized TxModel the flat
     // codegen does, so the whole flush pipeline exists in one place. Gate:
-    // non-phased, every fusion class at root level (an embedded arena is
-    // a nested store — `within()` is the nesting step's), and every bound
-    // arrow's carry classifiable by the flat taxonomy (existence,
-    // field-one, the intrusive head/link shape, or a store-level keyed
-    // map). The composed Tx is inherent-surface in this step: the
-    // write-TRAIT impls wait for the composed write-trait surface
-    // (per-entity traits would need member-pattern paths the composed
-    // schema does not carry; the arrow-named impls land beside them,
-    // pinned by tests) — `HandleToRef` impls emit regardless (the
-    // runtime trait needs only the per-instance markers finish_compose
-    // already mints).
-    let mut tx_ok = !phased && classes.iter().all(|c| c.loc == ClassLoc::Root);
+    // non-phased, every fusion class at root level or embedded at depth 1
+    // (composition already rejects deeper), and every bound arrow's carry
+    // classifiable by the flat taxonomy — with the nested-store
+    // restrictions step 9 pins: an embedded class's arrows are existence
+    // or field-one only (embedded intrusive chains and per-host keyed maps
+    // carry per-host state and land with the keyed-carry step), a ctor-arg
+    // target must be a root-level entity (a path-id remap has no meaning
+    // this step), and an embedded class with on_add hooks gates off (the
+    // skeleton builds embedded records inside the host's field init and
+    // cannot fire per-record store hooks there). The composed Tx is
+    // inherent-surface in this step: the write-TRAIT impls wait for the
+    // composed write-trait surface (per-entity traits would need
+    // member-pattern paths the composed schema does not carry; the
+    // arrow-named impls land beside them, pinned by tests) — `HandleToRef`
+    // impls emit regardless (the runtime trait needs only the per-instance
+    // markers finish_compose already mints).
+    let mut tx_ok = !phased
+        && classes
+            .iter()
+            .all(|c| matches!(c.loc, ClassLoc::Root | ClassLoc::Embedded(_)));
     // An arrow's unique local basis: the bare arrow name, or the
     // instance-qualified spelling exactly where the public write ops take
     // the prefix (cross-instance arrow-name collision) — so the Tx verbs
@@ -3016,10 +3024,15 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         .iter()
                         .flat_map(|(_, fs)| fs.iter())
                         .collect();
+                    // A ctor-arg TARGET must be root-level: a path-id remap
+                    // (host translation + per-host index) is the
+                    // keyed-carry step's work. An embedded SELF is fine —
+                    // the field rides the embedded record.
                     let ok = a_fields.len() == 1
                         && a_fields[0].formula == crate::backing::NameFormula::Arrow
                         && ty_str(a_fields[0]) == "BId"
-                        && d.has(|c| matches!(c, Clause::CtorArg { .. }));
+                        && d.has(|c| matches!(c, Clause::CtorArg { .. }))
+                        && classes[tc].loc == ClassLoc::Root;
                     if !ok {
                         tx_ok = false;
                         break 'arrows;
@@ -3032,6 +3045,12 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             break 'arrows;
                         }
                         continue;
+                    }
+                    // Intrusive chains at an embedded placement carry
+                    // per-host state — the keyed-carry step's.
+                    if classes[sc].loc != ClassLoc::Root || classes[tc].loc != ClassLoc::Root {
+                        tx_ok = false;
+                        break 'arrows;
                     }
                     let a_fields: Vec<&crate::backing::ContribField> = on_clauses(d, OnTarget::A)
                         .iter()
@@ -3082,10 +3101,18 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                 }
                 Cardinality::Keyed => {
                     // Store-level only (the self is the unfused root); a
-                    // per-record keyed map gates the Tx off until the
-                    // keyed-carry step.
+                    // per-record keyed map — including a fused-root self's
+                    // per-host map at an embedded placement — gates the Tx
+                    // off until the keyed-carry step, and so does any
+                    // embedded key or target (path-id remaps).
+                    let Some(k) = &a.key else {
+                        tx_ok = false;
+                        break 'arrows;
+                    };
+                    let kc = class_index_of(i, ent_index(i, k)?);
                     let shape_ok = root_self
-                        && a.key.is_some()
+                        && classes[kc].loc == ClassLoc::Root
+                        && classes[tc].loc == ClassLoc::Root
                         && map_of_arrow.contains_key(&(i, a.name.to_string()))
                         && d.has(|c| matches!(c, Clause::OnInsert { .. }))
                         && body_of(d, |c| matches!(c, Clause::Lookup { .. })).is_some();
@@ -3093,7 +3120,6 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         tx_ok = false;
                         break 'arrows;
                     }
-                    let kc = class_index_of(i, ent_index(i, a.key.as_ref().unwrap())?);
                     tx_keyed.push(crate::tx::TxKeyed {
                         arrow: basis_of(i, &a.name),
                         key_entity: classes[kc].name.clone(),
@@ -3127,6 +3153,13 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                             tx_ok = false;
                             break;
                         };
+                        // A ctor-arg target must be a root-level entity:
+                        // remapping a path id (host translation + per-host
+                        // index) is the keyed-carry step's work.
+                        if classes[tci].loc != ClassLoc::Root {
+                            tx_ok = false;
+                            break;
+                        }
                         let target = classes[tci].name.clone();
                         ctor_args.push(crate::tx::TxCtorArg {
                             arg: arg.clone(),
@@ -3157,9 +3190,24 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             if !tx_ok {
                 break;
             }
+            // A host record's embedded arenas ride as NestedArena fields
+            // (same order as the store's own record literal: contributions
+            // first, then embedded arenas).
+            for d in classes.iter() {
+                if let ClassLoc::Embedded(h) = d.loc {
+                    if h == ci && d.owns_records {
+                        fields.push(crate::tx::TxField {
+                            emitted: d.arena_fld.clone(),
+                            init: crate::tx::TxFieldInit::NestedArena(d.name.clone()),
+                        });
+                    }
+                }
+            }
             // `on_add` hooks firing at construction of this class — the
             // same member-arrows loop the add op itself uses, so replay
-            // fires exactly what direct construction fires.
+            // fires exactly what direct construction fires. An embedded
+            // class's records are built inside the host's field init,
+            // where per-record store hooks cannot fire — gate off instead.
             let mut onadd_hooks: Vec<Ident2> = Vec::new();
             for &(mi, _me) in &cl.members {
                 for info in &inst_infos[mi] {
@@ -3174,6 +3222,10 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         .push(format_ident!("__onadd_{}_{}", snake(&members[mi].0.to_string()), info.decl.name));
                 }
             }
+            if !onadd_hooks.is_empty() && classes[ci].loc != ClassLoc::Root {
+                tx_ok = false;
+                break;
+            }
             // The per-entity marker is the canonical member's per-instance
             // entity marker (finish_compose mints one per closed element).
             let (m0i, m0e) = cl.members[0];
@@ -3182,6 +3234,10 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             tx_entities.push(crate::tx::TxEntity {
                 name: cl.name.clone(),
                 arena: cl.arena_fld.clone(),
+                host: match cl.loc {
+                    ClassLoc::Root => None,
+                    ClassLoc::Embedded(h) => Some(classes[h].name.clone()),
+                },
                 ctor_args,
                 onadd_hooks,
                 fields,
@@ -3240,6 +3296,15 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
                         });
                     }
                     if d.has(|c| matches!(c, Clause::CtorArg { .. })) {
+                        // A set verb's self is a record ref; an embedded
+                        // record's ref is a path id, whose host-translation
+                        // staging is the keyed-carry step's. The field
+                        // itself still carries and dangler-checks (the
+                        // entity's ctor args cover it) — only the verb is
+                        // skipped.
+                        if classes[sc].loc != ClassLoc::Root {
+                            continue;
+                        }
                         tx_sets.push(crate::tx::TxSet {
                             arrow: basis_of(i, &a.name),
                             self_entity: classes[sc].name.clone(),

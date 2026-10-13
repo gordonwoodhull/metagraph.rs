@@ -2140,6 +2140,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     crate::tx::TxEntity {
                         name: e.name.clone(),
                         arena: arena_fld(&e.name),
+                        host: None, // a flat pattern has no embedding
                         ctor_args,
                         onadd_hooks,
                         fields,

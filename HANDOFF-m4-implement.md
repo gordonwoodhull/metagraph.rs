@@ -1,7 +1,7 @@
 # HANDOFF — M4 implementation (write-side builders)
 
 Branch `worktree-m4-implement`, worktree `.claude/worktrees/m4-implement`,
-based on main 4904680 + steps 1–8. Plan: plans/milestone-4-builders.md
+based on main 4904680 + steps 1–9. Plan: plans/milestone-4-builders.md
 (the contract — checklist § "Implementation checklist", dependency line
 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 12); 9 → 11; (8, 11) → 10).
 This file: state, settled decisions, and the per-step continuation guide.
@@ -181,7 +181,70 @@ Step-8 notes (scope decisions, each reasoned):
   `HandleToRef` is the exception — it's marker-generic read-side
   bridging, emitted under the canonical member's instance marker.
 
-Not started: steps 9–14.
+- **Step 9** (this commit): nested stores. `TxEntity` gained
+  `host: Option<Ident2>` (the embedding host entity, depth 1) and
+  `TxFieldInit::NestedArena(entity)` (a host record's embedded arena,
+  rebuilt per kept host — filter + remap through the per-host maps).
+  Surface: `tx.within(host) -> SubTx` (owned scope: token + host ref
+  prefix, NO borrow of the tx; nested adds thread `&mut Tx` and
+  re-check the token per call), `SubTx::add_<e>(&self, tx, args)`
+  returning NOTHING (a nested record's path id is a resolved id;
+  nothing stages a ref to a nested record this step), and
+  `tx.remove_<e>(host, idx)` (Pending host panics at staging). Op
+  variants carry the path as the host ref segment (embedding depth 1
+  — the fixed-shape path the plan allows). Flush: step 1 keeps one
+  removal set per OLD HOST per embedded arena
+  (`Vec<Vec<Option<usize>>>`) with host range-guards before any
+  indexed read; step 2 gains the RemovedPathHost pass (per host
+  removal, first removal wins, nested adds AND removals collected
+  ascending — after the kept-dangler pass, before the staged pass) and
+  per-host kept-sub danglers named `RecordDesc::KeptNested{arena,
+  host, idx}`; step 3 builds per-old-host sub maps (removed host =
+  all-None, the cascade applied at map time and record-copy time);
+  step 4c replays GROUPED root-then-nested (pass 1 fills the root
+  replay tables, pass 2 resolves host segments — Pending via a
+  BOUNDS-CHECKED `get`, the internal-bug "replay table miss" panic).
+  New violation variants (UnknownNestedIdx, DoubleNestedRemoval,
+  RemovedPathHost) and KeptNested emit ONLY for stores with embedded
+  arenas — flat/root-only surfaces are byte-stable. Tests:
+  tests/tx_nested.rs (15 — the probe's 10 as generated equivalents,
+  plus KeptNested/staged danglers, the second embedded entity sharing
+  the scope, check↔flush parity, and the into_edit owned path).
+  46/46 suites green, zero warnings.
+
+Step-9 notes (scope decisions, each reasoned):
+
+- **The replay-table miss test IS the same-crate test the plan
+  offered.** `tests/tx_nested.rs` is the crate the `implement!`
+  expands into, so `tx.token` (pub(crate)) and the runtime's pub
+  `Ref` fields let it forge a stamped `Pending(999)` host ref. The
+  plan's either/or ("same-crate unit test or codegen-review
+  invariant") resolves to the test.
+- **Nested adds return no ref.** The probe returns (); a `Pending`
+  ref to a nested record would need path-shaped Pending payloads
+  (host ref + op index), and no op consumes one this step — embedded
+  `set_` selves (path-id host translation at staging) and refs to
+  nested records are the keyed-carry step's. Embedded entities DO get
+  the uniform ref alias + Into + `HandleToRef` emission (harmless,
+  and the later steps will need them).
+- **Embedded entities: existence + field-one carries only.** Embedded
+  intrusive chains and per-host keyed maps (Hierarchy's
+  `sub.subnode`) keep their stores' Tx gated OFF — both carry
+  per-host state, which is step 11's keyed-carry work; ctor args
+  targeting an embedded entity likewise gate off (a path-id remap has
+  no meaning yet), as does an embedded class with on_add hooks (the
+  skeleton builds embedded records inside the host's field init,
+  where per-record store hooks cannot fire).
+- **The probe's builder-removal half has no equivalent.** Probe test
+  10's live `remove_outer`/`remove_sub` are builder ops; generated
+  stores stage removals through the Tx only. The path-id half is
+  kept; flush-side compaction is covered by the other tests.
+- **Multi-host naming is written but unexercised.** One host entity →
+  `SubTx`/`within`; several would emit `<Host>SubTx`/`within_<host>`.
+  The fixture has exactly one host (OuterNode); the general rule is
+  codegen-review surface, not tested.
+
+Not started: steps 10–14.
 
 Step-6 notes (deviations from this handoff's pre-work, each reasoned):
 
@@ -565,6 +628,15 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
+- 2026-10-13 (impl-m4-6, cont.): step 9 DONE (see "Where things stand"
+  and the step-9 notes — within/SubTx scopes, per-host removal sets
+  and maps, RemovedPathHost, grouped root-then-nested replay with the
+  bounds-checked replay-table get + same-crate forge test). 46/46
+  suites green, zero warnings at the commit. Next: step 10
+  (induction — the induct-flush probe's 17 tests + the edge-induced
+  store's Tx extension impl; the probe's REPORT pins the
+  standalone-equals-record-plus-keyed-insert rule and the induced-key
+  staging check).
 - 2026-10-12 (impl-m4-6): step 8 DONE (see "Where things stand" and
   the step-8 notes — flat store-level keyed Tx, composed TxModel
   emission under the root-only gate, inherent-surface decision, the

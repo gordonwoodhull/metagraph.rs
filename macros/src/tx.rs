@@ -33,8 +33,15 @@ use crate::grammar::{camel, snake};
 pub(crate) struct TxEntity {
     /// Entity name (`Node`); the flat handle type shares it.
     pub name: Ident2,
-    /// Arena field on the store (`node_arena`).
+    /// Arena field on the store (`node_arena`) — or, when embedded, on the
+    /// host record.
     pub arena: Ident2,
+    /// Embedding host's entity name when this entity's arena is a `Vec`
+    /// field of the host entity's record (a nested store — the composed
+    /// placement, depth 1). Embedded entities stage adds through `SubTx`
+    /// scopes and removals by host ref + old index; nothing stages a ref
+    /// TO an embedded record this step (their adds return no `Pending`).
+    pub host: Option<Ident2>,
     /// Constructor args in declaration order: (arg name, record field,
     /// target id type, ref alias of the target entity).
     pub ctor_args: Vec<TxCtorArg>,
@@ -89,6 +96,11 @@ pub(crate) enum TxFieldInit {
     /// `Vec`/`HashMap` container: born empty (its carry class arrives with
     /// the keyed/phased steps).
     New,
+    /// A host record's embedded arena — `Vec<<Sub>Data>` of the named
+    /// embedded entity. The skeleton rebuilds it filtered to the sub
+    /// records kept under this host, each sub record's own fields remapped
+    /// (the per-host compaction map indexed by THIS host's old id).
+    NestedArena(Ident2),
 }
 
 pub(crate) struct TxField {
@@ -297,7 +309,12 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // -- the op queue ------------------------------------------------------
     // One variant per staging verb; op indices count every queued op,
     // root and nested alike, in submission order — the index is both the
-    // `Pending` ref payload and the flush error attribution handle.
+    // `Pending` ref payload and the flush error attribution handle. A
+    // nested op carries its path as the HOST REF (never a resolved id —
+    // the host may be `Pending`; embedding depth 1, so the path is the
+    // single segment), and a nested removal names its target by host ref +
+    // old embedded-arena index (a path id is a resolved id — exactly what
+    // staging must not require).
     let mut op_variants = TokenStream2::new();
     for e in &m.entities {
         let add = format_ident!("Add{}", e.name);
@@ -309,10 +326,19 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         });
         let payload = format_ident!("{}", snake(&e.name.to_string()));
         let ref_alias = format_ident!("{}Ref", e.name);
-        op_variants.extend(quote! {
-            #add { #(#arg_fields)* },
-            #remove { #payload: #ref_alias },
-        });
+        match &e.host {
+            None => op_variants.extend(quote! {
+                #add { #(#arg_fields)* },
+                #remove { #payload: #ref_alias },
+            }),
+            Some(host) => {
+                let host_ref = format_ident!("{}Ref", host);
+                op_variants.extend(quote! {
+                    #add { host: #host_ref, #(#arg_fields)* },
+                    #remove { host: #host_ref, idx: u32 },
+                });
+            }
+        }
     }
     for i in &m.inserts {
         let variant = format_ident!("Insert{}", camel(&i.arrow.to_string()));
@@ -361,61 +387,195 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let snake_name = snake(&e.name.to_string());
         let add_op = format_ident!("add_{}", snake_name);
         let remove_op = format_ident!("remove_{}", snake_name);
-        let ref_alias = format_ident!("{}Ref", e.name);
-        let into_trait = format_ident!("Into{}Arg", e.name);
-        let into_fn = format_ident!("into_{}_ref", snake_name);
         let add_variant = format_ident!("Add{}", e.name);
         let remove_variant = format_ident!("Remove{}", e.name);
         let payload = format_ident!("{}", snake_name);
-        let arg_defs = e.ctor_args.iter().map(|c| {
-            let a = &c.arg;
-            let t = &c.target_into_trait;
-            quote!(#a: impl #t,)
-        });
-        let arg_conv = e.ctor_args.iter().map(|c| {
-            let a = &c.arg;
-            let f = &c.target_into_fn;
-            quote!(let #a = #a.#f(self);)
-        });
-        let arg_use = e.ctor_args.iter().map(|c| &c.arg);
-        let doc_add = format!(
-            "Stage a new `{}` record; returns its provisional ref — `Pending`, \
-             naming this op's index. Staging never touches the store.",
-            e.name
-        );
-        let doc_remove = format!(
-            "Stage the removal of an old `{}` record. Removal is set-theoretic \
-             (rebuild-without) and never replays; removal of a `Pending` ref is \
-             a staging bug and panics here — staged entities have no old record \
-             to remove.",
-            e.name
-        );
-        staging.extend(quote! {
-            #[doc = #doc_add]
-            pub fn #add_op(&mut self, #(#arg_defs)*) -> #ref_alias {
-                #(#arg_conv)*
-                let op_index = self.ops.len() as u32;
-                self.ops.push(Op::#add_variant { #(#arg_use),* });
-                #rt::tx::Ref {
-                    token: self.token,
-                    kind: #rt::tx::RefKind::Pending(op_index),
+        if e.host.is_none() {
+            let ref_alias = format_ident!("{}Ref", e.name);
+            let into_trait = format_ident!("Into{}Arg", e.name);
+            let into_fn = format_ident!("into_{}_ref", snake_name);
+            let arg_defs = e.ctor_args.iter().map(|c| {
+                let a = &c.arg;
+                let t = &c.target_into_trait;
+                quote!(#a: impl #t,)
+            });
+            let arg_conv = e.ctor_args.iter().map(|c| {
+                let a = &c.arg;
+                let f = &c.target_into_fn;
+                quote!(let #a = #a.#f(self);)
+            });
+            let arg_use = e.ctor_args.iter().map(|c| &c.arg).collect::<Vec<_>>();
+            let doc_add = format!(
+                "Stage a new `{}` record; returns its provisional ref — `Pending`, \
+                 naming this op's index. Staging never touches the store.",
+                e.name
+            );
+            let doc_remove = format!(
+                "Stage the removal of an old `{}` record. Removal is set-theoretic \
+                 (rebuild-without) and never replays; removal of a `Pending` ref is \
+                 a staging bug and panics here — staged entities have no old record \
+                 to remove.",
+                e.name
+            );
+            staging.extend(quote! {
+                #[doc = #doc_add]
+                pub fn #add_op(&mut self, #(#arg_defs)*) -> #ref_alias {
+                    #(#arg_conv)*
+                    let op_index = self.ops.len() as u32;
+                    self.ops.push(Op::#add_variant { #(#arg_use),* });
+                    #rt::tx::Ref {
+                        token: self.token,
+                        kind: #rt::tx::RefKind::Pending(op_index),
+                    }
+                }
+
+                #[doc = #doc_remove]
+                pub fn #remove_op(&mut self, #payload: impl #into_trait) {
+                    let #payload = #payload.#into_fn(self);
+                    match #payload.kind {
+                        #rt::tx::RefKind::Existing(_) => {
+                            self.ops.push(Op::#remove_variant { #payload });
+                        }
+                        #rt::tx::RefKind::Pending(_) => panic!(
+                            "remove_{} of a Pending ref: staged entities have no old \
+                             record to remove; removal is set-theoretic and never \
+                             replays",
+                            #snake_name
+                        ),
+                    }
+                }
+            });
+        } else {
+            // Nested removal stays on `Tx`: it names its target by host ref
+            // + old embedded-arena index (the same information as a path,
+            // over refs — a path id is a resolved id, exactly what staging
+            // must not require). A `Pending` host panics: removal is
+            // set-theoretic over old-store records, and a not-yet-flushed
+            // host has none.
+            let host = e.host.as_ref().unwrap();
+            let host_into_trait = format_ident!("Into{}Arg", host);
+            let host_into_fn = format_ident!("into_{}_ref", snake(&host.to_string()));
+            let doc_remove_nested = format!(
+                "Stage the removal of one old `{}` record, by host ref and old \
+                 embedded-arena index. A `Pending` host panics here — removal is \
+                 set-theoretic over old-store records; staging under a \
+                 not-yet-flushed host may only add.",
+                e.name
+            );
+            staging.extend(quote! {
+                #[doc = #doc_remove_nested]
+                pub fn #remove_op(&mut self, host: impl #host_into_trait, idx: u32) {
+                    let host = host.#host_into_fn(self);
+                    match host.kind {
+                        #rt::tx::RefKind::Existing(_) => {
+                            self.ops.push(Op::#remove_variant { host, idx });
+                        }
+                        #rt::tx::RefKind::Pending(_) => panic!(
+                            "remove_{} of a Pending host: removal is set-theoretic \
+                             over old-store records; staging under a not-yet-flushed \
+                             host may only add",
+                            #snake_name
+                        ),
+                    }
+                }
+            });
+        }
+    }
+
+    // -- nested staging scopes (`within` + `SubTx`) -------------------------
+    // One scope type per host entity that has embedded arenas (depth 1:
+    // the path prefix is the single host REF, captured verbatim — the host
+    // may be `Pending`, resolution is deferred to flush). The scope holds
+    // NO borrow of the transaction — root and nested staging interleave
+    // freely on the same queue — so each nested staging call threads
+    // `&mut Tx` explicitly; the captured token is re-checked per call, so
+    // a scope from a dead transaction cannot stage either.
+    let host_entities: Vec<&Ident2> = {
+        let mut v: Vec<&Ident2> = Vec::new();
+        for e in &m.entities {
+            if let Some(h) = &e.host {
+                if !v.iter().any(|x| *x == h) {
+                    v.push(h);
                 }
             }
-
-            #[doc = #doc_remove]
-            pub fn #remove_op(&mut self, #payload: impl #into_trait) {
-                let #payload = #payload.#into_fn(self);
-                match #payload.kind {
-                    #rt::tx::RefKind::Existing(_) => {
-                        self.ops.push(Op::#remove_variant { #payload });
-                    }
-                    #rt::tx::RefKind::Pending(_) => panic!(
-                        "remove_{} of a Pending ref: staged entities have no old \
-                         record to remove; removal is set-theoretic and never \
-                         replays",
-                        #snake_name
-                    ),
+        }
+        v
+    };
+    let multi_host = host_entities.len() > 1;
+    let mut subtx_defs = TokenStream2::new();
+    for h in &host_entities {
+        let scope_ty = if multi_host {
+            format_ident!("{}SubTx", h)
+        } else {
+            format_ident!("SubTx")
+        };
+        let within_fn = if multi_host {
+            format_ident!("within_{}", snake(&h.to_string()))
+        } else {
+            format_ident!("within")
+        };
+        let host_ref = format_ident!("{}Ref", h);
+        let host_into_trait = format_ident!("Into{}Arg", h);
+        let host_into_fn = format_ident!("into_{}_ref", snake(&h.to_string()));
+        let mut scope_verbs = TokenStream2::new();
+        for e in m.entities.iter().filter(|e| e.host.as_ref() == Some(*h)) {
+            let snake_name = snake(&e.name.to_string());
+            let add_op = format_ident!("add_{}", snake_name);
+            let add_variant = format_ident!("Add{}", e.name);
+            let arg_defs = e.ctor_args.iter().map(|c| {
+                let a = &c.arg;
+                let t = &c.target_into_trait;
+                quote!(#a: impl #t,)
+            });
+            let arg_conv = e.ctor_args.iter().map(|c| {
+                let a = &c.arg;
+                let f = &c.target_into_fn;
+                quote!(let #a = #a.#f(tx);)
+            });
+            let arg_use = e.ctor_args.iter().map(|c| &c.arg).collect::<Vec<_>>();
+            let doc_add = format!(
+                "Stage a new `{}` record under this scope's host: queues the op \
+                 (with the path prefix — the host REF, not a resolved id) on the \
+                 threaded transaction. Returns nothing: a nested record's path id \
+                 is a resolved id, and staged records resolve only at flush.",
+                e.name
+            );
+            scope_verbs.extend(quote! {
+                #[doc = #doc_add]
+                pub fn #add_op(&self, tx: &mut Tx<'_>, #(#arg_defs)*) {
+                    assert!(
+                        self.token == tx.token,
+                        "SubTx minted by a different transaction: it stages onto a \
+                         queue its path was not recorded against"
+                    );
+                    #(#arg_conv)*
+                    tx.ops.push(Op::#add_variant { host: self.host, #(#arg_use),* });
                 }
+            });
+        }
+        let doc_within = format!(
+            "Open a nested staging scope under `host`, recording the path prefix \
+             — the REF, never a resolved id (the host may be `Pending`; \
+             resolution is deferred to flush). The scope holds no borrow of the \
+             transaction; thread `&mut Tx` into each nested staging call."
+        );
+        subtx_defs.extend(quote! {
+            #[doc = concat!("A nested staging scope: the path prefix a set of nested ops shares (the host ref, captured verbatim). Holds no borrow of the transaction — the token is re-checked per call.")]
+            #[derive(Clone, Debug)]
+            pub struct #scope_ty {
+                token: #rt::tx::TxToken,
+                host: #host_ref,
+            }
+
+            impl #scope_ty {
+                #scope_verbs
+            }
+        });
+        staging.extend(quote! {
+            #[doc = #doc_within]
+            pub fn #within_fn(&self, host: impl #host_into_trait) -> #scope_ty {
+                let host = host.#host_into_fn(self);
+                #scope_ty { token: self.token, host }
             }
         });
     }
@@ -655,6 +815,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         data: Ident2,
         id_ty: Ident2,
         arena_str: String,
+        /// Embedding host's index in `ents` (a nested-store entity).
+        host: Option<usize>,
         count: Ident2,   // old_<snake>_count
         map: Ident2,     // <snake>_map
         removed: Ident2, // removed_<snake>
@@ -672,6 +834,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 data: format_ident!("{}Data", e.name),
                 id_ty: format_ident!("{}Id", e.name),
                 arena_str: snake(&e.name.to_string()),
+                host: None, // linked below, once every name is known
                 count: format_ident!("old_{}_count", snake(&e.name.to_string())),
                 map: format_ident!("{}_map", snake(&e.name.to_string())),
                 removed: format_ident!("removed_{}", snake(&e.name.to_string())),
@@ -681,6 +844,16 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         })
         .collect();
+    // Link each embedded entity to its host's index (a host is itself a
+    // root-level entity — embedding depth 1).
+    let mut ents = ents;
+    for (i, e) in m.entities.iter().enumerate() {
+        if let Some(h) = &e.host {
+            let hi = ents.iter().position(|x| &x.name == h).expect("host entity");
+            ents[i].host = Some(hi);
+        }
+    }
+    let ents = ents;
     let ent_of = |name: &Ident2| ents.iter().find(|x| &x.name == name).expect("entity");
 
     // Per-set derived names: the last-wins effective-value table (step 1,
@@ -705,10 +878,35 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         })
         .collect();
 
+    // The nested-store surface (emitted only when the store has embedded
+    // arenas): path-coherence and per-host nested-index violations, and the
+    // kept-record descriptor that names a sub record by (host, idx).
+    let has_nested = ents.iter().any(|x| x.host.is_some());
+    let nested_desc_variant = has_nested.then(|| {
+        quote!(
+            #[doc = "An old-store record in an embedded arena, kept from the previous store — named by its arena, its host's old id, and its old embedded-arena index."]
+            KeptNested { arena: &'static str, host: u32, idx: u32 },
+        )
+    });
+    let nested_violation_variants = has_nested.then(|| {
+        quote!(
+            #[doc = "A nested removal named an embedded-arena index outside the named host's old arena."]
+            UnknownNestedIdx { op: usize, arena: &'static str, host: u32, idx: u32 },
+            #[doc = "The same old embedded-arena index under the same host was removed twice."]
+            DoubleNestedRemoval { op: usize, arena: &'static str, host: u32, idx: u32 },
+            #[doc = "Ops staged under a nested path whose host the change set removes. The change set must be coherent; a silent discard would hide staging bugs. `nested_ops` is ascending (staged adds AND removals under the host both qualify — a nested removal targets a record the change set is already deleting); `removal_op` names the host's removal op. Attribution: each removed host is claimed by its FIRST removal op; hosts are reported in removal-op submission order."]
+            RemovedPathHost { arena: &'static str, host: u32, nested_ops: ::std::vec::Vec<usize>, removal_op: usize },
+        )
+    });
+
     // -- flush: the error/report surface ------------------------------------
     let report_fields = ents.iter().map(|x| {
         let f = &x.map;
-        quote!(#[doc = concat!("Old->new id map of `", stringify!(#f), "'s arena: old-id-indexed, `None` where removed.")] pub #f: ::std::vec::Vec<::core::option::Option<u32>>,)
+        if x.host.is_some() {
+            quote!(#[doc = concat!("Old->new index maps of `", stringify!(#f), "'s embedded arenas: indexed by OLD host id, then old embedded-arena index; `None` where removed. A removed host's map is all-`None` (the arena dies with its host). Staged records append per host in staged order.")] pub #f: ::std::vec::Vec<::std::vec::Vec<::core::option::Option<u32>>>,)
+        } else {
+            quote!(#[doc = concat!("Old->new id map of `", stringify!(#f), "'s arena: old-id-indexed, `None` where removed.")] pub #f: ::std::vec::Vec<::core::option::Option<u32>>,)
+        }
     });
     let report_init = ents.iter().map(|x| {
         let f = &x.map;
@@ -716,14 +914,21 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     });
     // The analysis struct's per-entity members, in the pipeline's local
     // names, so the destructure in `flush` hands steps 3-7 the same
-    // bindings the inlined pipeline used to declare.
+    // bindings the inlined pipeline used to declare. An embedded entity
+    // carries ONE per-host removal set (indexed by old host id, then old
+    // embedded-arena index) — no global count or kept set: its arenas are
+    // per-record.
     let analysis_struct_fields = ents.iter().flat_map(|x| {
         let (c, removed, removed_by) = (&x.count, &x.removed, &x.removed_by);
-        [
-            quote!(#c: usize,),
-            quote!(#removed: ::std::vec::Vec<bool>,),
-            quote!(#removed_by: ::std::vec::Vec<::core::option::Option<usize>>,),
-        ]
+        if x.host.is_some() {
+            vec![quote!(#removed_by: ::std::vec::Vec<::std::vec::Vec<::core::option::Option<usize>>>,)]
+        } else {
+            vec![
+                quote!(#c: usize,),
+                quote!(#removed: ::std::vec::Vec<bool>,),
+                quote!(#removed_by: ::std::vec::Vec<::core::option::Option<usize>>,),
+            ]
+        }
     });
     // The set verbs' last-wins tables ride the analysis too: step 4's
     // skeleton init (the honor case) and step 4c's replay consume them.
@@ -734,7 +939,13 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     });
     let analysis_members: Vec<Ident2> = ents
         .iter()
-        .flat_map(|x| [x.count.clone(), x.removed.clone(), x.removed_by.clone()])
+        .flat_map(|x| {
+            if x.host.is_some() {
+                vec![x.removed_by.clone()]
+            } else {
+                vec![x.count.clone(), x.removed.clone(), x.removed_by.clone()]
+            }
+        })
         .chain(sets.iter().map(|s| s.eff.clone()))
         .collect();
     let analysis_fields = analysis_members.iter().map(|m| quote!(#m,));
@@ -744,6 +955,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         pub enum RecordDesc {
             Kept { arena: &'static str, id: u32 },
+            #nested_desc_variant
             Staged(u32),
         }
 
@@ -758,6 +970,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             DanglingEndpoint { op: usize, record: RecordDesc, endpoint_arena: &'static str, endpoint: u32 },
             #[doc = "A staged `set_` named a record the same change set removes: re-pointing needs an old record to re-point. Names both ops — the `set_` op and the removal op that got there first."]
             SetOfRemoved { op: usize, arena: &'static str, id: u32, removed_by: usize },
+            #nested_violation_variants
             #[doc = "Final `validate()` failed — defensive arm; the pipeline should never produce damage."]
             ValidateFailed { detail: ::std::string::String },
         }
@@ -806,18 +1019,35 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // Step 1 — counts, kept sets, and the op scan (removals resolve;
     // every `Existing` ref range-validates; anything read by a later step
     // is range-guarded — a flagged id must never be indexed).
-    let s1_counts = ents.iter().map(|x| {
+    let s1_counts = ents.iter().filter(|x| x.host.is_none()).map(|x| {
         let c = &x.count;
         let a = &x.arena;
         quote!(let #c = old.#a.len();)
     });
     let s1_state = ents.iter().map(|x| {
         let (removed, removed_by, c) = (&x.removed, &x.removed_by, &x.count);
-        quote!(
-            let mut #removed = ::std::vec![false; #c];
-            let mut #removed_by: ::std::vec::Vec<::core::option::Option<usize>> =
-                ::std::vec![::core::option::Option::None; #c];
-        )
+        match x.host {
+            None => quote!(
+                let mut #removed = ::std::vec![false; #c];
+                let mut #removed_by: ::std::vec::Vec<::core::option::Option<usize>> =
+                    ::std::vec![::core::option::Option::None; #c];
+            ),
+            // Per old host, one removal set for its embedded arena (kept
+            // sets are strictly per arena — a host removal does not edit
+            // them; the cascade is applied at map time and record-copy
+            // time, and both places agree).
+            Some(hi) => {
+                let h = &ents[hi];
+                let (h_arena, e_arena) = (&h.arena, &x.arena);
+                quote!(
+                    let mut #removed_by: ::std::vec::Vec<::std::vec::Vec<::core::option::Option<usize>>> =
+                        old.#h_arena
+                            .iter()
+                            .map(|hrec| ::std::vec![::core::option::Option::None; hrec.#e_arena.len()])
+                            .collect();
+                )
+            }
+        }
     });
     // The set verbs' effective-value tables: one slot per old record of the
     // self entity, filled last-wins (a later set_ overwrites an earlier one
@@ -834,9 +1064,24 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     });
     let s1_add_arms = m.entities.iter().map(|e| {
         let variant = format_ident!("Add{}", e.name);
-        if e.ctor_args.is_empty() {
-            return quote!(Op::#variant {} => {});
-        }
+        // A nested add's host segment range-validates like any other
+        // `Existing` ref (against the HOST arena's old count).
+        let host_check = e.host.as_ref().map(|h| {
+            let hx = ent_of(h);
+            let (h_count, h_str) = (&hx.count, &hx.arena_str);
+            quote! {
+                if let #rt::tx::RefKind::Existing(id) = host.kind {
+                    if (id).0 as usize >= #h_count {
+                        violations.push(Violation::UnknownOldId {
+                            op: op_index,
+                            arena: #h_str,
+                            id: (id).0,
+                        });
+                    }
+                }
+            }
+        });
+        let host_pat = e.host.as_ref().map(|_| quote!(host,));
         let checks = e.ctor_args.iter().map(|c| {
             let t = ent_of(&c.target_entity);
             let (t_count, t_str) = (&t.count, &t.arena_str);
@@ -855,7 +1100,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         });
         let arg_names = e.ctor_args.iter().map(|c| &c.arg);
         quote! {
-            Op::#variant { #(#arg_names),* } => {
+            Op::#variant { #host_pat #(#arg_names),* } => {
+                #host_check
                 #(#checks)*
             }
         }
@@ -865,27 +1111,74 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let x = ent_of(&e.name);
         let payload = &x.snake;
         let (removed, removed_by, arena_str) = (&x.removed, &x.removed_by, &x.arena_str);
-        quote! {
-            Op::#variant { #payload } => {
-                if let #rt::tx::RefKind::Existing(id) = #payload.kind {
-                    match #removed_by.get((id).0 as usize) {
-                        ::core::option::Option::None => {
-                            violations.push(Violation::UnknownOldId {
-                                op: op_index,
-                                arena: #arena_str,
-                                id: (id).0,
-                            });
+        match x.host {
+            None => quote! {
+                Op::#variant { #payload } => {
+                    if let #rt::tx::RefKind::Existing(id) = #payload.kind {
+                        match #removed_by.get((id).0 as usize) {
+                            ::core::option::Option::None => {
+                                violations.push(Violation::UnknownOldId {
+                                    op: op_index,
+                                    arena: #arena_str,
+                                    id: (id).0,
+                                });
+                            }
+                            ::core::option::Option::Some(::core::option::Option::Some(_)) => {
+                                violations.push(Violation::DoubleRemoval {
+                                    op: op_index,
+                                    arena: #arena_str,
+                                    id: (id).0,
+                                });
+                            }
+                            ::core::option::Option::Some(::core::option::Option::None) => {
+                                #removed[(id).0 as usize] = true;
+                                #removed_by[(id).0 as usize] = ::core::option::Option::Some(op_index);
+                            }
                         }
-                        ::core::option::Option::Some(::core::option::Option::Some(_)) => {
-                            violations.push(Violation::DoubleRemoval {
-                                op: op_index,
-                                arena: #arena_str,
-                                id: (id).0,
-                            });
-                        }
-                        ::core::option::Option::Some(::core::option::Option::None) => {
-                            #removed[(id).0 as usize] = true;
-                            #removed_by[(id).0 as usize] = ::core::option::Option::Some(op_index);
+                    }
+                }
+            },
+            // A nested removal: the host range-validates against its own
+            // arena (a flagged host must never index the per-host sets —
+            // the spike7-oob rule), then the index against that host's old
+            // embedded arena.
+            Some(hi) => {
+                let h = &ents[hi];
+                let (h_count, h_str, h_arena) = (&h.count, &h.arena_str, &h.arena);
+                let e_arena = &x.arena;
+                quote! {
+                    Op::#variant { host, idx } => {
+                        if let #rt::tx::RefKind::Existing(hid) = host.kind {
+                            let hidx = (hid).0 as usize;
+                            if hidx >= #h_count {
+                                violations.push(Violation::UnknownOldId {
+                                    op: op_index,
+                                    arena: #h_str,
+                                    id: (hid).0,
+                                });
+                            } else if (*idx as usize) >= old.#h_arena[hidx].#e_arena.len() {
+                                violations.push(Violation::UnknownNestedIdx {
+                                    op: op_index,
+                                    arena: #arena_str,
+                                    host: (hid).0,
+                                    idx: *idx,
+                                });
+                            } else {
+                                match #removed_by[hidx][*idx as usize] {
+                                    ::core::option::Option::Some(_) => {
+                                        violations.push(Violation::DoubleNestedRemoval {
+                                            op: op_index,
+                                            arena: #arena_str,
+                                            host: (hid).0,
+                                            idx: *idx,
+                                        });
+                                    }
+                                    ::core::option::Option::None => {
+                                        #removed_by[hidx][*idx as usize] =
+                                            ::core::option::Option::Some(op_index);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1008,38 +1301,144 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // `set_` re-pointed the field: the HONOR reading judges the record at
     // its EFFECTIVE endpoint (the set op's endpoint was checked at the op,
     // attributed to the naming op), so a re-pointed field skips the
-    // old-target check entirely.
+    // old-target check entirely. Embedded records are walked per kept host
+    // (a removed host's contents die with it — the cascade — so only ops
+    // STAGED under it are errors, see RemovedPathHost) and named by
+    // (arena, host, idx); embedded fields have no set verb this step, so
+    // they check the old target unconditionally.
     let s2_kept = m.entities.iter().filter(|e| !e.ctor_args.is_empty()).map(|e| {
         let x = ent_of(&e.name);
-        let (c, removed, arena, arena_str) = (&x.count, &x.removed, &x.arena, &x.arena_str);
+        let (arena_str, e_arena) = (&x.arena_str, &x.arena);
+        // The record descriptor and loop shape differ by placement; the
+        // per-field check body is shared.
+        let (record_desc, honor_index): (TokenStream2, bool) = match x.host {
+            None => (
+                quote!(RecordDesc::Kept { arena: #arena_str, id: old_id as u32 }),
+                true,
+            ),
+            Some(_) => (
+                quote!(RecordDesc::KeptNested {
+                    arena: #arena_str,
+                    host: old_host as u32,
+                    idx: old_idx as u32,
+                }),
+                false,
+            ),
+        };
         let checks = e.ctor_args.iter().map(|ca| {
             let t = ent_of(&ca.target_entity);
             let (t_removed, t_removed_by, t_str) = (&t.removed, &t.removed_by, &t.arena_str);
             let f = &ca.arg; // the field name; the honor table is basis-named
-            let eff = format_ident!("eff_{}", ca.basis);
-            quote! {
-                {
-                    if #eff[old_id].is_none() {
-                        let v = rec.#f;
-                        if #t_removed[(v).0 as usize] {
-                            violations.push(Violation::DanglingEndpoint {
-                                op: #t_removed_by[(v).0 as usize].unwrap(),
-                                record: RecordDesc::Kept { arena: #arena_str, id: old_id as u32 },
-                                endpoint_arena: #t_str,
-                                endpoint: (v).0,
-                            });
+            let has_set = honor_index
+                && m.sets
+                    .iter()
+                    .any(|s| s.self_entity == e.name && s.arrow == ca.basis);
+            let honor_guard = has_set.then(|| {
+                let eff = format_ident!("eff_{}", ca.basis);
+                quote!(if #eff[old_id].is_none())
+            });
+            quote!({
+                #honor_guard {
+                    let v = rec.#f;
+                    if #t_removed[(v).0 as usize] {
+                        violations.push(Violation::DanglingEndpoint {
+                            op: #t_removed_by[(v).0 as usize].unwrap(),
+                            record: #record_desc,
+                            endpoint_arena: #t_str,
+                            endpoint: (v).0,
+                        });
+                    }
+                }
+            })
+        });
+        match x.host {
+            None => {
+                let (c, removed, arena) = (&x.count, &x.removed, &x.arena);
+                quote! {
+                    for old_id in 0..#c {
+                        if #removed[old_id] {
+                            continue;
+                        }
+                        let rec = &old.#arena[old_id];
+                        #(#checks)*
+                    }
+                }
+            }
+            Some(hi) => {
+                let h = &ents[hi];
+                let (h_count, h_removed, h_arena) = (&h.count, &h.removed, &h.arena);
+                let e_removed_by = &x.removed_by;
+                quote! {
+                    for old_host in 0..#h_count {
+                        if #h_removed[old_host] {
+                            continue; // the cascade: contents die with the host
+                        }
+                        for old_idx in 0..old.#h_arena[old_host].#e_arena.len() {
+                            if #e_removed_by[old_host][old_idx].is_some() {
+                                continue;
+                            }
+                            let rec = &old.#h_arena[old_host].#e_arena[old_idx];
+                            #(#checks)*
                         }
                     }
                 }
             }
-        });
-        quote! {
-            for old_id in 0..#c {
-                if #removed[old_id] {
-                    continue;
+        }
+    });
+
+    // Step 2, path coherence (nested stores) — an op staged under a
+    // REMOVED `Existing` host names a record the change set itself is
+    // deleting: report it, never silently discard. Per host removal (first
+    // removal wins — a second removal of the same id was already flagged
+    // as DoubleRemoval), every nested add AND nested removal staged under
+    // it is collected ascending (a nested removal targets a record already
+    // going away — the plan's "remove of a removed element" in sub-level
+    // clothing). Range-guarded: a flagged host id must never reach an
+    // indexed read. Runs before compaction so the report names old ids.
+    let s2_removed_path_hosts = host_entities.iter().map(|h| {
+        let hx = ent_of(h);
+        let (h_count, h_removed_by, h_str) = (&hx.count, &hx.removed_by, &hx.arena_str);
+        let remove_variant = format_ident!("Remove{}", h);
+        let payload = &hx.snake;
+        let child_matches = m
+            .entities
+            .iter()
+            .filter(|e| e.host.as_ref() == Some(*h))
+            .map(|e| {
+                let add_variant = format_ident!("Add{}", e.name);
+                let remove_child = format_ident!("Remove{}", e.name);
+                quote! {
+                    Op::#add_variant { host, .. } | Op::#remove_child { host, .. } => {
+                        ::core::matches!(host.kind, #rt::tx::RefKind::Existing(hh) if hh == hid)
+                    }
                 }
-                let rec = &old.#arena[old_id];
-                #(#checks)*
+            });
+        quote! {
+            for (removal_op, op) in ops.iter().enumerate() {
+                if let Op::#remove_variant { #payload } = op {
+                    if let #rt::tx::RefKind::Existing(hid) = #payload.kind {
+                        let hidx = (hid).0 as usize;
+                        if hidx < #h_count && #h_removed_by[hidx] == ::core::option::Option::Some(removal_op) {
+                            let nested_ops: ::std::vec::Vec<usize> = ops
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, other)| match other {
+                                    #(#child_matches)*
+                                    _ => false,
+                                })
+                                .map(|(i, _)| i)
+                                .collect();
+                            if !nested_ops.is_empty() {
+                                violations.push(Violation::RemovedPathHost {
+                                    arena: #h_str,
+                                    host: (hid).0,
+                                    nested_ops,
+                                    removal_op,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     });
@@ -1067,7 +1466,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         });
         quote! {
-            if let Op::#variant { #(#arg_names),* } = op {
+            if let Op::#variant { #(#arg_names,)* .. } = op {
                 #(#checks)*
             }
         }
@@ -1184,18 +1583,52 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     });
 
-    // Step 3 — compaction maps.
+    // Step 3 — compaction maps. An embedded arena compacts PER OLD HOST:
+    // kept hosts compact their kept sub records in old order; a removed
+    // host's map is all-`None` (the kept sets are strictly per-arena — the
+    // cascade is applied here, at map time, and at record-copy time, and
+    // both places agree).
     let s3_maps = ents.iter().map(|x| {
         let (map, removed, c) = (&x.map, &x.removed, &x.count);
-        quote! {
-            let mut #map: ::std::vec::Vec<::core::option::Option<u32>> =
-                ::std::vec![::core::option::Option::None; #c];
-            {
-                let mut next = 0u32;
-                for (old_id, slot) in #map.iter_mut().enumerate() {
-                    if !#removed[old_id] {
-                        *slot = ::core::option::Option::Some(next);
-                        next += 1;
+        match x.host {
+            None => quote! {
+                let mut #map: ::std::vec::Vec<::core::option::Option<u32>> =
+                    ::std::vec![::core::option::Option::None; #c];
+                {
+                    let mut next = 0u32;
+                    for (old_id, slot) in #map.iter_mut().enumerate() {
+                        if !#removed[old_id] {
+                            *slot = ::core::option::Option::Some(next);
+                            next += 1;
+                        }
+                    }
+                }
+            },
+            Some(hi) => {
+                let h = &ents[hi];
+                let (h_count, h_removed, h_arena) = (&h.count, &h.removed, &h.arena);
+                let (e_arena, e_removed_by) = (&x.arena, &x.removed_by);
+                quote! {
+                    let mut #map: ::std::vec::Vec<::std::vec::Vec<::core::option::Option<u32>>> =
+                        ::std::vec::Vec::with_capacity(#h_count);
+                    for old_host in 0..#h_count {
+                        let old_len = old.__store().#h_arena[old_host].#e_arena.len();
+                        if #h_removed[old_host] {
+                            // Host removed: its embedded arena dies with it.
+                            // Every old sub reports as removed — nothing was
+                            // kept, because there is no host to keep it in.
+                            #map.push(::std::vec![::core::option::Option::None; old_len]);
+                            continue;
+                        }
+                        let mut per_host = ::std::vec![::core::option::Option::None; old_len];
+                        let mut next = 0u32;
+                        for (old_idx, slot) in per_host.iter_mut().enumerate() {
+                            if #e_removed_by[old_host][old_idx].is_none() {
+                                *slot = ::core::option::Option::Some(next);
+                                next += 1;
+                            }
+                        }
+                        #map.push(per_host);
                     }
                 }
             }
@@ -1308,10 +1741,55 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     });
     // A field of a kept record's skeleton literal: ctor-arg ids remapped
     // through the target's map; a derived head/link from its array
-    // (indexed by THIS record's new id); containers Default.
+    // (indexed by THIS record's new id); containers Default; an embedded
+    // arena rebuilt per host (kept subs in old order, their own fields
+    // remapped) from the OLD host record being read as `rec` at old id
+    // `old_id` (both loop paths bind those names).
     let record_field_init = |entity: &Ident2, field: &TxField| -> TokenStream2 {
         let n = &field.emitted;
         match &field.init {
+            TxFieldInit::NestedArena(emb_name) => {
+                let emb_e = m
+                    .entities
+                    .iter()
+                    .find(|e| e.name == *emb_name)
+                    .expect("the embedded entity is a model entity");
+                let emb = ent_of(emb_name);
+                let (emb_map, emb_data) = (&emb.map, &emb.data);
+                // The embedded record's own fields: ctor-arg ids remapped
+                // through the (root-level) target's map — no set verb
+                // exists on an embedded self this step, so the plain branch
+                // is the only one; `Option` fields born None; containers
+                // Default.
+                let sub_inits = emb_e.fields.iter().map(|sf| {
+                    let sn = &sf.emitted;
+                    match &sf.init {
+                        TxFieldInit::CtorArg { target, .. } => {
+                            let t = ent_of(target);
+                            let (t_map, t_id) = (&t.map, &t.id_ty);
+                            quote!(#sn: #t_id(#t_map[(srec.#sn).0 as usize]
+                                .expect("field target kept: step 2 proved it")),)
+                        }
+                        TxFieldInit::None_ => quote!(#sn: ::core::option::Option::None,),
+                        TxFieldInit::New => quote!(#sn: ::std::default::Default::default(),),
+                        TxFieldInit::NestedArena(_) => unreachable!(
+                            "embedding depth 1: an embedded record hosts no arenas"
+                        ),
+                    }
+                });
+                return quote! {
+                    #n: {
+                        let mut v = ::std::vec::Vec::with_capacity(rec.#n.len());
+                        for old_idx in 0..rec.#n.len() {
+                            if let ::core::option::Option::Some(_new_idx) = #emb_map[old_id][old_idx] {
+                                let srec = &rec.#n[old_idx];
+                                v.push(#emb_data { #(#sub_inits)* });
+                            }
+                        }
+                        v
+                    },
+                };
+            }
             TxFieldInit::CtorArg { target, arrow } => {
                 let t = ent_of(target);
                 let (t_map, t_id, t_removed) = (&t.map, &t.id_ty, &t.removed);
@@ -1414,8 +1892,10 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
 
     // Step 4a — the kept skeleton, two write paths over the SAME derived
     // data. Records push/compact in old arena order with on_add hooks
-    // fired per kept record.
-    let s4_borrowed_arena_inits = m.entities.iter().map(|e| {
+    // fired per kept record. Embedded entities have NO top-level arena —
+    // their records are rebuilt inside the host record's NestedArena field
+    // init — so every root-arena loop skips them.
+    let s4_borrowed_arena_inits = m.entities.iter().filter(|e| e.host.is_none()).map(|e| {
         let x = ent_of(&e.name);
         let (arena, c) = (&x.arena, &x.count);
         quote!(#arena: ::std::vec::Vec::with_capacity(#c),)
@@ -1425,7 +1905,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let v = store_field_expr(f);
         quote!(#n: #v,)
     });
-    let s4_borrowed_record_loops = m.entities.iter().map(|e| {
+    let s4_borrowed_record_loops = m.entities.iter().filter(|e| e.host.is_none()).map(|e| {
         let x = ent_of(&e.name);
         let (c, map, arena, data, id_ty) =
             (&x.count, &x.map, &x.arena, &x.data, &x.id_ty);
@@ -1452,7 +1932,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // its read slot old_id, and all derived values (maps, arrays) were
     // computed before the first write, so overwriting a compacted slot
     // can never corrupt a later read.
-    let s4_owned_compactions = m.entities.iter().map(|e| {
+    let s4_owned_compactions = m.entities.iter().filter(|e| e.host.is_none()).map(|e| {
         let x = ent_of(&e.name);
         let (c, map, arena, data, id_ty) =
             (&x.count, &x.map, &x.arena, &x.data, &x.id_ty);
@@ -1483,10 +1963,21 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         quote!(new_store.#n = #v;)
     });
 
-    // Step 4c — replay constructive ops in submission order through the
-    // REAL constructors (on_add growth + insert hooks fire as construction
-    // always fires them). Removals never replay. A `Pending` ref resolves
-    // through its entity's replay table; a miss is an internal bug.
+    // Step 4c — replay constructive ops through the REAL constructors
+    // (on_add growth + insert hooks fire as construction always fires
+    // them), GROUPED root-then-nested: pass 1 replays every root-level op
+    // in submission order and fills the per-entity replay tables; pass 2
+    // replays nested adds in submission order, resolving each op's host
+    // segment — `Existing` through the host's compaction map (host ids
+    // SHIFT under removal; the translation is load-bearing), `Pending`
+    // through the host's replay table, which pass 1 has already filled
+    // completely. Removals never replay. At depth 1 the grouping is
+    // resolution-redundant (a `Pending` host's add precedes its consumers
+    // in submission order anyway); it is the shape the plan pins and
+    // becomes load-bearing at depth 2+. The grouping reorders nothing
+    // observable: no arena receives records from both passes (root arenas
+    // append only in pass 1, embedded arenas only in pass 2), and
+    // submission order is preserved within each pass.
     let s4_honor_preds = sets.iter().map(|s| {
         let pred = &s.pred;
         quote!(
@@ -1494,12 +1985,12 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 ::std::vec![::core::option::Option::None; ops.len()];
         )
     });
-    let s4c_pending = ents.iter().map(|x| {
+    let s4c_pending = ents.iter().filter(|x| x.host.is_none()).map(|x| {
         let (p, id_ty) = (&x.pending, &x.id_ty);
         quote!(let mut #p: ::std::vec::Vec<::core::option::Option<#id_ty>> =
             ::std::vec![::core::option::Option::None; ops.len()];)
     });
-    let s4c_add_arms = m.entities.iter().map(|e| {
+    let s4c_add_arms = m.entities.iter().filter(|e| e.host.is_none()).map(|e| {
         let x = ent_of(&e.name);
         let variant = format_ident!("Add{}", e.name);
         let (add_fn, p) = (format_ident!("add_{}", &x.snake), &x.pending);
@@ -1528,6 +2019,84 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             Op::#variant { #(#arg_use),* } => {
                 #(#resolves)*
                 #p[op_index] = ::core::option::Option::Some(new_store.#add_fn(#(#arg_use),*));
+            }
+        }
+    });
+    // Nested adds (pass 2): resolve the host segment top-down — `Existing`
+    // through the host's step-3 map, `Pending` through the replay table
+    // pass 1 filled. The replay-table lookup is BOUNDS-CHECKED (`get`):
+    // the table is `ops.len()` long, and a forged `Pending` index (a
+    // same-crate test can build one; the public API cannot — `Pending`
+    // host refs are minted only by the host's add, at their own index)
+    // must panic with the internal-bug message, not a bare index panic.
+    // A nested add fills no replay table slot: nothing stages a ref to a
+    // nested record this step.
+    let s4c_nested_add_arms = m.entities.iter().filter(|e| e.host.is_some()).map(|e| {
+        let x = ent_of(&e.name);
+        let h = &ents[x.host.unwrap()];
+        let variant = format_ident!("Add{}", e.name);
+        let add_fn = format_ident!("add_{}", &x.snake);
+        let (h_map, h_pending, h_id) = (&h.map, &h.pending, &h.id_ty);
+        let h_snake_str = h.snake.to_string();
+        let resolves = e.ctor_args.iter().map(|c| {
+            let t = ent_of(&c.target_entity);
+            let (t_map, t_p, t_id) = (&t.map, &t.pending, &t.id_ty);
+            let a = &c.arg;
+            quote! {
+                let #a = match #a.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #t_id(#t_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                    #rt::tx::RefKind::Pending(i) => #t_p[i as usize]
+                        .expect("an add precedes its use: submission order"),
+                };
+            }
+        });
+        let arg_use: Vec<&Ident2> = e.ctor_args.iter().map(|c| &c.arg).collect();
+        quote! {
+            if let Op::#variant { host, #(#arg_use),* } = op {
+                let host = match host.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #h_id(#h_map[(id).0 as usize]
+                            .expect("Existing host validated in step 1, kept past step 2")),
+                    #rt::tx::RefKind::Pending(k) => match #h_pending.get(k as usize).copied().flatten() {
+                        ::core::option::Option::Some(h) => h,
+                        ::core::option::Option::None => panic!(
+                            "flush: replay table miss for Pending {} op {}: internal bug — \
+                             Pending {} refs are minted only by add_{}, at their own op index, \
+                             and root constructive ops replay before nested ops",
+                            stringify!(#h_id),
+                            k,
+                            stringify!(#h_id),
+                            #h_snake_str,
+                        ),
+                    },
+                };
+                #(#resolves)*
+                new_store.#add_fn(host, #(#arg_use),*);
+            }
+        }
+    });
+    // Pass 1 skips nested adds (pass 2's) alongside the removals.
+    let nested_add_patterns = m.entities.iter().filter(|e| e.host.is_some()).map(|e| {
+        let variant = format_ident!("Add{}", e.name);
+        quote!(Op::#variant { .. })
+    });
+    // The nested arms exist only when the store has embedded arenas —
+    // emitting the empty pattern arm would be a syntax error, and an
+    // empty pass-2 loop would leave `op` unused.
+    let pass1_nested_arm = has_nested.then(|| {
+        let pats: Vec<_> = nested_add_patterns.collect();
+        quote!(#(#pats)|* => {})
+    });
+    // Pass 2 itself is nested-stores-only.
+    let pass2 = has_nested.then(|| {
+        quote! {
+            // Pass 2: nested constructive ops in submission order, each
+            // resolving its host segment — Existing through the host's
+            // compaction map, Pending through the replay table pass 1
+            // filled.
+            for op in ops.iter() {
+                #(#s4c_nested_add_arms)*
             }
         }
     });
@@ -1673,6 +2242,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 #(#s2_setop_arms)*
             }
             #(#s2_kept)*
+            // Path coherence: ops staged under a removed host (nested stores).
+            #(#s2_removed_path_hosts)*
             for (op_index, op) in ops.iter().enumerate() {
                 #(#s2_staged_arms)*
                 #(#s2_insert_arms)*
@@ -1732,8 +2303,12 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 }
             };
 
-            // -- step 4c: replay constructive ops in submission order ------
+            // -- step 4c: replay, grouped root-then-nested -----------------
             #(#s4c_pending)*
+            // Pass 1: every root-level constructive op in submission order
+            // (adds fill the per-entity replay tables; inserts, sets, and
+            // keyed inserts replay against the rebuilt skeleton). Nested
+            // adds replay in pass 2.
             for (op_index, op) in ops.iter().enumerate() {
                 match op {
                     #(#s4c_add_arms)*
@@ -1741,8 +2316,10 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                     #(#s4c_set_arms)*
                     #(#s4c_keyed_arms)*
                     #(#remove_patterns)|* => {}
+                    #pass1_nested_arm
                 }
             }
+            #pass2
 
             // -- steps 5-6: induction and backing finalization -------------
             // Induction is constructor logic and replays through the same
@@ -1768,6 +2345,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #into_traits
         #handle_impls
         #flush_types
+
+        #subtx_defs
 
         #[doc(hidden)]
         #[doc = concat!("What a `Tx` stages against: the shared borrow (`edit`) or the consumed store (`into_edit` — flush then reuses its arena allocations).")]
