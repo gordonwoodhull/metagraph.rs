@@ -373,12 +373,125 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #variant { k: #k_ref, b: #b_ref },
         });
     }
+    // The induction escape hatch (step 10): a user-staged opaque op. The
+    // `run` closure replays against the rebuilt store during step 4c (the
+    // inducing-constructor case); `named` lists the old-store ids the op
+    // names so steps 1-2 can range-check them and reject removed ones at
+    // the naming op; `reserve` lists the keyed slots an inducing op will
+    // insert, so a later keyed staging call sees them as live (the
+    // induct-flush probe's induced-key staging check). Reservation rides
+    // INSIDE the op queue — a keyed insert staged BEFORE the custom op
+    // must not see its reserved keys, and the probe pins both orderings.
+    // `run` is an `Option` because the replay loop borrows the queue
+    // mutably and takes it; a custom op replays exactly once.
+    let root_entities: Vec<&TxEntity> = m.entities.iter().filter(|e| e.host.is_none()).collect();
+    let custom_variant = quote! {
+        #[doc = "A user-staged custom op (the induction escape hatch, staged via `__stage_custom`): an opaque `FnOnce` the flush replays against the rebuilt store during replay. `named` lists the old-store ids the op names — step 1 range-checks them, step 2 rejects a removed one at this op. `reserve` lists the keyed slots an already-staged inducing op will insert — a later keyed staging call sees them as live."]
+        Custom {
+            run: ::core::option::Option<
+                ::std::boxed::Box<dyn ::core::ops::FnOnce(&mut #store, &Resolve<'_>)>,
+            >,
+            named: ::std::vec::Vec<__NamedRef>,
+            reserve: ::std::vec::Vec<ReservedKey>,
+        },
+    };
+    // The op enum's `Debug`: the `Custom` variant holds a closure, so the
+    // derive is out — this manual impl prints every variant's payload and
+    // the custom op's inspectable fields (`named`, `reserve`) with the
+    // closure elided. Custom ops are user code; what they will do is not
+    // derivable (noted in the step-10 notes).
+    let mut op_debug_arms = TokenStream2::new();
+    for e in &m.entities {
+        let add = format_ident!("Add{}", e.name);
+        let remove = format_ident!("Remove{}", e.name);
+        let payload = format_ident!("{}", snake(&e.name.to_string()));
+        match &e.host {
+            None => {
+                let arg_names: Vec<&Ident2> = e.ctor_args.iter().map(|c| &c.arg).collect();
+                op_debug_arms.extend(quote! {
+                    Op::#add { #(#arg_names),* } => {
+                        let mut d = f.debug_struct(stringify!(#add));
+                        #(d.field(stringify!(#arg_names), #arg_names);)*
+                        d.finish()
+                    }
+                    Op::#remove { #payload } => {
+                        f.debug_struct(stringify!(#remove)).field(stringify!(#payload), #payload).finish()
+                    }
+                });
+            }
+            Some(_) => {
+                let arg_names: Vec<&Ident2> = e.ctor_args.iter().map(|c| &c.arg).collect();
+                op_debug_arms.extend(quote! {
+                    Op::#add { host, #(#arg_names),* } => {
+                        let mut d = f.debug_struct(stringify!(#add));
+                        d.field("host", host);
+                        #(d.field(stringify!(#arg_names), #arg_names);)*
+                        d.finish()
+                    }
+                    Op::#remove { host, idx } => {
+                        f.debug_struct(stringify!(#remove))
+                            .field("host", host)
+                            .field("idx", idx)
+                            .finish()
+                    }
+                });
+            }
+        }
+    }
+    for i in &m.inserts {
+        let variant = format_ident!("Insert{}", camel(&i.arrow.to_string()));
+        match &i.host {
+            Some(_) => op_debug_arms.extend(quote! {
+                Op::#variant { a, b } => {
+                    f.debug_struct(stringify!(#variant)).field("a", a).field("b", b).finish()
+                }
+            }),
+            None => op_debug_arms.extend(quote! {
+                Op::#variant { b } => {
+                    f.debug_struct(stringify!(#variant)).field("b", b).finish()
+                }
+            }),
+        }
+    }
+    for s in &m.sets {
+        let variant = format_ident!("Set{}", camel(&s.arrow.to_string()));
+        op_debug_arms.extend(quote! {
+            Op::#variant { a, b } => {
+                f.debug_struct(stringify!(#variant)).field("a", a).field("b", b).finish()
+            }
+        });
+    }
+    for kk in &m.keyed {
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        op_debug_arms.extend(quote! {
+            Op::#variant { k, b } => {
+                f.debug_struct(stringify!(#variant)).field("k", k).field("b", b).finish()
+            }
+        });
+    }
+    let ops_debug_impl = quote! {
+        impl ::core::fmt::Debug for Op {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                match self {
+                    #op_debug_arms
+                    Op::Custom { named, reserve, .. } => {
+                        f.debug_struct("Custom")
+                            .field("named", named)
+                            .field("reserve", reserve)
+                            .finish()
+                    }
+                }
+            }
+        }
+    };
     let ops_enum = quote! {
         #[doc(hidden)]
-        #[derive(Debug)]
         pub enum Op {
             #op_variants
+            #custom_variant
         }
+
+        #ops_debug_impl
     };
 
     // -- staging methods ----------------------------------------------------
@@ -772,11 +885,30 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let member_into_trait = format_ident!("Into{}Arg", kk.member);
         let member_into_fn = format_ident!("into_{}_ref", snake(&kk.member.to_string()));
         let key_live = &kk.key_live;
+        let key_ref = format_ident!("{}Ref", kk.key_entity);
+        let matches_fn = format_ident!("__{}_key_matches", kk.arrow);
+        let reserve_variant = format_ident!("{}", camel(&kk.arrow.to_string()));
         let doc = format!(
             "Stage a keyed insert through arrow `{}`: a live key is rejected here — checked against the old store's map and the inserts already staged in this transaction (a staged removal frees no key; re-pointing one is two flushes). The flush carries the map (entries whose key and target both survive, remapped) and replays the op through the backing's insert hook on top of the carry.",
             kk.arrow
         );
         keyed_staging.extend(quote! {
+            #[doc(hidden)]
+            #[doc = concat!("Submission-space key equality for arrow `", stringify!(#arrow_str), "`: an `Existing` ref matches only an `Old` key (and a `Pending` ref only a `Pending` one) — the two kinds never collide.")]
+            fn #matches_fn(k: &#key_ref, key: &__SubmissionKey) -> bool {
+                match (k.kind, key) {
+                    (
+                        #rt::tx::RefKind::Existing(id),
+                        __SubmissionKey::Old(id2),
+                    ) => (id).0 == *id2,
+                    (
+                        #rt::tx::RefKind::Pending(i),
+                        __SubmissionKey::Pending(i2),
+                    ) => i == *i2,
+                    _ => false,
+                }
+            }
+
             #[doc = #doc]
             pub fn #method(&mut self, k: impl #key_into_trait, b: impl #member_into_trait) {
                 let k = k.#key_into_fn(self);
@@ -792,20 +924,114 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                     );
                 }
                 for op in &self.ops {
-                    if let Op::#variant { k: k2, .. } = op {
-                        assert!(
-                            k2 != &k,
-                            "keyed insert onto a live key (`{}`): {:?} already \
-                             staged in this transaction",
-                            #arrow_str,
-                            k,
-                        );
+                    match op {
+                        Op::#variant { k: k2, .. } => {
+                            assert!(
+                                k2 != &k,
+                                "keyed insert onto a live key (`{}`): {:?} already \
+                                 staged in this transaction",
+                                #arrow_str,
+                                k,
+                            );
+                        }
+                        Op::Custom { reserve, .. } => {
+                            for r in reserve {
+                                if let ReservedKey::#reserve_variant(key2) = r {
+                                    assert!(
+                                        !Self::#matches_fn(&k, key2),
+                                        "keyed insert onto a live key (`{}`): {:?} is \
+                                         reserved by an already-staged inducing op in \
+                                         this transaction",
+                                        #arrow_str,
+                                        k,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 self.ops.push(Op::#variant { k, b });
             }
         });
     }
+
+    // -- __stage_custom: the induction escape hatch's staging call -----------
+    // A user-written extension method (an `impl Tx<'_>` block in the same
+    // crate) stages a custom op: an opaque closure the flush replays
+    // against the rebuilt store, the old-store ids the op names (validated
+    // in steps 1-2 like any other refs), and the keyed slots it will
+    // insert (counted by later keyed staging calls' live-key checks).
+    // `__ops` is the readonly queue accessor the extension computes
+    // induction keys from at staging time (a staged `AddEdge`'s endpoint
+    // refs, for a `Pending` captured ref).
+    let custom_staging = quote! {
+        #[doc(hidden)]
+        #[doc = "Stage a custom op (the induction escape hatch): `run` replays against the rebuilt store during the flush's submission-order replay — user extensions implement inducing constructors this way, computing induced keys from `old()` + `__ops()` at staging and resolving captured refs through the `Resolve` argument at replay. `named` lists the old-store ids the op names; steps 1-2 validate them like any other refs. `reserve` lists the keyed slots the op will insert; a later keyed staging call sees them as live."]
+        pub fn __stage_custom(
+            &mut self,
+            run: ::std::boxed::Box<dyn ::core::ops::FnOnce(&mut #store, &Resolve<'_>)>,
+            named: ::std::vec::Vec<__NamedRef>,
+            reserve: ::std::vec::Vec<ReservedKey>,
+        ) {
+            self.ops.push(Op::Custom {
+                run: ::core::option::Option::Some(run),
+                named,
+                reserve,
+            });
+        }
+
+        #[doc(hidden)]
+        #[doc = "The staged op queue, readonly — what a custom-op extension computes induction keys from at staging time (e.g. a staged `AddEdge`'s endpoint refs, for a `Pending` captured ref)."]
+        pub fn __ops(&self) -> &[Op] {
+            &self.ops
+        }
+    };
+
+    // -- the induction escape hatch (step 10) --------------------------------
+    // User-staged custom ops: `Op::Custom` (above) plus the types it carries
+    // and the doc-hidden staging accessors a user extension impls against.
+    // `__NamedRef` names the old-store ids a custom op captures (step 1
+    // range-checks, step 2 rejects removed ones at the op); root-level
+    // entities only — a custom op replays at root level, where an embedded
+    // record's path id has no meaning. `ReservedKey` names the keyed slot
+    // an already-staged inducing op will insert, per store-level keyed
+    // arrow; `__SubmissionKey` is a key in submission space (`Old` id |
+    // `Pending` op index) — `Existing` and `Pending` never collide (the
+    // staged-key probe's t3 pin), so the comparison is kind-aware.
+    let named_ref_variants = root_entities.iter().map(|e| {
+        let v = &e.name;
+        quote!(#v(u32),)
+    });
+    let named_ref_enum = quote! {
+        #[doc(hidden)]
+        #[doc = "An old-store id named by a staged custom op (the induction escape hatch). Steps 1-2 validate the named ids like any other `Existing` ref: a range violation is `UnknownOldId`, a removed one a `DanglingEndpoint` attributed to the custom op (the naming-op rule). Root-level entities only — a custom op replays at root level."]
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum __NamedRef {
+            #(#named_ref_variants)*
+        }
+    };
+    let reserved_key_variants = m.keyed.iter().map(|kk| {
+        let v = format_ident!("{}", camel(&kk.arrow.to_string()));
+        quote!(#v(__SubmissionKey),)
+    });
+    let reserved_key_enum = quote! {
+        #[doc(hidden)]
+        #[doc = "A keyed slot an already-staged inducing (custom) op will insert, per store-level keyed arrow. The keyed staging verb's live-key check counts these — an insert keyed after a staged induction is a live-key staging panic, exactly as if the keyed insert op itself were already staged (the induct-flush probe's induced-key staging check)."]
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum ReservedKey {
+            #(#reserved_key_variants)*
+        }
+    };
+    let submission_key_enum = quote! {
+        #[doc(hidden)]
+        #[doc = "A key in submission space: an old-store id, or the op index of a record this change set will create. `Old` and `Pending` never collide (a `Pending` ref carries this transaction's token where an `Existing` one carries the unstamped sentinel)."]
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum __SubmissionKey {
+            Old(u32),
+            Pending(u32),
+        }
+    };
 
     // -- flush: per-entity derived names -----------------------------------
     struct Ent {
@@ -898,6 +1124,129 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             RemovedPathHost { arena: &'static str, host: u32, nested_ops: ::std::vec::Vec<usize>, removal_op: usize },
         )
     });
+
+    // The custom-op replay context (the induction escape hatch): the
+    // compaction maps and replay tables of every ROOT-LEVEL entity, so a
+    // staged closure can resolve its captured refs against the rebuilt
+    // store. Root-level only — a custom op replays at root level, and an
+    // embedded record's path id has no meaning there. No old-store
+    // reference: by replay the owned path has consumed the old store (the
+    // closure reads the rebuilt store — carried field values are the old
+    // ones remapped; staging-time reads go through `Tx::old`). The pending
+    // lookup is bounds-checked with the internal-bug panic (decision 5's
+    // shape: a `Pending` ref resolves only through a same-queue add op
+    // preceding its use).
+    let root_ents: Vec<&Ent> = ents.iter().filter(|x| x.host.is_none()).collect();
+    let resolve_fields = root_ents.iter().map(|x| {
+        let (map, pending, id_ty) = (&x.map, &x.pending, &x.id_ty);
+        quote!(
+            #map: &'a [::core::option::Option<u32>],
+            #pending: &'a [::core::option::Option<#id_ty>],
+        )
+    });
+    let resolve_methods = root_ents.iter().map(|x| {
+        let (map, pending, id_ty) = (&x.map, &x.pending, &x.id_ty);
+        let method = format_ident!("resolve_{}", x.snake);
+        let add_name = format_ident!("add_{}", x.snake);
+        let ref_alias = format_ident!("{}Ref", x.name);
+        quote! {
+            #[doc = concat!("Resolve a `", stringify!(#ref_alias), "` captured at staging: `Existing` through the compaction map (validated in steps 1-2), `Pending` through this change set's replay table.")]
+            pub fn #method(&self, r: #ref_alias) -> #id_ty {
+                match r.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #id_ty(self.#map[(id).0 as usize]
+                            .expect("Existing id validated in steps 1-2")),
+                    #rt::tx::RefKind::Pending(i) =>
+                        match self.#pending.get(i as usize).copied().flatten() {
+                            ::core::option::Option::Some(id) => id,
+                            ::core::option::Option::None => panic!(
+                                "flush: replay table miss for Pending {} op {}: internal bug — \
+                                 Pending {} refs are minted only by {} preceding its use \
+                                 in submission order",
+                                stringify!(#id_ty),
+                                i,
+                                stringify!(#id_ty),
+                                stringify!(#add_name),
+                            ),
+                        },
+                }
+            }
+        }
+    });
+    let resolve_struct = quote! {
+        #[doc(hidden)]
+        #[doc = concat!("The custom op's replay context over `", stringify!(#store), "`: the compaction maps and replay tables of every root-level entity. A staged custom op's closure resolves its captured refs through this; the store argument is the rebuilt skeleton mid-replay. Constructed by `flush` — never by user code.")]
+        pub struct Resolve<'a> {
+            #(#resolve_fields)*
+        }
+
+        impl Resolve<'_> {
+            #(#resolve_methods)*
+        }
+    };
+
+    // -- flush: step 1, custom ops -------------------------------------------
+    // The old-store ids a custom op names range-validate exactly like any
+    // other `Existing` ref (a flagged id is never indexed downstream).
+    let s1_custom_arm = {
+        let checks = root_ents.iter().map(|x| {
+            let v = &x.name;
+            let (c, s) = (&x.count, &x.arena_str);
+            quote! {
+                __NamedRef::#v(id) => {
+                    if *id as usize >= #c {
+                        violations.push(Violation::UnknownOldId {
+                            op: op_index,
+                            arena: #s,
+                            id: *id,
+                        });
+                    }
+                }
+            }
+        });
+        quote! {
+            Op::Custom { named, .. } => {
+                for n in named {
+                    match n {
+                        #(#checks)*
+                    }
+                }
+            }
+        }
+    };
+
+    // -- flush: step 2, custom ops -------------------------------------------
+    // The naming-op rule for a custom op: an old-store id it names that the
+    // change set removes dangles at the CUSTOM op (like a staged add naming
+    // a removed endpoint), not at the removal. Range-guarded: a flagged id
+    // is never indexed.
+    let s2_custom_arm = {
+        let checks = root_ents.iter().map(|x| {
+            let v = &x.name;
+            let (c, removed, s) = (&x.count, &x.removed, &x.arena_str);
+            quote! {
+                __NamedRef::#v(id) => {
+                    if (*id as usize) < #c && #removed[*id as usize] {
+                        violations.push(Violation::DanglingEndpoint {
+                            op: op_index,
+                            record: RecordDesc::Staged(op_index as u32),
+                            endpoint_arena: #s,
+                            endpoint: *id,
+                        });
+                    }
+                }
+            }
+        });
+        quote! {
+            if let Op::Custom { named, .. } = op {
+                for n in named {
+                    match n {
+                        #(#checks)*
+                    }
+                }
+            }
+        }
+    };
 
     // -- flush: the error/report surface ------------------------------------
     let report_fields = ents.iter().map(|x| {
@@ -2210,6 +2559,27 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     });
 
+    // Custom op replay: run the staged closure against the rebuilt store,
+    // handing it the `Resolve` context (maps + replay tables). The closure
+    // is taken from its `Option` — the queue is borrowed mutably so the
+    // pass can take it, and a custom op replays exactly once. A custom op
+    // fills no replay table itself: refs to staged records mint through
+    // the add verbs (whose own ops fill the tables), and records the
+    // closure inserts directly are reachable only through the store.
+    let s4c_custom_arm = {
+        let resolve_inits = root_ents.iter().map(|x| {
+            let (map, pending) = (&x.map, &x.pending);
+            quote!(#map: &#map, #pending: &#pending,)
+        });
+        quote! {
+            Op::Custom { run, .. } => {
+                let run = run.take().expect("flush: a custom op replays exactly once");
+                let __resolve = Resolve { #(#resolve_inits)* };
+                run(&mut new_store, &__resolve);
+            }
+        }
+    };
+
     let flush_method = quote! {
         #[doc(hidden)]
         #[doc = "Steps 1-2 as one pure analysis over (old store, ops): the resolved removal sets (with attributing op indices), per-arena counts, and every violation found in old-id space. `check` and `flush` consume the same function, so a green check and a committing flush can never disagree."]
@@ -2229,6 +2599,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                     #(#s1_insert_arms)*
                     #(#s1_set_arms)*
                     #(#s1_keyed_arms)*
+                    #s1_custom_arm
                 }
             }
 
@@ -2248,6 +2619,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 #(#s2_staged_arms)*
                 #(#s2_insert_arms)*
                 #(#s2_keyed_arms)*
+                #s2_custom_arm
             }
             if !violations.is_empty() {
                 return ::core::result::Result::Err(FlushError { violations });
@@ -2265,6 +2637,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space — steps 1-2 are the same `check` analysis, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists carried by arrays derived from the old chains BEFORE any write) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — flat stores have none), (7) `validate()`. A borrowed transaction builds fresh arenas; an owned one (`into_edit`) forward-compacts in place — every write slot at or before its read slot — reusing the old store's allocations. The old store (when borrowed) is untouched; a rejection leaves nothing half-applied."]
         pub fn flush(self) -> ::core::result::Result<FlushOutcome, FlushError> {
             let Tx { old, token: _, ops } = self;
+            let mut ops = ops;
             let __TxAnalysis {
                 #(#analysis_names)*
             } = Self::__analyze(old.__store(), &ops)?;
@@ -2307,14 +2680,18 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #(#s4c_pending)*
             // Pass 1: every root-level constructive op in submission order
             // (adds fill the per-entity replay tables; inserts, sets, and
-            // keyed inserts replay against the rebuilt skeleton). Nested
-            // adds replay in pass 2.
-            for (op_index, op) in ops.iter().enumerate() {
+            // keyed inserts replay against the rebuilt skeleton; custom ops
+            // run their staged closures with the `Resolve` context). The
+            // queue is borrowed MUTABLY so a custom op's closure can be
+            // taken; every other arm only reads its op. Nested adds replay
+            // in pass 2.
+            for (op_index, op) in ops.iter_mut().enumerate() {
                 match op {
                     #(#s4c_add_arms)*
                     #(#s4c_insert_arms)*
                     #(#s4c_set_arms)*
                     #(#s4c_keyed_arms)*
+                    #s4c_custom_arm
                     #(#remove_patterns)|* => {}
                     #pass1_nested_arm
                 }
@@ -2344,6 +2721,10 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #ops_enum
         #into_traits
         #handle_impls
+        #named_ref_enum
+        #reserved_key_enum
+        #submission_key_enum
+        #resolve_struct
         #flush_types
 
         #subtx_defs
@@ -2409,6 +2790,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #set_staging
 
             #keyed_staging
+
+            #custom_staging
 
             #flush_method
         }

@@ -758,7 +758,7 @@ the probe crate under `/tmp` as the reference implementation.
       downstream `tests/` crate cannot do, so the miss path is
       exercised by a same-crate unit test or carried as a
       codegen-review invariant — this step's notes say which.
-- [ ] 10. Induction: the inducing `add_subedge` constructor over
+- [x] 10. Induction: the inducing `add_subedge` constructor over
       generated primitives + the id-based read view, running during
       replay through the same constructors. The induction×flush-replay
       probe (/tmp/m4-probe-induct-flush, this review round) must land

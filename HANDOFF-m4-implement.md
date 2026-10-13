@@ -1,7 +1,7 @@
 # HANDOFF — M4 implementation (write-side builders)
 
 Branch `worktree-m4-implement`, worktree `.claude/worktrees/m4-implement`,
-based on main 4904680 + steps 1–9. Plan: plans/milestone-4-builders.md
+based on main 4904680 + steps 1–10. Plan: plans/milestone-4-builders.md
 (the contract — checklist § "Implementation checklist", dependency line
 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 12); 9 → 11; (8, 11) → 10).
 This file: state, settled decisions, and the per-step continuation guide.
@@ -244,7 +244,74 @@ Step-9 notes (scope decisions, each reasoned):
   The fixture has exactly one host (OuterNode); the general rule is
   codegen-review surface, not tested.
 
-Not started: steps 10–14.
+Not started: steps 11–14.
+
+- **Step 10** (this commit): induction via the escape hatch (decision 4).
+  Emitted by tx.rs from the UNCHANGED TxModel — the custom-op pieces are
+  store-generic: `Op::Custom { run: Option<Box<dyn FnOnce(&mut Store,
+  &Resolve<'_>)>>, named: Vec<__NamedRef>, reserve: Vec<ReservedKey> }`
+  (always emitted; the manual `Debug` impl for `Op` replaces the derive —
+  closures aren't `Debug`; `Custom` prints its `named`/`reserve` with the
+  closure elided). `__NamedRef` — one `Entity(u32)` variant per ROOT-LEVEL
+  entity: old ids a custom op names; step 1 range-checks them
+  (`UnknownOldId`), step 2 rejects removed ones AT THE CUSTOM OP
+  (`DanglingEndpoint`/`Staged` — the probe's naming-op rule). `ReservedKey`
+  — one variant per store-level keyed arrow carrying
+  `__SubmissionKey::{Old,Pending}(u32)`; reservation rides INSIDE the op
+  queue (not a side list) because a keyed insert staged BEFORE the custom
+  op must not see its reserved keys — the probe pins both orderings.
+  `Resolve<'a>` — maps + pending tables of root-level entities with
+  `resolve_<entity>` methods (bounds-checked pending get, internal-bug
+  panic, decision 5's shape); NO old-store reference (the owned path has
+  consumed old by replay — the closure reads the rebuilt store; staging-
+  time reads go through `Tx::old`). `__stage_custom(run, named, reserve)`
+  + `__ops()` doc-hidden on Tx; the keyed staging scan grew a `Custom`
+  reserve arm via a per-arrow `Self::__<arrow>_key_matches` helper
+  (kind-aware: Existing↔Old, Pending↔Pending — the t3 pin). Flush: pass 1
+  switched to `ops.iter_mut().enumerate()` so the custom arm can
+  `.take()` the closure (a custom op replays exactly once); the analysis
+  match grew the `Custom` arm. A custom op fills no replay table (refs
+  mint through the add verbs; closure-inserted records are reachable only
+  through the store). Tests: tests/edge_induced.rs +14 — the induct-flush
+  probe's 13 flat tests recast against the generated surface through a
+  user-written `impl Tx<'_> { add_subedge }` extension (staging-time key
+  computation from `old()` + `__ops()`, closure replay through the store's
+  inducing constructor), plus a wholly-staged Pending-edge induction and
+  an into_edit owned-path pin. 46/46 suites green incl. trybuild +
+  downstream, zero warnings.
+
+Step-10 notes (scope decisions + deviations, each reasoned):
+
+- **`__reserve_keys` merged into `__stage_custom`'s payload** (deviation
+  from decision 4's two-method sketch): a side list on Tx loses submission
+  order — every staged insert, earlier or later, would see every
+  reservation, and the probe's pinned ordering (standalone BEFORE a staged
+  induction is legal; AFTER is a panic) would break. The reservation
+  lives in the op it belongs to.
+- **Custom ops are root-level.** `__NamedRef` and `Resolve` cover
+  root-level entities only; a custom op replays in pass 1 and cannot name
+  an embedded record (path ids have no root-level meaning). Custom ops in
+  nested stores replay before all pass-2 nested ops (the grouping is
+  root-then-nested for every root op; nothing in the acceptance shape
+  binds a custom op against a nested op's replay order).
+- **The probe's keyed cascade recast as the explicit minimal cascade.**
+  The probe removes a main node and its induced subnode cascades through
+  the keyed map — step 11's survivors-only cascade, unimplemented here.
+  The recast stages `remove_node` + `remove_sub_node` (and edge +
+  subedge) explicitly, which the generated store requires today anyway
+  (the kept sub record's `main_node` field would dangle otherwise) — the
+  same translation the step-8 tests already made.
+- **Staging-time induction-key reads are range-guarded by the extension
+  itself** (the probe's `induction_keys_of` shape: unresolvable → no
+  reserve keys; step 1 still reports the `UnknownOldId` for the named id
+  at flush). The generated read getters index unconditionally.
+- **Custom ops are opaque to determinism** (decision 4's predicted cost):
+  analysis sees only their `named` ids (deterministic); what a closure
+  does is user code. The `Debug` impl prints `named`/`reserve` only.
+- **Composed-renamed downstream caught a real emission bug**: the
+  key-match helper is emitted inside `impl Tx<'_>` (where keyed_staging
+  lands), so the staging arm must call it as `Self::__<arrow>_key_matches`
+  — bare associated-function paths do not resolve.
 
 Step-6 notes (deviations from this handoff's pre-work, each reasoned):
 
@@ -628,6 +695,18 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
+- 2026-10-13 (impl-m4-7): step 10 DONE (see "Where things stand" and the
+  step-10 notes — the escape hatch emitted store-generically from the
+  unchanged TxModel: Op::Custom + __NamedRef/ReservedKey/__SubmissionKey/
+  Resolve/__stage_custom/__ops, the reserve-aware keyed staging scan, the
+  naming-op rule for custom ops in steps 1-2, the iter_mut pass-1 replay;
+  the induct-flush probe's 13 flat tests recast through a user-written Tx
+  extension, plus wholly-staged Pending induction and the owned path).
+  46/46 suites green, zero warnings at the commit. Next: step 11
+  (removal + keyed carry — the survivors-only cascade, report exposure,
+  staged-insert-on-removed-key counts live; the probe's 15 tests + spike
+  7's 14 removal tests; the step-9 notes' per-host keyed maps
+  (Hierarchy's `sub.subnode`) are the composed target).
 - 2026-10-13 (impl-m4-6, cont.): step 9 DONE (see "Where things stand"
   and the step-9 notes — within/SubTx scopes, per-host removal sets
   and maps, RemovedPathHost, grouped root-then-nested replay with the
