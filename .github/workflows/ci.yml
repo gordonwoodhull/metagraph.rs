@@ -23,3 +23,9 @@ jobs:
           cache-targets: "false"
       - name: Run tests
         run: cargo test --workspace --all-targets
+      # trybuild leaves an entry under target/tests that rust-cache's post-job
+      # cleanup trips over (ENOENT opendir, reported as failure annotations on
+      # green runs). Remove it before the cleanup runs.
+      - name: Remove trybuild scratch dir
+        if: always()
+        run: rm -rf target/tests
