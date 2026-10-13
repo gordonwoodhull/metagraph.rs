@@ -24,7 +24,7 @@ use syn::parse::{Parse, ParseStream};
 use syn::{braced, bracketed, Ident, Path, Token};
 
 use grammar::{
-    parse_bindings, path_tokens, root_meta_tokens, snake, Binding, Cardinality, RootMeta,
+    camel, parse_bindings, path_tokens, root_meta_tokens, snake, Binding, Cardinality, RootMeta,
 };
 
 // ---------------------------------------------------------------------------
@@ -371,6 +371,11 @@ fn validate_pattern(pat: &PatternInput) -> syn::Result<()> {
 
 /// A root pattern owns its trait and registers it: trait + registration
 /// courier (metadata tuple) + doc-hidden `pub use` at the invocation site.
+/// The write side (M4) grows beside the read trait: the arrow-named
+/// `Insert<Arrow>`/`Set<Arrow>` trait items emit here, and the pattern's
+/// `pub mod <snake(name)>` — the same module layout an instantiation
+/// pattern emits — holds the per-entity `Add`/`Remove` traits and markers
+/// of the root's non-root entities.
 fn expand_root_pattern(pat: &PatternInput) -> syn::Result<TokenStream2> {
     let a = &pat.body.arrows[0];
     let trait_name = &pat.name;
@@ -427,6 +432,74 @@ fn expand_root_pattern(pat: &PatternInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    // The arrow-named write trait (M4): canonical arity takes the self ref
+    // first; the key ref rides between the self and target refs on a keyed
+    // root. Implemented by `implement!` on the store's `Tx` where the verb
+    // is real for the binding; the names here are the root-fixed contract
+    // (the courier's sixth slot publishes them).
+    if let Some(w) = &meta.write {
+        let w_trait = &w.trait_;
+        let w_method = &w.method;
+        let a_ref = &w.a_ref;
+        let b_ref = &w.b_ref;
+        let write_doc = format!(
+            "Write side of root arrow `{}: {} -> {}` ({}): staged on a transaction, replayed at flush.",
+            a.name,
+            a.source,
+            a.target,
+            match meta.card {
+                Cardinality::Many => "primitive `many`",
+                Cardinality::One => "`one` re-point",
+                Cardinality::Keyed => "keyed partial",
+            }
+        );
+        out.extend(match (&w.k_ref, meta.card) {
+            (Some(k_ref), _) => quote! {
+                #[doc = #write_doc]
+                pub trait #w_trait<M> {
+                    type #a_ref;
+                    type #k_ref;
+                    type #b_ref;
+                    fn #w_method(&mut self, a: Self::#a_ref, k: Self::#k_ref, b: Self::#b_ref);
+                }
+            },
+            (None, Cardinality::One) => quote! {
+                #[doc = #write_doc]
+                pub trait #w_trait<M> {
+                    type #a_ref;
+                    type #b_ref;
+                    fn #w_method(&mut self, a: Self::#a_ref, b: Self::#b_ref);
+                }
+            },
+            (None, _) => quote! {
+                #[doc = #write_doc]
+                pub trait #w_trait<M> {
+                    type #a_ref;
+                    type #b_ref;
+                    fn #w_method(&mut self, a: Self::#a_ref, b: Self::#b_ref);
+                }
+            },
+        });
+    }
+
+    // Per-entity write side: the pattern's `pub mod <snake(name)>` — new
+    // for a root pattern, existing for an instantiation pattern — holds the
+    // per-entity markers (entity name verbatim, beside the per-arrow camel
+    // markers) and the `Add<Entity>`/`Remove<Entity>` trait items, so
+    // `implement!` derives marker and trait paths from the pattern path
+    // identically for either pattern kind.
+    let (entity_markers, entity_traits) = entity_write_items(&pat.body)?;
+    let mod_name = Ident::new(&snake(&pat.name.to_string()), pat.name.span());
+    out.extend(quote! {
+        #[doc = concat!("Per-entity write-side markers and existence traits of the `", stringify!(#trait_name), "` root pattern.")]
+        pub mod #mod_name {
+            pub mod markers {
+                #entity_markers
+            }
+            #entity_traits
+        }
+    });
+
     // Registration courier: publishes the metadata tuple. Same
     // target-parameterized rule as every courier — the caller names the
     // forwarding target, the tuple rides inside its delimiter group.
@@ -447,6 +520,86 @@ fn expand_root_pattern(pat: &PatternInput) -> syn::Result<TokenStream2> {
     Ok(out)
 }
 
+/// The per-entity write-side items of a pattern body: marker structs for
+/// the shared markers module (entity name verbatim) and the
+/// `Add<Entity>`/`Remove<Entity>` trait items. `Add` emits only where the
+/// declaring block can prove the entity's total-one arity (the
+/// by-derived-only rule; skipped = opaque, the verb stays Tx-inherent);
+/// `Remove` and the marker always emit for closed non-root entities.
+/// A marker name already taken by a camel-cased arrow marker (stdlib's
+/// `MainNode` root pattern: entity `MainNode`, arrow `main_node`) is not
+/// re-minted — one struct serves the read impl of that arrow and the write
+/// impls of that entity; the traits differ, so no impl can conflict.
+/// Callers place the items into the pattern's `pub mod <snake(name)>`.
+fn entity_write_items(
+    body: &crate::grammar::SchemaBody,
+) -> syn::Result<(TokenStream2, TokenStream2)> {
+    let mut markers = TokenStream2::new();
+    let mut minted: Vec<String> = Vec::new();
+    for a in &body.arrows {
+        minted.push(camel(&a.name.to_string()));
+    }
+    let mut traits = TokenStream2::new();
+    for e in body.closed_elements() {
+        let ent = &e.name;
+        if !minted.iter().any(|m| m == &ent.to_string()) {
+            minted.push(ent.to_string());
+            markers.extend(quote! {
+                #[doc = concat!("Marker for the entity `", stringify!(#ent), "` (per-entity write-side marker: Add/Remove/HandleToRef impls).")]
+                #[derive(Debug, Clone, Copy)]
+                pub struct #ent;
+            });
+        }
+        let ret_assoc = format_ident!("{}Ref", ent);
+        let remove = format_ident!("Remove{}", ent);
+        let remove_method = format_ident!("remove_{}", snake(&ent.to_string()));
+        traits.extend(quote! {
+            #[doc = concat!("Staged removal of a `", stringify!(#ent), "` record (existence op — entity-named, declaring-block-owned).")]
+            pub trait #remove<M> {
+                type #ret_assoc;
+                fn #remove_method(&mut self, rec: Self::#ret_assoc);
+            }
+        });
+        if let Some(args) = body.entity_ctor_args(ent) {
+            let add = format_ident!("Add{}", ent);
+            let add_method = format_ident!("add_{}", snake(&ent.to_string()));
+            let arg_assocs: Vec<proc_macro2::Ident> =
+                args.iter().map(|a| format_ident!("{}", camel(&a.to_string()))).collect();
+            // Within one trait the assoc names must be distinct: camel(arg)
+            // vs the return `<E>Ref` vs sibling camels.
+            let mut names = vec![ret_assoc.to_string()];
+            for (a, an) in args.iter().zip(&arg_assocs) {
+                if names.iter().any(|n| n == &an.to_string()) {
+                    return Err(syn::Error::new(
+                        a.span(),
+                        format!(
+                            "constructor argument `{a}` collides with another associated type name on `Add{ent}`",
+                        ),
+                    ));
+                }
+                names.push(an.to_string());
+            }
+            let params = args.iter().zip(&arg_assocs).map(|(a, an)| {
+                let p = format_ident!("{}", snake(&a.to_string()));
+                quote!(#p: Self::#an)
+            });
+            let add_doc = format!(
+                "Per-pattern constructor for `{}`: the argument list is the entity's provable total `one` arrows (by-derived-only).",
+                ent
+            );
+            traits.extend(quote! {
+                #[doc = #add_doc]
+                pub trait #add<M> {
+                    type #ret_assoc;
+                    #(type #arg_assocs;)*
+                    fn #add_method(&mut self, #(#params),*) -> Self::#ret_assoc;
+                }
+            });
+        }
+    }
+    Ok((markers, traits))
+}
+
 /// An instantiation pattern emits its markers module and schema courier
 /// under `pub mod <snake(name)>` at the invocation site.
 fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2> {
@@ -464,6 +617,11 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
         }
     });
 
+    // The per-entity write side (M4): entity markers beside the arrow
+    // markers in the shared module, `Add`/`Remove` trait items beside it —
+    // same layout a root pattern emits for its own module.
+    let (entity_markers, entity_traits) = entity_write_items(&pat.body)?;
+
     let schema_tokens = {
         // Declaring-crate resolver: bake the declaring crate's package name
         // into the courier payload. `pattern!` runs in the declaring crate's
@@ -479,10 +637,13 @@ fn expand_instantiation_pattern(pat: &PatternInput) -> syn::Result<TokenStream2>
         pub mod #mod_name {
             /// Per-arrow-instantiation markers: module paths, never name
             /// concatenation. One unit struct per arrow instantiation (per
-            /// use, not per root).
+            /// use, not per root); per-entity markers (entity name
+            /// verbatim) ride in the same module for the write side.
             pub mod markers {
                 #(#marker_items)*
+                #entity_markers
             }
+            #entity_traits
         }
         // Target-parameterized courier: the schema rides inside the
         // forwarding target's delimiter group. M1's only target is
@@ -963,7 +1124,9 @@ fn finish_compose(
 
     // ---- mint per-instance markers: fresh unit structs, never re-exports
     // (re-exported shared markers would produce conflicting impls on fused
-    // handles; the diamond case is two markers, not a conflicting impl) ----
+    // handles; the diamond case is two markers, not a conflicting impl).
+    // Per-arrow and per-entity markers alike, exactly as the member
+    // patterns' own markers modules carry them ----
     let mut marker_mods = TokenStream2::new();
     for (inst, _, body) in &composed.members {
         let markers: Vec<Ident> = body
@@ -976,13 +1139,35 @@ fn finish_compose(
             .iter()
             .map(|a| format!("Marker for the `{inst}.{}` arrow instantiation.", a.name))
             .collect();
+        // Per-entity markers skip names the arrow markers already minted —
+        // one struct serves both (same dedup the pattern's own markers
+        // module applies).
+        let mut minted: Vec<String> = markers.iter().map(|m| m.to_string()).collect();
+        let mut entity_markers: Vec<Ident> = Vec::new();
+        let mut entity_docs: Vec<String> = Vec::new();
+        for e in body.closed_elements() {
+            if minted.iter().any(|m| m == &e.name.to_string()) {
+                continue;
+            }
+            minted.push(e.name.to_string());
+            entity_markers.push(e.name.clone());
+            entity_docs.push(format!(
+                "Marker for the `{inst}.{}` entity (per-entity write side).",
+                e.name
+            ));
+        }
         marker_mods.extend(quote! {
-            #[doc = concat!("Per-arrow-instantiation markers of the `", stringify!(#inst), "` instance.")]
+            #[doc = concat!("Per-instance markers of the `", stringify!(#inst), "` instance.")]
             pub mod #inst {
                 #(
                     #[doc = #arrow_docs]
                     #[derive(Debug, Clone, Copy)]
                     pub struct #markers;
+                )*
+                #(
+                    #[doc = #entity_docs]
+                    #[derive(Debug, Clone, Copy)]
+                    pub struct #entity_markers;
                 )*
             }
         });
@@ -998,7 +1183,7 @@ fn finish_compose(
         // at the invocation site, so `implement!` derives both from the
         // pattern path exactly as for a flat pattern).
         pub mod #modname {
-            /// Per-instance, per-arrow-instantiation markers.
+            /// Per-instance, per-arrow-instantiation and per-entity markers.
             pub mod markers {
                 #marker_mods
             }

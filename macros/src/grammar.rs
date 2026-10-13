@@ -256,6 +256,49 @@ pub struct SchemaBody {
     pub arrows: Vec<ArrowDecl>,
 }
 
+impl SchemaBody {
+    /// The write-side constructor-argument arrows of a non-root entity, in
+    /// arrow-declaration order, or `None` when the declaring block cannot
+    /// prove the entity's total-one arity (M4's settled by-derived-only
+    /// rule). An arg is an inline-declared `one` arrow or an arrow named as
+    /// a sibling's `by` determinant (`by` requires a total `one`
+    /// determinant — the implement!-time bound-one check enforces it, so
+    /// the derived arity cannot be silently wrong). Any other instantiation
+    /// arrow leaving the entity is opaque — its cardinality is root-side
+    /// data the declaring block cannot resolve at expansion time — and
+    /// vetoes the entity's `Add` trait (the verb stays Tx-inherent).
+    pub fn entity_ctor_args(&self, ent: &Ident) -> Option<Vec<Ident>> {
+        let mut args = Vec::new();
+        for a in &self.arrows {
+            if a.source != *ent {
+                continue;
+            }
+            let provable_one = a.many == Some(false)
+                || self
+                    .arrows
+                    .iter()
+                    .any(|x| x.by.as_ref().map(|d| d == &a.name).unwrap_or(false));
+            if provable_one {
+                args.push(a.name.clone());
+            } else if a.by.is_some() || a.sum.is_some() || a.key.is_some() {
+                // A derived or keyed arrow is not a one-arrow candidate.
+            } else {
+                return None;
+            }
+        }
+        Some(args)
+    }
+
+    /// The closed non-root entities — the ones the write side emits
+    /// per-entity markers and `Add`/`Remove` traits for. Open entities are
+    /// skipped: their records live in a fused peer store, so existence ops
+    /// have nothing to name (a composed `Tx` sees them through their host
+    /// entity when nested stores land).
+    pub fn closed_elements(&self) -> impl Iterator<Item = &EntityDecl> {
+        self.entities.iter().filter(|e| !e.root && !e.open)
+    }
+}
+
 impl Parse for SchemaBody {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let kw: Ident = input.parse()?;
@@ -672,12 +715,100 @@ pub enum Cardinality {
     Keyed,
 }
 
+/// A root arrow's write-trait metadata — the metadata tuple's sixth, braced
+/// slot (M4): per arrow-named write trait, its (trait name, method name,
+/// ref associated-type names). `k_ref` is the key ref's assoc name on a
+/// keyed root's `Insert` trait, `-` otherwise. Names are the *root's*
+/// declaration, like the read slot's names (spike 1's E0407 finding).
+#[derive(Clone, Debug)]
+pub struct RootWriteMeta {
+    pub trait_: Ident,
+    pub method: Ident,
+    pub a_ref: Ident,
+    pub k_ref: Option<Ident>,
+    pub b_ref: Ident,
+}
+
+impl RootWriteMeta {
+    /// Derive the write metadata from a root pattern's single arrow:
+    /// `Insert<Arrow>` for many/keyed roots, `Set<Arrow>` for one roots;
+    /// the method is the verb + the arrow's snake name; the ref assoc
+    /// names are the role entities' `<E>Ref` spellings.
+    pub fn of_root_arrow(arrow: &ArrowDecl) -> syn::Result<RootWriteMeta> {
+        let card = if arrow.key.is_some() {
+            Cardinality::Keyed
+        } else {
+            match arrow.many {
+                Some(true) => Cardinality::Many,
+                Some(false) => Cardinality::One,
+                None => {
+                    return Err(syn::Error::new(
+                        arrow.name.span(),
+                        "a root arrow must declare a cardinality (`one`, `many`, or `key(K)`)",
+                    ))
+                }
+            }
+        };
+        let camel_arrow = camel(&arrow.name.to_string());
+        let (trait_, method) = match card {
+            Cardinality::One => (
+                Ident::new(&format!("Set{camel_arrow}"), arrow.name.span()),
+                Ident::new(&format!("set_{}", snake(&arrow.name.to_string())), arrow.name.span()),
+            ),
+            Cardinality::Many | Cardinality::Keyed => (
+                Ident::new(&format!("Insert{camel_arrow}"), arrow.name.span()),
+                Ident::new(&format!("insert_{}", snake(&arrow.name.to_string())), arrow.name.span()),
+            ),
+        };
+        Ok(RootWriteMeta {
+            trait_,
+            method,
+            a_ref: Ident::new(&format!("{}Ref", arrow.source), arrow.name.span()),
+            k_ref: (card == Cardinality::Keyed)
+                .then(|| Ident::new(&format!("{}Ref", arrow.key.as_ref().unwrap()), arrow.name.span())),
+            b_ref: Ident::new(&format!("{}Ref", arrow.target), arrow.name.span()),
+        })
+    }
+}
+
+impl Parse for RootWriteMeta {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let trait_: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let method = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let a_ref = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let k_ref = if input.peek(Token![-]) {
+            input.parse::<Token![-]>()?;
+            None
+        } else {
+            Some(input.parse()?)
+        };
+        input.parse::<Token![,]>()?;
+        let b_ref = input.parse()?;
+        Ok(RootWriteMeta { trait_, method, a_ref, k_ref, b_ref })
+    }
+}
+
+/// Re-emit the write metadata as the tuple's sixth, braced element.
+pub fn root_write_meta_tokens(m: &RootWriteMeta) -> TokenStream {
+    let trait_ = &m.trait_;
+    let method = &m.method;
+    let a_ref = &m.a_ref;
+    let k_ref = m.k_ref.as_ref().map(|k| quote!(#k)).unwrap_or(quote!(-));
+    let b_ref = &m.b_ref;
+    quote!({ #trait_, #method, #a_ref, #k_ref, #b_ref })
+}
+
 /// A root pattern's trait metadata, published by its registration courier:
 /// (method name, associated type name, GAT name, cardinality, key associated
 /// type name). The key slot carries the key's associated type name for a
-/// keyed root (`Key`), `-` otherwise. Method/GAT/associated-type names are
-/// the *root's* declaration — never the instantiation's local alias (spike
-/// 1's E0407 finding).
+/// keyed root (`Key`), `-` otherwise; the sixth, braced slot carries the
+/// write-trait metadata (`-` when absent — an in-flight payload from an
+/// older emission). Method/GAT/associated-type names are the *root's*
+/// declaration — never the instantiation's local alias (spike 1's E0407
+/// finding).
 #[derive(Clone, Debug)]
 pub struct RootMeta {
     pub method: Ident,
@@ -685,6 +816,7 @@ pub struct RootMeta {
     pub gat: Option<Ident>,
     pub card: Cardinality,
     pub key: Option<Ident>,
+    pub write: Option<RootWriteMeta>,
 }
 
 impl RootMeta {
@@ -717,6 +849,7 @@ impl RootMeta {
             gat,
             card,
             key: (card == Cardinality::Keyed).then(|| Ident::new("Key", arrow.name.span())),
+            write: Some(RootWriteMeta::of_root_arrow(arrow)?),
         })
     }
 }
@@ -755,7 +888,22 @@ impl Parse for RootMeta {
         } else {
             Some(input.parse()?)
         };
-        Ok(RootMeta { method, assoc, gat, card, key })
+        // The sixth, braced write slot: `-` or absent (an in-flight payload
+        // from an older emission degrades to no write metadata), a brace
+        // group parses as the write metadata.
+        let write = if input.is_empty() {
+            None
+        } else {
+            input.parse::<Token![,]>()?;
+            if input.peek(Token![-]) {
+                input.parse::<Token![-]>()?;
+                None
+            } else {
+                let g: proc_macro2::Group = input.parse()?;
+                Some(syn::parse2(g.stream())?)
+            }
+        };
+        Ok(RootMeta { method, assoc, gat, card, key, write })
     }
 }
 
@@ -770,7 +918,12 @@ pub fn root_meta_tokens(m: &RootMeta) -> TokenStream {
         Cardinality::Keyed => quote!(keyed),
     };
     let key = m.key.as_ref().map(|k| quote!(#k)).unwrap_or(quote!(-));
-    quote!(#method, #assoc, #gat, #card, #key)
+    let write = m
+        .write
+        .as_ref()
+        .map(root_write_meta_tokens)
+        .unwrap_or_else(|| quote!(-));
+    quote!(#method, #assoc, #gat, #card, #key, #write)
 }
 
 // ---------------------------------------------------------------------------
@@ -995,9 +1148,13 @@ mod tests {
     #[test]
     fn roundtrip_root_meta_tuple() {
         for src in [
+            "nodes, Node, Nodes, many, -, { InsertNodes, insert_nodes, GraphRef, -, NodeRef }",
+            "source, Node, -, one, -, { SetSource, set_source, EdgeRef, -, NodeRef }",
+            "subnode, SubNode, -, keyed, Key, { InsertSubnode, insert_subnode, SubgraphRef, MainNodeRef, SubNodeRef }",
+            // In-flight payloads from an older emission (no sixth slot, or
+            // `-`) degrade to no write metadata.
             "nodes, Node, Nodes, many, -",
-            "source, Node, -, one, -",
-            "subnode, SubNode, -, keyed, Key",
+            "nodes, Node, Nodes, many, -, -",
         ] {
             let ts: TokenStream = src.parse().expect("tuple parses");
             let once: RootMeta = syn::parse2(ts).expect("tuple parse");
@@ -1008,7 +1165,54 @@ mod tests {
             assert_eq!(once.gat, twice.gat, "src: {src}");
             assert_eq!(once.card, twice.card, "src: {src}");
             assert_eq!(once.key, twice.key, "src: {src}");
+            match (&once.write, &twice.write) {
+                (Some(w), Some(w2)) => {
+                    assert_eq!(w.trait_, w2.trait_, "src: {src}");
+                    assert_eq!(w.method, w2.method, "src: {src}");
+                    assert_eq!(w.a_ref, w2.a_ref, "src: {src}");
+                    assert_eq!(w.k_ref, w2.k_ref, "src: {src}");
+                    assert_eq!(w.b_ref, w2.b_ref, "src: {src}");
+                }
+                (None, None) => {}
+                _ => panic!("write slot mismatch for {src}"),
+            }
         }
+    }
+
+    #[test]
+    fn entity_ctor_args_by_derived_only_rule() {
+        use super::SchemaBody;
+        use proc_macro2::{Ident as PIdent, Span};
+        let parse_body = |src: &str| {
+            syn::parse::Parser::parse2(
+                |input: syn::parse::ParseStream| {
+                    let b: SchemaBody = input.parse()?;
+                    Ok(b)
+                },
+                src.parse::<TokenStream>().expect("body parses"),
+            )
+            .expect("body")
+        };
+        let id = |s: &str| PIdent::new(s, Span::call_site());
+        // Digraph's Edge: `source`/`target` are provable as `by`
+        // determinants, in declaration order.
+        let digraph = parse_body(
+            "entities: root Graph, Node, Edge; arrows { nodes: stdlib::Nodes, Graph -> Node; out_edges: stdlib::OutEdges, Node -> Edge, by source; in_edges: stdlib::InEdges, Node -> Edge, by target; source: stdlib::Source, Edge -> Node; target: stdlib::Target, Edge -> Node; edges: stdlib::Edges, Node -> Edge := sum(out_edges, in_edges); }",
+        );
+        assert_eq!(
+            digraph.entity_ctor_args(&id("Edge")),
+            Some(vec![id("source"), id("target")])
+        );
+        // Node: by-bearing and sum arrows are not one-arrow candidates.
+        assert_eq!(digraph.entity_ctor_args(&id("Node")), Some(vec![]));
+        // CsrDigraph's E: `source`/`target` are plain instantiations, named
+        // by no `by` clause — opaque, the Add trait is vetoed.
+        let csr = parse_body(
+            "entities: root G, N, E; arrows { nodes: stdlib::Nodes, G -> N; out: stdlib::OutEdges, N -> E; source: stdlib::Source, E -> N; target: stdlib::Target, E -> N; }",
+        );
+        assert_eq!(csr.entity_ctor_args(&id("E")), None);
+        // CsrDigraph's N: the primitive `out` instantiation is opaque too.
+        assert_eq!(csr.entity_ctor_args(&id("N")), None);
     }
 
     #[test]

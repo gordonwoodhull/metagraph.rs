@@ -78,8 +78,75 @@ be exercised before its staging call exists. Recorded here per the plan's
   TxIntrusive regained its `arrow` field (the arrays are named after
   the binding).
 
-Not started: steps 6–14. Step 6's design question is SETTLED
-(2026-10-12, Gordon — see "Step 6 pre-work"); no step-6 code written.
+- **Step 6** (this commit): write-trait codegen — the courier's sixth,
+  braced write slot `{ Trait, method, ARef, KRef?, BRef }` on RootMeta
+  (grammar.rs, tolerant parse: `-`/absent = no write metadata);
+  `SchemaBody::entity_ctor_args` implements the settled by-derived-only
+  arity rule (inline `one` arrows + `by`-named determinants, declaration
+  order; any other opaque instantiation arrow out of the entity vetoes
+  `Add<E>`); root patterns emit the arrow-named `Insert<Arrow>`/
+  `Set<Arrow>` traits beside the read trait and a `pub mod <snake>`
+  holding per-entity markers + `Add<E>`/`Remove<E>` traits; instantiation
+  patterns grow the same per-entity items into their existing module;
+  finish_compose re-mints per-entity markers per instance (same dedup).
+  codegen builds the trait-impl data into TxModel; tx.rs emits
+  `HandleToRef` impls per entity (per-entity markers), `Add`/`Remove`
+  Tx impls (Add only where the declaring block proved arity), the
+  `insert_<arrow>` staging verb for primitive (non-`by`) bound many
+  arrows with an insert hook — self-ful forms also get the `Insert`
+  trait impl, unfused-root forms are inherent-only (self-less) — with
+  `Op::Insert<Arrow>` variants replayed through `__insert_<arrow>` at
+  flush on top of the carried skeleton. Tests: tests/tx_write_traits.rs
+  (3 — spike 8's copy and replace_node recast against the generated
+  surface, plus trait-vs-inherent equivalence) and
+  tests/tx_flush_shapes.rs gains insert-through-Tx coverage (4 new:
+  inherent + trait + self-less replay, dangler + oob rejections).
+  Suite green incl. trybuild + downstream.
+
+Not started: steps 7–14.
+
+Step-6 notes (deviations from this handoff's pre-work, each reasoned):
+
+- **Marker dedup replaced the collision check.** The pre-work pinned "a
+  pattern!-time collision check against camel(arrow) markers"; on
+  contact the stdlib itself trips it — `MainNode`/`MainEdge` root
+  patterns declare a *closed* target entity whose verbatim name equals
+  the arrow's camel marker. Renaming those entities would churn
+  root-fixed read assoc names for no gain, so instead the emission
+  dedups: a name already minted by an arrow marker is not re-minted —
+  one struct serves the read impl of that arrow and the write impls of
+  that entity (the traits differ; no impl can conflict). The markers
+  module is unique by construction; no error surface.
+- **Inserts DO get step-1/2 checks now.** The pre-work deferred all
+  step-1/2 checks for Insert ops to the keyed steps; but the replay
+  resolve indexes the compaction map with `.expect("validated in
+  steps 1-2")`, and an unvalidated raw id or a removed endpoint would
+  panic at flush on user error — exactly what the pipeline's contract
+  forbids. Insert refs now range-validate (`UnknownOldId`) and a staged
+  insert naming a removed host/member is a `DanglingEndpoint`
+  attributed to the insert op (same shape as staged-add danglers). The
+  keyed live-key checks still land with steps 8/11.
+- **Generic transforms thread one marker per bound trait.** Spike 8's
+  hand-written surface used one marker for everything; the generated
+  surface has M1's per-arrow read markers, so the recast copy/replace
+  bounds carry MN/MO/MS/MT (read) + MEN/MEE (per-entity write) —
+  inference resolves them from the unique impls. `HandleToRef`'s
+  per-entity marker is the same struct `Add`/`Remove` use, so the
+  equality web collapses onto MEN/MEE.
+- **"Two marker instantiations" reads as two store types here.** A
+  second marker set over the same pattern requires composition, and
+  composed Tx lands at step 8; the acceptance instantiates the
+  transforms at the Digraph markers against two `implement!` stores
+  (Ka→Kb cross-store copy; Ka replace vs direct staging).
+- **Per-entity emission skips OPEN entities.** Their records live in a
+  fused peer store, so existence ops have nothing to name; this also
+  keeps Subgraph's open `MainNode`/`MainEdge` clear of the `main_node`/
+  `main_edge` arrow markers. Nested/composed Tx (steps 8/9) sees open
+  entities through their host.
+- Duplicate membership (re-inserting an already-listed member through
+  the primitive insert verb) corrupts the intrusive chain — same hazard
+  as the raw store op; the Tx does not guard it, and the plan's
+  staging-panic list doesn't ask it to. Noted on the verb's doc.
 
 ## Architecture decisions (settled in the survey, keep unless forced)
 
@@ -386,6 +453,11 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
+- 2026-10-12 (impl-m4-4): step 6 DONE (see "Where things stand" and the
+  step-6 notes above — five recorded deviations/reasonings). Suite green
+  incl. trybuild + downstream at the commit. Next: step 7 (`set_` +
+  grown hooks); decision 6's csr × set_ residual applies (check
+  tests/csr.rs's builder usage of set_source when doing step 7).
 - 2026-10-12 (impl-m4-3): step 6's Add<E> ctor-arg arity question
   settled with Gordon (by-derived only, skip opaque — see the
   pre-work section). No step-6 code written; session stopped at

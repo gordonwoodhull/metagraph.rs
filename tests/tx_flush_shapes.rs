@@ -153,6 +153,92 @@ with_tap!(prim, prim_tests, {
             ]
         );
     }
+
+    #[test]
+    fn prim_insert_through_tx_replays_on_top_of_carry() {
+        // M4 step 6: the `insert_out` staging verb (and its root-fixed
+        // trait spelling) queues an Insert op; the flush replays it
+        // through the backing's insert hook AFTER the carried skeleton,
+        // so an inserted member push-fronts onto the carried list.
+        // Members must be UNLISTED (kept-but-unlisted or staged): like
+        // the raw store op, re-inserting a listed member corrupts the
+        // chain — the Tx does not guard duplicates.
+        use metagraph_exper::stdlib::InsertOutEdges;
+
+        let mut base = PrimLinks::new();
+        let a = base.add_n();
+        let b = base.add_n();
+        let e0 = base.add_e(a, b);
+        let e1 = base.add_e(a, b); // kept, never listed
+        base.insert_out(a, e0); // a's list: [e0]
+
+        // Inherent spelling: a staged (Pending) member insert.
+        let out = base
+            .edit()
+            .tap_flush(|tx| {
+                let e2 = tx.add_e(b, a); // born unlisted (step-3 note d)
+                tx.insert_out(a, e2);
+            })
+            .expect("flush");
+        // Carried [e0'], then the staged e2' push-fronts: [e2', e0'].
+        // (The report maps are old-id indexed; the staged edge has no old id.)
+        assert_eq!(out_ids(&out.store, NId(0)), vec![2, 0]);
+        out.store.validate().expect("validate");
+
+        // Trait spelling (root-fixed name, same op): an existing
+        // kept-but-unlisted member insert. The trait method takes the
+        // ref types (canonical arity); raw ids convert via `existing`.
+        let out2 = base
+            .edit()
+            .tap_flush(|tx| {
+                InsertOutEdges::insert_out_edges(
+                    &mut *tx,
+                    super::prim::NRef::existing(a),
+                    super::prim::ERef::existing(e1),
+                );
+            })
+            .expect("trait flush");
+        assert_eq!(out_ids(&out2.store, NId(0)), vec![1, 0]);
+    }
+
+    #[test]
+    fn prim_insert_naming_removed_record_is_a_dangler() {
+        // A staged insert naming a removed host or member is a
+        // DanglingEndpoint attributed to the insert op (a removed record
+        // cannot accept membership), not a replay-time panic.
+        let mut base = PrimLinks::new();
+        let a = base.add_n();
+        let b = base.add_n();
+        let e0 = base.add_e(a, b);
+        base.insert_out(a, e0);
+
+        let err = base
+            .edit()
+            .tap_flush(|tx| {
+                tx.remove_e(EId(0)); // op 0
+                tx.insert_out(a, EId(0)); // op 1 — names the removed member
+            })
+            .expect_err("insert dangler");
+        assert_eq!(
+            err.violations,
+            vec![Violation::DanglingEndpoint {
+                op: 1,
+                record: RecordDesc::Staged(1),
+                endpoint_arena: "e",
+                endpoint: 0,
+            }]
+        );
+
+        // An out-of-range raw id is an UnknownOldId, never an index panic.
+        let err = base
+            .edit()
+            .tap_flush(|tx| tx.insert_out(a, EId(99)))
+            .expect_err("oob insert");
+        assert_eq!(
+            err.violations,
+            vec![Violation::UnknownOldId { op: 0, arena: "e", id: 99 }]
+        );
+    }
 });
 
 // ---- root-sourced list: the head is a store field, one chain -----------
@@ -205,5 +291,28 @@ with_tap!(root_links, root_links_tests, {
         out.store.validate().expect("validate");
         // Old store untouched.
         assert_eq!(walked(&base), vec![0, 3, 1]);
+    }
+
+    #[test]
+    fn root_headed_self_less_insert_through_tx() {
+        // M4 step 6: at an unfused-root self the insert verb is
+        // inherent-only (no trait impl — the canonical arity takes the
+        // self ref, which does not exist there). The self-less Insert op
+        // replays through the store-level hook after the carry.
+        let mut base = RootLinks::new();
+        let c0 = base.add_c();
+        let _c1 = base.add_c();
+        base.insert_cs(c0);
+
+        let out = base
+            .edit()
+            .tap_flush(|tx| {
+                let c2 = tx.add_c(); // born unlisted
+                tx.insert_cs(c2); // self-less: no host
+            })
+            .expect("flush");
+        // Carried [c0'], then the staged c2' push-fronts: [c2', c0'].
+        assert_eq!(walked(&out.store), vec![2, 0]);
+        out.store.validate().expect("validate");
     }
 });

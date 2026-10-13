@@ -719,7 +719,7 @@ the probe crate under `/tmp` as the reference implementation.
 
 **Stage 2 — generated write surface**
 
-- [ ] 6. Write-trait codegen: courier write slot (the arrow-named
+- [x] 6. Write-trait codegen: courier write slot (the arrow-named
       verbs, root-emitted trait items); per-entity `Add<Entity>`/
       `Remove<Entity>` traits and per-entity markers emitted by the
       declaring block; canonical arity (the self ref always present),

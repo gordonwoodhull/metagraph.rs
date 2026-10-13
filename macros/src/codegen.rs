@@ -1932,6 +1932,26 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     .map(|i| i.decl.target.clone())
                     .expect("a ctor-arg field traces to its arrow")
             };
+            // The per-entity write-side trait/marker paths live in the
+            // declaring pattern's own module — the same path derivation
+            // the read-side markers use, minus the `markers` segment for
+            // the traits. `Add<E>` exists only where the declaring block
+            // proved the ctor-arg arity (the by-derived-only rule); the
+            // Tx impl is skipped identically.
+            let entity_marker_path = |ent: &Ident2| -> TokenStream2 {
+                let marker = ent.clone();
+                quote!(#marker_base_ts::#marker_mod::markers::#marker)
+            };
+            let add_trait_path = |ent: &Ident2| -> Option<TokenStream2> {
+                body.entity_ctor_args(ent).map(|_| {
+                    let add = format_ident!("Add{}", ent);
+                    quote!(#marker_base_ts::#marker_mod::#add)
+                })
+            };
+            let remove_trait_path = |ent: &Ident2| -> TokenStream2 {
+                let remove = format_ident!("Remove{}", ent);
+                quote!(#marker_base_ts::#marker_mod::#remove)
+            };
             let entities: Vec<crate::tx::TxEntity> = elements
                 .iter()
                 .map(|e| {
@@ -1984,6 +2004,9 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                         ctor_args,
                         onadd_hooks,
                         fields,
+                        marker_path: entity_marker_path(&e.name),
+                        add_trait: add_trait_path(&e.name),
+                        remove_trait: remove_trait_path(&e.name),
                     }
                 })
                 .collect();
@@ -2008,12 +2031,81 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     Ok(crate::tx::TxField { emitted: cf.emitted.clone(), init })
                 })
                 .collect::<syn::Result<_>>()?;
+            // The primitive-insert verbs: non-`by` bound many arrows with
+            // an insert hook. Existence arrows stage no insert (the arena
+            // is the membership); `by`-derived arrows neither (membership
+            // follows the determining field); keyed arrows are gated off
+            // with the whole Tx until their step. At an unfused-root self
+            // the verb is inherent-only — the canonical trait arity takes
+            // the self ref, which does not exist there.
+            let mut inserts: Vec<crate::tx::TxInsert> = Vec::new();
+            for info in &infos {
+                let Some(d) = info.backing else { continue };
+                let a = info.decl;
+                if a.by.is_some() || card_of_decl(d) != Cardinality::Many {
+                    continue;
+                }
+                if d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+                    continue;
+                }
+                if !d.has(|c| matches!(c, Clause::OnInsert { .. })) {
+                    continue;
+                }
+                let root_self = is_root(&a.source);
+                let marker_path = {
+                    let marker = marker_ty(&a.name);
+                    quote!(#marker_base_ts::#marker_mod::markers::#marker)
+                };
+                let verb = if root_self {
+                    None
+                } else {
+                    let write = info.meta.write.as_ref().ok_or_else(|| {
+                        syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "root `{}` publishes no write metadata (old courier?); \
+                                 rebuild the declaring crate",
+                                path_tokens(a.inst.as_ref().unwrap()),
+                            ),
+                        )
+                    })?;
+                    // The write trait lives beside the read trait (the
+                    // root pattern's invocation site): same resolved
+                    // prefix, the write slot's trait name as the last
+                    // segment.
+                    let mut write_path = a.inst.as_ref().unwrap().clone();
+                    write_path.segments.last_mut().unwrap().ident = write.trait_.clone();
+                    let trait_path =
+                        crate::resolve_schema_path(&write_path, &schema.pkg)?;
+                    let a_ref_alias = format_ident!("{}Ref", a.source);
+                    let b_ref_alias = format_ident!("{}Ref", a.target);
+                    let mut assocs = vec![(write.a_ref.clone(), quote!(#a_ref_alias))];
+                    if let (Some(k_ref), Some(k_ent)) = (&write.k_ref, &a.key) {
+                        let k_ref_alias = format_ident!("{}Ref", k_ent);
+                        assocs.push((k_ref.clone(), quote!(#k_ref_alias)));
+                    }
+                    assocs.push((write.b_ref.clone(), quote!(#b_ref_alias)));
+                    Some(crate::tx::TxVerb {
+                        trait_path,
+                        marker_path,
+                        method: write.method.clone(),
+                        assocs,
+                    })
+                };
+                inserts.push(crate::tx::TxInsert {
+                    arrow: a.name.clone(),
+                    host: (!root_self).then(|| a.source.clone()),
+                    member: a.target.clone(),
+                    verb,
+                });
+            }
             let model = crate::tx::TxModel {
                 store: store.clone(),
                 rt: crate::runtime_path(),
                 entities,
                 store_fields: tx_store_fields,
                 intrusive,
+                inserts,
             };
             out.extend(crate::tx::emit(&model));
         }
