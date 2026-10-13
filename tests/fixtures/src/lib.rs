@@ -73,6 +73,20 @@ pub mod shapes {
         }
     }
 
+    // A root-sourced keyed arrow with no per-record keyed peer: the flat
+    // store-level keyed carry (M4 step 8 — every keyed arrow rides the
+    // unfused root, so the store's `Tx` emits; KeyedPlain's element-sourced
+    // `tags` still gates its store's Tx off until the keyed-carry step).
+    pattern! {
+        KeyedRoot {
+            entities: root G, N, M;
+            arrows {
+                nodes: metagraph_exper::stdlib::Nodes, G -> N;
+                marks:  metagraph_exper::stdlib::SubNodeOf,       G -> M, key(N);
+            }
+        }
+    }
+
     // The CSR driver's primitive shape: `out` is a primitive `many` arrow
     // sourced at the element `N` (no `by` — inserts ride the public insert
     // op and `on_add` grows the buckets), unlike the stdlib `Digraph`'s

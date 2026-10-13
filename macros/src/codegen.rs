@@ -1109,6 +1109,46 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 }
             });
         }
+
+        // Live-key predicate (keyed): the pure form of the check-then-write
+        // insert — the Tx's staging call checks it without performing the
+        // write (the composed codegen's twin emission). Derived from the
+        // authored lookup body.
+        if card_of_decl(d) == Cardinality::Keyed {
+            let kid = id_ty(a.key.as_ref().expect("keyed arrows bind a key sort"));
+            let lookup = body_of(d, |c| matches!(c, Clause::Lookup { .. })).ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!("backing `{}` authors no lookup(a, k) body", d.name),
+                )
+            })?;
+            let mut roles = FlatRoles::new(d, a, root_self, a.target.clone(), &store_overrides)
+                .at(quote!(self))
+                .with_k(quote!(key));
+            if !root_self {
+                roles = roles.with_a(quote!(self_id));
+            }
+            let lb = roles::rewrite(lookup, &roles);
+            let pred = format_ident!("__{}_key_live", a.name);
+            if root_self {
+                hook_impls.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc_name), "` (store-level map)")]
+                    fn #pred(&self, key: #kid) -> bool {
+                        (#lb).is_some()
+                    }
+                });
+            } else {
+                let sid = id_ty(&a.source);
+                hook_impls.extend(quote! {
+                    #[doc(hidden)]
+                    #[doc = concat!("live-key predicate of arrow `", stringify!(#arrow_doc_name), "` on one self object")]
+                    fn #pred(&self, self_id: #sid, key: #kid) -> bool {
+                        (#lb).is_some()
+                    }
+                });
+            }
+        }
     }
 
     // ---- validate methods (the round-4 convention) ----
@@ -1874,14 +1914,13 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     out.extend(trait_impls);
 
     // ---- M4: the transaction (write side) ----
-    // Stage-3 gate: flat, non-phased, no keyed bindings, and every bound
-    // arrow's carry classifiable (existence, field-one, or the intrusive
-    // head/link shape). Unsupported shapes emit no `Tx` — their `edit()`
-    // arrives with the step that implements their carry.
+    // Stage-3 gate: flat, non-phased, every bound arrow's carry
+    // classifiable (existence, field-one, the intrusive head/link shape,
+    // or a store-level keyed map — a per-record keyed map carries
+    // per-host state and lands with the keyed-carry step). Unsupported
+    // shapes emit no `Tx` — their `edit()` arrives with the step that
+    // implements their carry.
     if !phased {
-        let has_keyed = infos
-            .iter()
-            .any(|i| i.backing.map(|d| card_of_decl(d) == Cardinality::Keyed).unwrap_or(false));
         // Carry classification, per bound arrow. Existence and field-one
         // carries ride the entity data (nothing / the ctor-arg fields);
         // the intrusive carry collects its walk shape. A `many` binding
@@ -1890,6 +1929,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
         // milestone has not defined).
         let ty_str = |f: &ContribField| f.ty.to_token_stream().to_string().replace(' ', "");
         let mut intrusive: Vec<crate::tx::TxIntrusive> = Vec::new();
+        let mut keyed: Vec<crate::tx::TxKeyed> = Vec::new();
         let mut carry_ok = true;
         for info in &infos {
             let Some(d) = info.backing else {
@@ -1967,12 +2007,61 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     });
                 }
                 Cardinality::Keyed => {
-                    carry_ok = false; // keyed carry lands with its step
-                    break;
+                    // The store-level keyed carry (step 8): the self must
+                    // be the unfused root (the map is a store field —
+                    // exactly one contributed field, the map) and the
+                    // backing must author the check-then-write insert and
+                    // a lookup (the live-key predicate derives from it).
+                    // A per-record keyed map gates the Tx off until the
+                    // keyed-carry step.
+                    let root_self = is_root(&a.source);
+                    let a_fields: Vec<&ContribField> = on_clauses(d, OnTarget::A)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let shape_ok = root_self
+                        && a_fields.len() == 1
+                        && on_clauses(d, OnTarget::B).is_empty()
+                        && on_clauses(d, OnTarget::Store).is_empty()
+                        && d.has(|c| matches!(c, Clause::OnInsert { .. }))
+                        && body_of(d, |c| matches!(c, Clause::Lookup { .. })).is_some()
+                        && a.key.is_some();
+                    if !shape_ok {
+                        carry_ok = false;
+                        break;
+                    }
+                    let map_field = a_fields[0]
+                        .ty
+                        .to_token_stream()
+                        .to_string()
+                        .replace(' ', "")
+                        .starts_with("HashMap<")
+                        .then(|| {
+                            store_overrides
+                                .get(&(a.name.to_string(), a_fields[0].logical.to_string()))
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    formula_name(
+                                        a_fields[0],
+                                        a_fields[0].formula,
+                                        &a.name,
+                                        &link_stem(&a.name),
+                                    )
+                                })
+                        })
+                        .expect("checked: one A field");
+                    keyed.push(crate::tx::TxKeyed {
+                        arrow: a.name.clone(),
+                        key_entity: a.key.clone().expect("checked: key bound"),
+                        member: a.target.clone(),
+                        map_field,
+                        hook: format_ident!("__insert_{}", a.name),
+                        key_live: format_ident!("__{}_key_live", a.name),
+                    });
                 }
             }
         }
-        if !has_keyed && carry_ok {
+        if carry_ok {
             let arrow_target_of = |arrow: &Ident2| -> Ident2 {
                 infos
                     .iter()
@@ -1996,9 +2085,9 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     quote!(#marker_base_ts::#marker_mod::#add)
                 })
             };
-            let remove_trait_path = |ent: &Ident2| -> TokenStream2 {
+            let remove_trait_path = |ent: &Ident2| -> Option<TokenStream2> {
                 let remove = format_ident!("Remove{}", ent);
-                quote!(#marker_base_ts::#marker_mod::#remove)
+                Some(quote!(#marker_base_ts::#marker_mod::#remove))
             };
             let entities: Vec<crate::tx::TxEntity> = elements
                 .iter()
@@ -2013,6 +2102,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                         })
                         .map(|i| crate::tx::TxCtorArg {
                             arg: i.decl.name.clone(),
+                            basis: i.decl.name.clone(),
                             target_entity: i.decl.target.clone(),
                             target_ref_alias: format_ident!("{}Ref", i.decl.target),
                             target_into_trait: format_ident!("Into{}Arg", i.decl.target),
@@ -2145,6 +2235,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     arrow: a.name.clone(),
                     host: (!root_self).then(|| a.source.clone()),
                     member: a.target.clone(),
+                    hook: format_ident!("__insert_{}", a.name),
                     verb,
                 });
             }
@@ -2189,12 +2280,13 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     arrow: a.name.clone(),
                     self_entity: a.source.clone(),
                     target_entity: a.target.clone(),
-                    verb: crate::tx::TxVerb {
+                    hook: format_ident!("__set_{}", a.name),
+                    verb: Some(crate::tx::TxVerb {
                         trait_path,
                         marker_path,
                         method: write.method.clone(),
                         assocs,
-                    },
+                    }),
                 });
             }
             let model = crate::tx::TxModel {
@@ -2205,6 +2297,7 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                 intrusive,
                 inserts,
                 sets,
+                keyed,
             };
             out.extend(crate::tx::emit(&model));
         }

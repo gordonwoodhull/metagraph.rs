@@ -2958,5 +2958,311 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
 
     out.extend(iter_defs);
     out.extend(trait_impls);
+
+    // ---- M4 step 8: the transaction (write side) ----
+    // The composed codegen builds the same normalized TxModel the flat
+    // codegen does, so the whole flush pipeline exists in one place. Gate:
+    // non-phased, every fusion class at root level (an embedded arena is
+    // a nested store — `within()` is the nesting step's), and every bound
+    // arrow's carry classifiable by the flat taxonomy (existence,
+    // field-one, the intrusive head/link shape, or a store-level keyed
+    // map). The composed Tx is inherent-surface in this step: the
+    // write-TRAIT impls wait for the composed write-trait surface
+    // (per-entity traits would need member-pattern paths the composed
+    // schema does not carry; the arrow-named impls land beside them,
+    // pinned by tests) — `HandleToRef` impls emit regardless (the
+    // runtime trait needs only the per-instance markers finish_compose
+    // already mints).
+    let mut tx_ok = !phased && classes.iter().all(|c| c.loc == ClassLoc::Root);
+    // An arrow's unique local basis: the bare arrow name, or the
+    // instance-qualified spelling exactly where the public write ops take
+    // the prefix (cross-instance arrow-name collision) — so the Tx verbs
+    // (`insert_<basis>`, `set_<basis>`) match the store's op names.
+    let basis_of = |i: usize, arrow: &Ident2| -> Ident2 {
+        if arrow_name_users[&arrow.to_string()] > 1 {
+            format_ident!("{}_{}", snake(&members[i].0.to_string()), arrow)
+        } else {
+            arrow.clone()
+        }
+    };
+    // Ctor-arg target resolution: a field's rewritten type names the
+    // target class's id type at root level.
+    let class_by_id_name: HashMap<String, usize> = classes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.owns_records)
+        .map(|(ci, c)| (c.id_name.to_string(), ci))
+        .collect();
+    let ty_str = |f: &crate::backing::ContribField| f.ty.to_token_stream().to_string().replace(' ', "");
+    let mut tx_intrusive: Vec<crate::tx::TxIntrusive> = Vec::new();
+    let mut tx_keyed: Vec<crate::tx::TxKeyed> = Vec::new();
+    let mut tx_inserts: Vec<crate::tx::TxInsert> = Vec::new();
+    let mut tx_sets: Vec<crate::tx::TxSet> = Vec::new();
+
+    // Carry classification, per bound arrow (the flat twin's checks over
+    // the placement-independent declaration; the emitted field names come
+    // from the placement's collision-resolved contributions).
+    'arrows: for (i, infos) in inst_infos.iter().enumerate() {
+        for info in infos {
+            let Some(d) = info.backing else { continue }; // `:= sum` reads carry nothing
+            let a = info.decl;
+            let sc = class_index_of(i, ent_index(i, &a.source)?);
+            let tc = class_index_of(i, ent_index(i, &a.target)?);
+            let root_self = !classes[sc].owns_records;
+            let inst_snake = snake(&members[i].0.to_string());
+            match card_of_decl(d) {
+                Cardinality::One => {
+                    let a_fields: Vec<&crate::backing::ContribField> = on_clauses(d, OnTarget::A)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let ok = a_fields.len() == 1
+                        && a_fields[0].formula == crate::backing::NameFormula::Arrow
+                        && ty_str(a_fields[0]) == "BId"
+                        && d.has(|c| matches!(c, Clause::CtorArg { .. }));
+                    if !ok {
+                        tx_ok = false;
+                        break 'arrows;
+                    }
+                }
+                Cardinality::Many => {
+                    if d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
+                        if crate::codegen::contributed_fields(d).next().is_some() {
+                            tx_ok = false;
+                            break 'arrows;
+                        }
+                        continue;
+                    }
+                    let a_fields: Vec<&crate::backing::ContribField> = on_clauses(d, OnTarget::A)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let b_fields: Vec<&crate::backing::ContribField> = on_clauses(d, OnTarget::B)
+                        .iter()
+                        .flat_map(|(_, fs)| fs.iter())
+                        .collect();
+                    let ok = a_fields.len() == 1
+                        && b_fields.len() == 1
+                        && on_clauses(d, OnTarget::Store).is_empty()
+                        && a_fields[0].formula == crate::backing::NameFormula::Stem
+                        && b_fields[0].formula == crate::backing::NameFormula::Stem
+                        && ty_str(a_fields[0]) == "Option<BId>"
+                        && ty_str(b_fields[0]) == "Option<BId>"
+                        && d.has(|c| matches!(c, Clause::OnInsert { .. }));
+                    if !ok {
+                        tx_ok = false;
+                        break 'arrows;
+                    }
+                    let head_logical = a_fields[0].logical.to_string();
+                    let head_field = if root_self {
+                        store_field_names[&(i, a.name.to_string())][&head_logical].clone()
+                    } else {
+                        classes[sc]
+                            .fields
+                            .iter()
+                            .find(|fc| fc.inst == i && fc.arrow == a.name && fc.side_a)
+                            .expect("the A-side head contribution was collected")
+                            .field
+                            .clone()
+                    };
+                    let member_link = classes[tc]
+                        .fields
+                        .iter()
+                        .find(|fc| fc.inst == i && fc.arrow == a.name && !fc.side_a)
+                        .expect("the B-side link contribution was collected")
+                        .field
+                        .clone();
+                    tx_intrusive.push(crate::tx::TxIntrusive {
+                        arrow: basis_of(i, &a.name),
+                        host: (!root_self).then(|| classes[sc].name.clone()),
+                        head_field,
+                        member: classes[tc].name.clone(),
+                        member_link,
+                    });
+                }
+                Cardinality::Keyed => {
+                    // Store-level only (the self is the unfused root); a
+                    // per-record keyed map gates the Tx off until the
+                    // keyed-carry step.
+                    let shape_ok = root_self
+                        && a.key.is_some()
+                        && map_of_arrow.contains_key(&(i, a.name.to_string()))
+                        && d.has(|c| matches!(c, Clause::OnInsert { .. }))
+                        && body_of(d, |c| matches!(c, Clause::Lookup { .. })).is_some();
+                    if !shape_ok {
+                        tx_ok = false;
+                        break 'arrows;
+                    }
+                    let kc = class_index_of(i, ent_index(i, a.key.as_ref().unwrap())?);
+                    tx_keyed.push(crate::tx::TxKeyed {
+                        arrow: basis_of(i, &a.name),
+                        key_entity: classes[kc].name.clone(),
+                        member: classes[tc].name.clone(),
+                        map_field: map_of_arrow[&(i, a.name.to_string())].clone(),
+                        hook: format_ident!("__insert_{}_{}", inst_snake, a.name),
+                        key_live: format_ident!("__{}_{}_key_live", inst_snake, a.name),
+                    });
+                }
+            }
+        }
+    }
+
+    // Entities: one per record-owning class, in class order. Ctor args
+    // are the class's CtorArg field contributions in contribution order —
+    // exactly the add op's parameter order, so replay is positional.
+    let mut tx_entities: Vec<crate::tx::TxEntity> = Vec::new();
+    if tx_ok {
+        for ci in 0..classes.len() {
+            if !classes[ci].owns_records {
+                continue;
+            }
+            let cl = &classes[ci];
+            let mut ctor_args: Vec<crate::tx::TxCtorArg> = Vec::new();
+            let mut fields: Vec<crate::tx::TxField> = Vec::new();
+            for fc in &cl.fields {
+                match &fc.init {
+                    FieldInit::CtorArg(arg) => {
+                        let Some(&tci) = class_by_id_name.get(&fc.ty.to_string().replace(' ', ""))
+                        else {
+                            tx_ok = false;
+                            break;
+                        };
+                        let target = classes[tci].name.clone();
+                        ctor_args.push(crate::tx::TxCtorArg {
+                            arg: arg.clone(),
+                            basis: basis_of(fc.inst, &fc.arrow),
+                            target_entity: target.clone(),
+                            target_ref_alias: format_ident!("{}Ref", target),
+                            target_into_trait: format_ident!("Into{}Arg", target),
+                            target_into_fn: format_ident!("into_{}_ref", snake(&target.to_string())),
+                        });
+                        fields.push(crate::tx::TxField {
+                            emitted: fc.field.clone(),
+                            init: crate::tx::TxFieldInit::CtorArg {
+                                target: target.clone(),
+                                arrow: basis_of(fc.inst, &fc.arrow),
+                            },
+                        });
+                    }
+                    FieldInit::None_ => fields.push(crate::tx::TxField {
+                        emitted: fc.field.clone(),
+                        init: crate::tx::TxFieldInit::None_,
+                    }),
+                    FieldInit::New => fields.push(crate::tx::TxField {
+                        emitted: fc.field.clone(),
+                        init: crate::tx::TxFieldInit::New,
+                    }),
+                }
+            }
+            if !tx_ok {
+                break;
+            }
+            // `on_add` hooks firing at construction of this class — the
+            // same member-arrows loop the add op itself uses, so replay
+            // fires exactly what direct construction fires.
+            let mut onadd_hooks: Vec<Ident2> = Vec::new();
+            for &(mi, _me) in &cl.members {
+                for info in &inst_infos[mi] {
+                    let Some(bd) = info.backing else { continue };
+                    if !bd.has(|c| matches!(c, Clause::OnAdd { .. })) {
+                        continue;
+                    }
+                    if class_index_of(mi, ent_index(mi, &info.decl.source)?) != ci {
+                        continue;
+                    }
+                    onadd_hooks
+                        .push(format_ident!("__onadd_{}_{}", snake(&members[mi].0.to_string()), info.decl.name));
+                }
+            }
+            // The per-entity marker is the canonical member's per-instance
+            // entity marker (finish_compose mints one per closed element).
+            let (m0i, m0e) = cl.members[0];
+            let m0_snake = format_ident!("{}", snake(&members[m0i].0.to_string()));
+            let m0_ent = &members[m0i].2.entities[m0e].name;
+            tx_entities.push(crate::tx::TxEntity {
+                name: cl.name.clone(),
+                arena: cl.arena_fld.clone(),
+                ctor_args,
+                onadd_hooks,
+                fields,
+                marker_path: quote!(#marker_base_ts::#marker_mod::markers::#m0_snake::#m0_ent),
+                add_trait: None,
+                remove_trait: None,
+            });
+        }
+    }
+
+    if tx_ok {
+        // Store-level fields (a store-level ctor-arg is unrepresentable —
+        // applicability rejected it at an unfused root).
+        let mut tx_store_fields: Vec<crate::tx::TxField> = Vec::new();
+        for fc in &store_fields {
+            match fc.init {
+                FieldInit::CtorArg(_) => {
+                    tx_ok = false;
+                    break;
+                }
+                FieldInit::None_ => tx_store_fields.push(crate::tx::TxField {
+                    emitted: fc.field.clone(),
+                    init: crate::tx::TxFieldInit::None_,
+                }),
+                FieldInit::New => tx_store_fields.push(crate::tx::TxField {
+                    emitted: fc.field.clone(),
+                    init: crate::tx::TxFieldInit::New,
+                }),
+            }
+        }
+        if tx_ok {
+            // Primitive-insert verbs (non-`by` bound many arrows with an
+            // insert hook) and set verbs (ctor-arg arrows) — hooks are
+            // instance-qualified, verbs are basis-named (matching the
+            // store's public op names), no trait impls (this step's
+            // inherent-surface rule).
+            for (i, infos) in inst_infos.iter().enumerate() {
+                let inst_snake = snake(&members[i].0.to_string());
+                for info in infos {
+                    let Some(d) = info.backing else { continue };
+                    let a = info.decl;
+                    let sc = class_index_of(i, ent_index(i, &a.source)?);
+                    let tc = class_index_of(i, ent_index(i, &a.target)?);
+                    let root_self = !classes[sc].owns_records;
+                    if card_of_decl(d) == Cardinality::Many
+                        && a.by.is_none()
+                        && !d.has(|c| matches!(c, Clause::MembershipExistence { .. }))
+                        && d.has(|c| matches!(c, Clause::OnInsert { .. }))
+                    {
+                        tx_inserts.push(crate::tx::TxInsert {
+                            arrow: basis_of(i, &a.name),
+                            host: (!root_self).then(|| classes[sc].name.clone()),
+                            member: classes[tc].name.clone(),
+                            hook: format_ident!("__insert_{}_{}", inst_snake, a.name),
+                            verb: None,
+                        });
+                    }
+                    if d.has(|c| matches!(c, Clause::CtorArg { .. })) {
+                        tx_sets.push(crate::tx::TxSet {
+                            arrow: basis_of(i, &a.name),
+                            self_entity: classes[sc].name.clone(),
+                            target_entity: classes[tc].name.clone(),
+                            hook: format_ident!("__set_{}_{}", inst_snake, a.name),
+                            verb: None,
+                        });
+                    }
+                }
+            }
+            let model = crate::tx::TxModel {
+                store: store.clone(),
+                rt: crate::runtime_path(),
+                entities: tx_entities,
+                store_fields: tx_store_fields,
+                intrusive: tx_intrusive,
+                inserts: tx_inserts,
+                sets: tx_sets,
+                keyed: tx_keyed,
+            };
+            out.extend(crate::tx::emit(&model));
+        }
+    }
+
     Ok(out)
 }

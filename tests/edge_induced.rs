@@ -11,7 +11,7 @@
 
 use metagraph_exper::stdlib::{Nodes, OutEdges, Source, Target};
 use metagraph_exper::implement;
-use metagraph_exper::stdlib::{EdgesOf, MainEdge as _, MainNode as _, SubEdgeOf, SubNodeOf};
+use metagraph_exper::stdlib::{EdgesOf, InEdges, MainEdge as _, MainNode as _, SubEdgeOf, SubNodeOf};
 
 mod comp {
     use metagraph_exper::compose_pattern;
@@ -155,4 +155,165 @@ fn duplicate_key_rejected_where_the_op_is_submitted() {
         s.insert_subedge(e0, se)
     }));
     assert!(r.is_err(), "inserting onto a live key panics");
+}
+
+// ---- the transaction (M4 step 8: composed Tx emission starts here) ----
+//
+// The edge-induced store is the composed shape step 8 targets: every
+// fusion class at root level, the keyed arrows store-level at the
+// unfused sub root. The staged surface mirrors the builder's — including
+// the self-less keyed `insert_subnode(key, target)` — and the flush
+// carries the keyed maps (filter + remap) beside the intrusive ones.
+
+/// n1's in-edges, walked through the read trait (push-front order).
+fn in_ids(s: &EdgeInducedStore, n: NodeId) -> Vec<u32> {
+    let g = s.main_graph();
+    let node = g.nodes().find(|x| x.id() == n).unwrap();
+    <Node<'_> as InEdges<markers::main::InEdges>>::in_edges(&node)
+        .map(|e| e.id().0)
+        .collect()
+}
+
+#[test]
+fn tx_stages_the_induced_shape_and_flushes() {
+    let (base, _e0, _e1, e2, _n3) = store();
+    assert_eq!(base.sub_edge_count(), 2);
+
+    // Mirror the inducing constructor by hand through the Tx: a new
+    // subedge for e2 whose endpoints are already keyed (n0 by e0, n2 by
+    // e1 — dedup is the user's `subnode_by_key` check, read through
+    // `old()` while staging).
+    let mut tx = base.edit();
+    assert!(tx.old().subnode_by_key(NodeId(0)).is_some());
+    assert!(tx.old().subnode_by_key(NodeId(2)).is_some());
+    let se = tx.add_sub_edge(e2);
+    tx.insert_subedge(e2, se);
+    let out = tx.flush().expect("flush");
+
+    assert_eq!(out.store.sub_edge_count(), 3);
+    // Old subedges 0, 1 kept (no removals): the staged one is new id 2.
+    assert_eq!(out.store.subedge_by_key(e2), Some(SubEdgeId(2)));
+    assert_eq!(out.store.subedge_by_key(EdgeId(0)), Some(SubEdgeId(0)));
+    assert_eq!(out.store.subnode_by_key(NodeId(1)), Some(SubNodeId(1)));
+    out.store.validate().expect("validate");
+    // Old store untouched.
+    assert_eq!(base.sub_edge_count(), 2);
+}
+
+#[test]
+fn tx_wholly_staged_keyed_entry_round_trips() {
+    let (base, _e0, _e1, _e2, _n3) = store();
+
+    // A staged key record AND a staged target: the refs are Pending, the
+    // key check sees no old entry, replay resolves both through the
+    // replay table.
+    let mut tx = base.edit();
+    let n4 = tx.add_node();
+    let sn = tx.add_sub_node(n4);
+    tx.insert_subnode(n4, sn);
+    let out = tx.flush().expect("flush");
+
+    assert_eq!(out.store.node_count(), 5);
+    assert_eq!(out.store.sub_node_count(), 4);
+    assert_eq!(out.store.subnode_by_key(NodeId(4)), Some(SubNodeId(3)));
+    out.store.validate().expect("validate");
+}
+
+#[test]
+fn tx_handle_to_ref_mints_existing_refs() {
+    use metagraph_exper::tx::HandleToRef;
+
+    let (base, _e0, _e1, _e2, _n3) = store();
+    let mut tx = base.edit();
+    // The marker-generic mapping trait under the composed per-instance
+    // entity markers (the only trait surface the composed Tx carries in
+    // this step).
+    let handle = base.main_graph().nodes().next().unwrap();
+    let r: NodeRef = HandleToRef::<markers::main::Node>::to_ref(&tx, handle);
+    let _e = tx.add_edge(r, r);
+    let out = tx.flush().expect("flush");
+    assert_eq!(out.store.edge_count(), 4);
+    assert_eq!(out.store.source(EdgeId(3)), NodeId(0));
+    out.store.validate().expect("validate");
+}
+
+#[test]
+#[should_panic(expected = "exists in the borrowed old store")]
+fn tx_live_key_panics_at_staging() {
+    let (base, _e0, _e1, _e2, _n3) = store();
+    let mut tx = base.edit();
+    let sn = tx.add_sub_node(NodeId(3));
+    tx.insert_subnode(NodeId(0), sn); // n0 keys a subnode: live
+}
+
+#[test]
+fn tx_removal_splices_intrusive_and_keyed_carries() {
+    let (base, _e0, e1, _e2, _n3) = store();
+
+    // Removing a main edge requires removing its subedge explicitly (the
+    // minimal cascade): alone, the kept SubEdge's `main_edge` field
+    // dangles, attributed to the removal op.
+    let err = base
+        .edit()
+        .tap_flush(|tx| tx.remove_edge(e1))
+        .expect_err("dangling main_edge");
+    assert_eq!(
+        err.violations,
+        vec![Violation::DanglingEndpoint {
+            op: 0,
+            record: RecordDesc::Kept { arena: "sub_edge", id: 1 },
+            endpoint_arena: "edge",
+            endpoint: 1,
+        }]
+    );
+
+    // With the subedge removed too, both carries splice: the intrusive
+    // in/out lists drop e1, the keyed subedge map drops its entry.
+    let out = base
+        .edit()
+        .tap_flush(|tx| {
+            tx.remove_edge(e1);
+            tx.remove_sub_edge(SubEdgeId(1));
+        })
+        .expect("flush");
+    assert_eq!(out.store.edge_count(), 2);
+    assert_eq!(out.store.sub_edge_count(), 1);
+    assert_eq!(out.store.subedge_by_key(e1), None, "entry filtered with its key");
+    assert_eq!(out.store.subedge_by_key(EdgeId(0)), Some(SubEdgeId(0)));
+    // n2's in-list was [e2, e1] — the walk splices e1 out, and e2
+    // compacts to new id 1 (e0 kept -> 0, e1 removed).
+    assert_eq!(in_ids(&out.store, NodeId(2)), vec![1]);
+    out.store.validate().expect("validate");
+}
+
+#[test]
+fn tx_set_repoints_by_derived_membership() {
+    let (base, e0, _e1, _e2, _n3) = store();
+
+    // Re-point e0's target (n1 -> n2) through the grown re-point hook:
+    // n1's in-list loses e0, n2's gains it at the front, and the replay
+    // runs against the rebuilt skeleton.
+    let out = base
+        .edit()
+        .tap_flush(|tx| tx.set_target(e0, NodeId(2)))
+        .expect("flush");
+
+    assert_eq!(out.store.main_edge_target(e0), NodeId(2));
+    assert_eq!(in_ids(&out.store, NodeId(1)), vec![], "e0 unlinked from n1");
+    // n2's in-list was [e2, e1]; e0 re-links at the front.
+    assert_eq!(in_ids(&out.store, NodeId(2)), vec![0, 2, 1]);
+    out.store.validate().expect("validate");
+}
+
+/// A per-module flush tap: stage, then flush, in one expression (the
+/// tx_flush_shapes pattern).
+trait TapFlush {
+    fn tap_flush(self, f: impl FnOnce(&mut Tx<'_>)) -> Result<FlushOutcome, FlushError>;
+}
+
+impl TapFlush for Tx<'_> {
+    fn tap_flush(mut self, f: impl FnOnce(&mut Tx<'_>)) -> Result<FlushOutcome, FlushError> {
+        f(&mut self);
+        self.flush()
+    }
 }

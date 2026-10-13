@@ -217,7 +217,7 @@ fn koenigsberg() -> ka::KaStore {
 #[test]
 fn copy_into_empty_destination_is_signature_identical() {
     let src = koenigsberg();
-    let mut dst_store = kb::KbStore::new();
+    let dst_store = kb::KbStore::new();
     let mut tx = dst_store.edit();
     copy_graph(&src.graph(), &mut tx);
     let out = tx.flush().expect("flush");

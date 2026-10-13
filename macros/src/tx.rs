@@ -52,12 +52,18 @@ pub(crate) struct TxEntity {
     /// stays Tx-inherent).
     pub add_trait: Option<TokenStream2>,
     /// `Remove<E>` trait path (absolute) — the declaring block always
-    /// emits it for a closed non-root entity.
-    pub remove_trait: TokenStream2,
+    /// emits it for a closed non-root entity. `None` on the composed Tx
+    /// (per-instance entity traits are not yet minted for compositions).
+    pub remove_trait: Option<TokenStream2>,
 }
 
 pub(crate) struct TxCtorArg {
     pub arg: Ident2,
+    /// The contributing arrow's unique local basis — the `set_` verb's
+    /// identity, so the honor lookup (`eff_<basis>`) and the field init
+    /// agree even where a composed store prefixes the arrow (the arg
+    /// names the field; the basis names the verb). Flat: the arrow name.
+    pub basis: Ident2,
     /// The arg's target entity — whose arena, compaction map, and pending
     /// table the ref resolves through at flush.
     pub target_entity: Ident2,
@@ -120,10 +126,11 @@ pub(crate) struct TxVerb {
 
 /// The `insert_<arrow>` staging verb of one primitive (non-`by`) bound
 /// `many` arrow — membership asserted directly, replayed through the
-/// backing's `__insert_<arrow>` hook at flush.
+/// backing's insert hook at flush.
 pub(crate) struct TxInsert {
-    /// The local arrow name: the op variant, the inherent staging verb,
-    /// and the store hook are all named after it.
+    /// The arrow's unique local basis: the op variant and the inherent
+    /// staging verb are named after it (the composed codegen qualifies it
+    /// with the instance on cross-instance arrow-name collision).
     pub arrow: Ident2,
     /// The self (host) entity; `None` at an unfused-root self — the verb
     /// is inherent-only in its self-less form (canonical arity takes the
@@ -131,27 +138,63 @@ pub(crate) struct TxInsert {
     pub host: Option<Ident2>,
     /// The member (target) entity.
     pub member: Ident2,
+    /// The backing's insert hook (the replay target — instance-qualified
+    /// in a composed store).
+    pub hook: Ident2,
     /// The `Insert<Arrow>` trait impl, `None` on the self-less form.
     pub verb: Option<TxVerb>,
 }
 
+/// The `insert_<arrow>(key, target)` staging verb of one store-level
+/// keyed arrow (the self is the unfused root — a per-record keyed map
+/// carries per-host state and lands with the keyed-carry step). A keyed
+/// arrow is a function: the staging call rejects a live key — checked
+/// against the borrowed old store and the already-staged inserts (a
+/// staged removal frees no key; re-pointing one is two flushes). The
+/// flush carries the map as state (filter to entries whose key and
+/// target both survive, remap both) and replays staged inserts through
+/// the backing's check-then-write hook on top of the carry.
+pub(crate) struct TxKeyed {
+    /// The arrow's unique local basis: the op variant, the inherent
+    /// staging verb, and the derived carry map are named after it.
+    pub arrow: Ident2,
+    /// The key entity — whose arena, compaction map, and pending table
+    /// the key ref resolves through at flush.
+    pub key_entity: Ident2,
+    /// The target (value) entity.
+    pub member: Ident2,
+    /// The map field on the store.
+    pub map_field: Ident2,
+    /// The backing's insert hook (check-then-write — the replay target).
+    pub hook: Ident2,
+    /// The old-store live-key predicate (the pure form of the check the
+    /// staging call makes).
+    pub key_live: Ident2,
+}
+
 /// The `set_<arrow>` staging verb of one field-backed `one` arrow (a
-/// `ctor_arg` backing — the builder's `__set_<arrow>` hook is the re-point
-/// orchestration: unlink the by-derived derivatives, write, re-link). The
-/// flush honors staged corrections in dangler detection (the probe's honor
-/// reading) and replays through the same hook against the rebuilt skeleton.
+/// `ctor_arg` backing — the builder's re-point hook is the orchestration:
+/// unlink the by-derived derivatives, write, re-link). The flush honors
+/// staged corrections in dangler detection (the probe's honor reading)
+/// and replays through the same hook against the rebuilt skeleton.
 pub(crate) struct TxSet {
-    /// The local arrow name: the op variant `Set<camel>`, the inherent
-    /// staging verb, and the store's `__set_<arrow>` hook are all named
-    /// after it. Also the record field's name (the ctor-arg field is
-    /// arrow-named).
+    /// The arrow's unique local basis: the op variant `Set<camel>`, the
+    /// inherent staging verb, and the effective-value table are named
+    /// after it (also the ctor-arg field's name-mate for the honor
+    /// lookup). The composed codegen qualifies it with the instance on
+    /// cross-instance arrow-name collision.
     pub arrow: Ident2,
     /// The self entity (whose record's field is re-pointed).
     pub self_entity: Ident2,
     /// The field's target entity (the new endpoint's resolution arena).
     pub target_entity: Ident2,
-    /// The `Set<Arrow>` trait impl (the courier's write slot).
-    pub verb: TxVerb,
+    /// The store's re-point hook (the replay target — instance-qualified
+    /// in a composed store).
+    pub hook: Ident2,
+    /// The `Set<Arrow>` trait impl (the courier's write slot); `None`
+    /// where the declaring-block surface is not wired (the composed Tx
+    /// is inherent-surface until the composed write-trait surface lands).
+    pub verb: Option<TxVerb>,
 }
 
 /// The whole store as the transaction sees it.
@@ -174,6 +217,10 @@ pub(crate) struct TxModel {
     /// `set_<arrow>` verbs in schema arrow order (field-backed `one`
     /// arrows — every ctor-arg arrow grows the re-point hook).
     pub sets: Vec<TxSet>,
+    /// Store-level keyed arrows in schema arrow order (the self is the
+    /// unfused root; per-record keyed maps gate the Tx off until the
+    /// keyed-carry step).
+    pub keyed: Vec<TxKeyed>,
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +339,14 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #variant { a: #a_ref, b: #b_ref },
         });
     }
+    for kk in &m.keyed {
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        let k_ref = format_ident!("{}Ref", kk.key_entity);
+        let b_ref = format_ident!("{}Ref", kk.member);
+        op_variants.extend(quote! {
+            #variant { k: #k_ref, b: #b_ref },
+        });
+    }
     let ops_enum = quote! {
         #[doc(hidden)]
         #[derive(Debug)]
@@ -399,15 +454,16 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 }
             });
         }
-        let remove_trait = &e.remove_trait;
-        write_impls.extend(quote! {
-            impl<'g> #remove_trait<#marker_path> for Tx<'g> {
-                type #ret_assoc = #ref_alias;
-                fn #remove_method(&mut self, rec: Self::#ret_assoc) {
-                    Tx::#remove_method(self, rec)
+        if let Some(remove_trait) = &e.remove_trait {
+            write_impls.extend(quote! {
+                impl<'g> #remove_trait<#marker_path> for Tx<'g> {
+                    type #ret_assoc = #ref_alias;
+                    fn #remove_method(&mut self, rec: Self::#ret_assoc) {
+                        Tx::#remove_method(self, rec)
+                    }
                 }
-            }
-        });
+            });
+        }
     }
     for i in &m.inserts {
         if let Some(verb) = &i.verb {
@@ -435,24 +491,25 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     }
     for s in &m.sets {
-        let verb = &s.verb;
-        let trait_path = &verb.trait_path;
-        let marker_path = &verb.marker_path;
-        let method = &verb.method;
-        let inherent = format_ident!("set_{}", s.arrow);
-        let assoc_decls = verb.assocs.iter().map(|(an, av)| quote!(type #an = #av;));
-        let a = Ident2::new("a", proc_macro2::Span::call_site());
-        let b = Ident2::new("b", proc_macro2::Span::call_site());
-        let a_ty = &verb.assocs[0].0;
-        let b_ty = &verb.assocs[1].0;
-        write_impls.extend(quote! {
-            impl<'g> #trait_path<#marker_path> for Tx<'g> {
-                #(#assoc_decls)*
-                fn #method(&mut self, #a: Self::#a_ty, #b: Self::#b_ty) {
-                    Tx::#inherent(self, #a, #b)
+        if let Some(verb) = &s.verb {
+            let trait_path = &verb.trait_path;
+            let marker_path = &verb.marker_path;
+            let method = &verb.method;
+            let inherent = format_ident!("set_{}", s.arrow);
+            let assoc_decls = verb.assocs.iter().map(|(an, av)| quote!(type #an = #av;));
+            let a = Ident2::new("a", proc_macro2::Span::call_site());
+            let b = Ident2::new("b", proc_macro2::Span::call_site());
+            let a_ty = &verb.assocs[0].0;
+            let b_ty = &verb.assocs[1].0;
+            write_impls.extend(quote! {
+                impl<'g> #trait_path<#marker_path> for Tx<'g> {
+                    #(#assoc_decls)*
+                    fn #method(&mut self, #a: Self::#a_ty, #b: Self::#b_ty) {
+                        Tx::#inherent(self, #a, #b)
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     // -- insert_<arrow> staging (primitive many arrows) ---------------------
@@ -537,6 +594,59 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         });
     }
 
+    // -- insert_<arrow>(key, target) staging (store-level keyed arrows) ---
+    // A keyed arrow is a function: the staging call rejects a live key —
+    // against the borrowed old store (a staged removal frees no key;
+    // re-pointing one is two flushes) and against the inserts already
+    // staged in this transaction. `Existing` and `Pending` keys never
+    // collide: the ref equality compares the kind, and an `Existing` ref
+    // carries the unstamped sentinel where a `Pending` one carries this
+    // transaction's token (the staged-key probe's t3 pin).
+    let mut keyed_staging = TokenStream2::new();
+    for kk in &m.keyed {
+        let method = format_ident!("insert_{}", kk.arrow);
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        let arrow_str = kk.arrow.to_string();
+        let key_into_trait = format_ident!("Into{}Arg", kk.key_entity);
+        let key_into_fn = format_ident!("into_{}_ref", snake(&kk.key_entity.to_string()));
+        let member_into_trait = format_ident!("Into{}Arg", kk.member);
+        let member_into_fn = format_ident!("into_{}_ref", snake(&kk.member.to_string()));
+        let key_live = &kk.key_live;
+        let doc = format!(
+            "Stage a keyed insert through arrow `{}`: a live key is rejected here — checked against the old store's map and the inserts already staged in this transaction (a staged removal frees no key; re-pointing one is two flushes). The flush carries the map (entries whose key and target both survive, remapped) and replays the op through the backing's insert hook on top of the carry.",
+            kk.arrow
+        );
+        keyed_staging.extend(quote! {
+            #[doc = #doc]
+            pub fn #method(&mut self, k: impl #key_into_trait, b: impl #member_into_trait) {
+                let k = k.#key_into_fn(self);
+                let b = b.#member_into_fn(self);
+                if let #rt::tx::RefKind::Existing(id) = k.kind {
+                    assert!(
+                        !self.old.__store().#key_live(id),
+                        "keyed insert onto a live key (`{}`): {:?} exists in the \
+                         borrowed old store; a staged removal frees no key, so \
+                         re-pointing one is two flushes",
+                        #arrow_str,
+                        id,
+                    );
+                }
+                for op in &self.ops {
+                    if let Op::#variant { k: k2, .. } = op {
+                        assert!(
+                            k2 != &k,
+                            "keyed insert onto a live key (`{}`): {:?} already \
+                             staged in this transaction",
+                            #arrow_str,
+                            k,
+                        );
+                    }
+                }
+                self.ops.push(Op::#variant { k, b });
+            }
+        });
+    }
+
     // -- flush: per-entity derived names -----------------------------------
     struct Ent {
         name: Ident2,
@@ -591,7 +701,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             variant: format_ident!("Set{}", camel(&s.arrow.to_string())),
             eff: format_ident!("eff_{}", s.arrow),
             pred: format_ident!("honor_pred_{}", s.arrow),
-            hook: format_ident!("__set_{}", s.arrow),
+            hook: s.hook.clone(),
         })
         .collect();
 
@@ -860,6 +970,38 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     });
 
+    // Step 1, keyed insert ops — the key and target refs range-validate
+    // like every other `Existing` ref (an unvalidated id would be indexed
+    // at replay — a panic on user error, which the pipeline's contract
+    // forbids).
+    let s1_keyed_arms = m.keyed.iter().map(|kk| {
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        let fields = [
+            (Ident2::new("k", proc_macro2::Span::call_site()), kk.key_entity.clone()),
+            (Ident2::new("b", proc_macro2::Span::call_site()), kk.member.clone()),
+        ];
+        let checks = fields.iter().map(|(f, t_name)| {
+            let t = ent_of(t_name);
+            let (t_count, t_str) = (&t.count, &t.arena_str);
+            quote! {
+                if let #rt::tx::RefKind::Existing(id) = #f.kind {
+                    if (id).0 as usize >= #t_count {
+                        violations.push(Violation::UnknownOldId {
+                            op: op_index,
+                            arena: #t_str,
+                            id: (id).0,
+                        });
+                    }
+                }
+            }
+        });
+        quote! {
+            Op::#variant { k, b } => {
+                #(#checks)*
+            }
+        }
+    });
+
     // Step 2, pass A — kept-record danglers over every ctor-arg field (a
     // field-backed `one` arrow): a kept record whose field target was
     // removed dangles, attributed to the removal op — unless a staged
@@ -873,8 +1015,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         let checks = e.ctor_args.iter().map(|ca| {
             let t = ent_of(&ca.target_entity);
             let (t_removed, t_removed_by, t_str) = (&t.removed, &t.removed_by, &t.arena_str);
-            let f = &ca.arg; // the arg name is the arrow name is the field name
-            let eff = format_ident!("eff_{}", ca.arg);
+            let f = &ca.arg; // the field name; the honor table is basis-named
+            let eff = format_ident!("eff_{}", ca.basis);
             quote! {
                 {
                     if #eff[old_id].is_none() {
@@ -968,6 +1110,38 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
+    // Step 2, keyed insert ops — a staged insert naming a removed key or
+    // target dangles at the insert op (a removed record can neither key
+    // nor accept membership), exactly like the primitive insert arms.
+    let s2_keyed_arms = m.keyed.iter().map(|kk| {
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        let fields = [
+            (Ident2::new("k", proc_macro2::Span::call_site()), kk.key_entity.clone()),
+            (Ident2::new("b", proc_macro2::Span::call_site()), kk.member.clone()),
+        ];
+        let checks = fields.iter().map(|(f, t_name)| {
+            let t = ent_of(t_name);
+            let (t_count, t_removed, t_str) = (&t.count, &t.removed, &t.arena_str);
+            quote! {
+                if let #rt::tx::RefKind::Existing(id) = #f.kind {
+                    if ((id).0 as usize) < #t_count && #t_removed[(id).0 as usize] {
+                        violations.push(Violation::DanglingEndpoint {
+                            op: op_index,
+                            record: RecordDesc::Staged(op_index as u32),
+                            endpoint_arena: #t_str,
+                            endpoint: (id).0,
+                        });
+                    }
+                }
+            }
+        });
+        quote! {
+            if let Op::#variant { k, b } = op {
+                #(#checks)*
+            }
+        }
+    });
+
     // Step 2, set ops — the correction-op checks, attributed to the set op
     // (the op that NAMED the endpoint, the staged-op precedent): a `set_`
     // of a removed record is SetOfRemoved, and a `set_` naming a removed
@@ -1104,6 +1278,34 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
+    // Step 4b-pre — the keyed carries, derived beside the walk arrays:
+    // each store-level map filters to entries whose key and target both
+    // survive the change set and remaps both through the compaction maps
+    // (keyed maps are carried as state, never rebuilt — a keyed arrow
+    // need not have a companion field to recompute from). Entries under a
+    // removed key drop with it here; the survivors-only refinement of
+    // that rule (a removed key with otherwise-live entries is a
+    // `FlushError` naming them) is the keyed-carry step's.
+    let s4_keyed_maps = m.keyed.iter().map(|kk| {
+        let carried = format_ident!("__{}_keyed_map", kk.arrow);
+        let k = ent_of(&kk.key_entity);
+        let b = ent_of(&kk.member);
+        let (k_map, b_map) = (&k.map, &b.map);
+        let (k_id, b_id) = (&k.id_ty, &b.id_ty);
+        let mf = &kk.map_field;
+        quote! {
+            let mut #carried: ::std::collections::HashMap<#k_id, #b_id> =
+                ::std::collections::HashMap::new();
+            for (key, val) in __old.#mf.iter() {
+                if let (
+                    ::core::option::Option::Some(nk),
+                    ::core::option::Option::Some(nv),
+                ) = (#k_map[(key).0 as usize], #b_map[(val).0 as usize]) {
+                    #carried.insert(#k_id(nk), #b_id(nv));
+                }
+            }
+        }
+    });
     // A field of a kept record's skeleton literal: ctor-arg ids remapped
     // through the target's map; a derived head/link from its array
     // (indexed by THIS record's new id); containers Default.
@@ -1187,9 +1389,13 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             TxFieldInit::New => quote!(#n: ::std::default::Default::default(),),
         }
     };
-    // A store-level field: a root-hosted arrow's single head value, else
-    // the uniform init.
+    // A store-level field: a carried keyed map, a root-hosted arrow's
+    // single head value, else the uniform init.
     let store_field_expr = |field: &TxField| -> TokenStream2 {
+        if let Some(kk) = m.keyed.iter().find(|kk| kk.map_field == field.emitted) {
+            let carried = format_ident!("__{}_keyed_map", kk.arrow);
+            return quote!(#carried);
+        }
         if let Some(i) = m
             .intrusive
             .iter()
@@ -1335,7 +1541,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     // list on top of the carried skeleton.
     let s4c_insert_arms = m.inserts.iter().map(|i| {
         let variant = format_ident!("Insert{}", camel(&i.arrow.to_string()));
-        let hook = format_ident!("__insert_{}", i.arrow);
+        let hook = &i.hook;
         let fields: Vec<(Ident2, Ident2)> = match &i.host {
             Some(host) => vec![(Ident2::new("a", proc_macro2::Span::call_site()), host.clone())],
             None => vec![],
@@ -1403,6 +1609,38 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     });
 
+    // Keyed insert replays resolve the key and target refs (Existing
+    // through the compaction map, Pending through the replay table) and
+    // call the backing's check-then-write hook on the new store — the
+    // insert lands on top of the carried map, and the staging live-key
+    // check proved the key free, so the hook's own duplicate check cannot
+    // trip.
+    let s4c_keyed_arms = m.keyed.iter().map(|kk| {
+        let variant = format_ident!("Insert{}", camel(&kk.arrow.to_string()));
+        let hook = &kk.hook;
+        let k = ent_of(&kk.key_entity);
+        let b = ent_of(&kk.member);
+        let (k_map, k_p, k_id) = (&k.map, &k.pending, &k.id_ty);
+        let (b_map, b_p, b_id) = (&b.map, &b.pending, &b.id_ty);
+        quote! {
+            Op::#variant { k, b } => {
+                let k = match k.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #k_id(#k_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                    #rt::tx::RefKind::Pending(i) => #k_p[i as usize]
+                        .expect("an add precedes its use: submission order"),
+                };
+                let b = match b.kind {
+                    #rt::tx::RefKind::Existing(id) =>
+                        #b_id(#b_map[(id).0 as usize].expect("Existing id validated in steps 1-2")),
+                    #rt::tx::RefKind::Pending(i) => #b_p[i as usize]
+                        .expect("an add precedes its use: submission order"),
+                };
+                new_store.#hook(k, b);
+            }
+        }
+    });
+
     let flush_method = quote! {
         #[doc(hidden)]
         #[doc = "Steps 1-2 as one pure analysis over (old store, ops): the resolved removal sets (with attributing op indices), per-arena counts, and every violation found in old-id space. `check` and `flush` consume the same function, so a green check and a committing flush can never disagree."]
@@ -1421,6 +1659,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                     #(#s1_remove_arms)*
                     #(#s1_insert_arms)*
                     #(#s1_set_arms)*
+                    #(#s1_keyed_arms)*
                 }
             }
 
@@ -1437,6 +1676,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             for (op_index, op) in ops.iter().enumerate() {
                 #(#s2_staged_arms)*
                 #(#s2_insert_arms)*
+                #(#s2_keyed_arms)*
             }
             if !violations.is_empty() {
                 return ::core::result::Result::Err(FlushError { violations });
@@ -1472,6 +1712,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             // overwrites old chains as it goes.
             let __old = old.__store();
             #(#s4_arrays)*
+            #(#s4_keyed_maps)*
 
             // -- step 4a: the kept skeleton, then replay --------------------
             let mut new_store = match old {
@@ -1498,6 +1739,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                     #(#s4c_add_arms)*
                     #(#s4c_insert_arms)*
                     #(#s4c_set_arms)*
+                    #(#s4c_keyed_arms)*
                     #(#remove_patterns)|* => {}
                 }
             }
@@ -1586,6 +1828,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #insert_staging
 
             #set_staging
+
+            #keyed_staging
 
             #flush_method
         }

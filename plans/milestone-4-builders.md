@@ -740,7 +740,7 @@ the probe crate under `/tmp` as the reference implementation.
       M2's deliverable, not M4's). Acceptance: probe 3's tests as
       generated equivalents (head/middle/tail unlink, honor case,
       double `set_` last-wins, same-verbs-in-order normalization).
-- [ ] 8. Unfused-root forms: self-less `insert_<arrow>(Ref<B>)`
+- [x] 8. Unfused-root forms: self-less `insert_<arrow>(Ref<B>)`
       (primitive and keyed), store-level ops. Acceptance: the
       root-intrusive (/tmp/m3-probe-r3-root-intrusive) and
       edge-induced (/tmp/m2-probe-edge-induced) probes' tests as

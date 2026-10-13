@@ -1,7 +1,7 @@
 # HANDOFF — M4 implementation (write-side builders)
 
 Branch `worktree-m4-implement`, worktree `.claude/worktrees/m4-implement`,
-based on main 4904680 + steps 1–2. Plan: plans/milestone-4-builders.md
+based on main 4904680 + steps 1–8. Plan: plans/milestone-4-builders.md
 (the contract — checklist § "Implementation checklist", dependency line
 1 → 2 → 3 → (4, 5); 6 → (7, 8); 3 → (9, 12); 9 → 11; (8, 11) → 10).
 This file: state, settled decisions, and the per-step continuation guide.
@@ -133,7 +133,55 @@ be exercised before its staging call exists. Recorded here per the plan's
   Pending panic in tests/tx_staging_panics.rs. Suite green incl.
   trybuild + downstream.
 
-Not started: steps 8–14.
+- **Step 8** (this commit): unfused-root forms + the START of composed
+  Tx emission. Flat side: store-level keyed arrows (`marks: G->M,
+  key(N)` bound `hash_index` — the new KeyedRoot fixture) no longer
+  gate the Tx off; TxModel grew `keyed: Vec<TxKeyed>` and tx.rs emits
+  the self-less `insert_<arrow>(k, b)` staging verb (live key against
+  the borrowed old store OR an already-staged op panics at staging —
+  the staged-key probe's semantics: Existing/Pending never collide, a
+  staged removal frees no key), step-1 range arms, step-2 dangler arms
+  (removed key/target, attributed to the insert op), the step-4 keyed
+  map carry (state, never rebuilt: filter to entries whose key AND
+  target survive, remap both), and step-4c replay resolving refs
+  through maps/pending tables into the backing's check-then-write
+  hook. Flat codegen gained the `__<arrow>_key_live` predicate for
+  parity with the composed side. Composed side: codegen_composed.rs
+  builds the TxModel under the step-8 gate (non-phased AND every
+  fusion class `ClassLoc::Root` — embedded classes are step 9's);
+  hooks always instance-qualified (`__insert_sub_subnode`), public
+  verbs bare-arrow or `insert_<inst>_<arrow>` on cross-instance
+  collision via `basis_of`; ctor-arg resolution by rewritten BId type
+  string (`class_by_id_name`). The composed Tx surface is INHERENT
+  this step — no Add/Remove/Insert/Set trait impls (`add_trait`/
+  `remove_trait`/`verb` = None); `HandleToRef` impls DO emit under
+  finish_compose's per-instance entity markers. TxCtorArg gained
+  `basis` so collision-prefixed ctor args still find their
+  `eff_<basis>` honor tables. Tests: tests/tx_keyed.rs (7 — carry
+  filter/remap, wholly-staged entry, Existing read-through, both
+  staging panics, Existing/Pending non-collision, danglers + oob),
+  tests/edge_induced.rs (+6 — the probe's Tx shape: staged induction,
+  wholly-staged keyed round-trip, HandleToRef, live-key panic,
+  intrusive+keyed splice, set_ re-point by derived membership),
+  tests/root_intrusive.rs (+1 — self-less insert + root-headed carry).
+  Suite green incl. trybuild + downstream, zero warnings.
+
+Step-8 notes (scope decisions, each reasoned):
+
+- **Store-level (root-sourced) keyed only.** A per-record keyed map
+  (KeyedPlain's `tags`) still gates its store's Tx off, and the
+  survivors-only `KeyRemovedWithLiveEntries` cascade stays unimplemented
+  — both are step 11's keyed-carry work (the plan's step-11 keyed
+  flush policy). The step-8 carry drops an entry when either endpoint
+  is removed, which is exactly the probe-pinned filter+remap.
+- **Composed Tx is inherent-surface.** The write traits name pattern
+  entities, and which instance's marker a composed impl should key on
+  is a design question step 8 doesn't need; the acceptance probes
+  (root-intrusive, edge-induced) exercise inherent verbs only.
+  `HandleToRef` is the exception — it's marker-generic read-side
+  bridging, emitted under the canonical member's instance marker.
+
+Not started: steps 9–14.
 
 Step-6 notes (deviations from this handoff's pre-work, each reasoned):
 
@@ -517,6 +565,14 @@ leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
 
+- 2026-10-12 (impl-m4-6): step 8 DONE (see "Where things stand" and
+  the step-8 notes — flat store-level keyed Tx, composed TxModel
+  emission under the root-only gate, inherent-surface decision, the
+  `basis` addition for collision-prefixed set verbs). Suite green
+  incl. trybuild + downstream at the commit, zero warnings. Next:
+  step 9 (nested stores — `within()`, ref-segment paths, per-level
+  maps; the composed gate's `ClassLoc::Root` condition is where
+  embedded classes come in).
 - 2026-10-12 (impl-m4-5): step 7 DONE (see "Where things stand" and the
   step-7 notes above — the grown-hook emission, the honor pipeline, and
   the three adjusted legacy tests). Suite green incl. trybuild +
