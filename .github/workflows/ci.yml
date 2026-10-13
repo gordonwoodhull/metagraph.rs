@@ -10,7 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin the nightly the trybuild .stderr files were generated with;
+      # diagnostics formatting drifts between toolchain versions.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-13
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --workspace --all-targets
