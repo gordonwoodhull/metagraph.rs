@@ -3337,9 +3337,15 @@ pub(crate) fn expand_composed(config: &ChainConfig) -> syn::Result<TokenStream2>
             let model = crate::tx::TxModel {
                 store: store.clone(),
                 rt: crate::runtime_path(),
+                // A composed phased store gates its Tx off at tx_ok
+                // (`!phased`) — the model's `phased` flag only parameterizes
+                // an EMITTED Tx, and the composed phased carry (a frozen
+                // fused-store walk) is not this step's surface.
+                phased: false,
                 entities: tx_entities,
                 store_fields: tx_store_fields,
                 intrusive: tx_intrusive,
+                csr: ::std::vec::Vec::new(),
                 inserts: tx_inserts,
                 sets: tx_sets,
                 keyed: tx_keyed,

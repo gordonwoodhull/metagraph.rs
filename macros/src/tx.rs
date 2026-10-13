@@ -157,6 +157,33 @@ pub(crate) struct TxInsert {
     pub verb: Option<TxVerb>,
 }
 
+/// The csr carry of one bound phased (`csr_adjacency`) `many` arrow (step
+/// 12): kept membership is carried by WALKING the old store's frozen
+/// ranges — per kept host record in old arena order, its
+/// `offsets[old]..offsets[old+1]` slice of `adj` in frozen forward order,
+/// removed members skipped, kept ids remapped — and feeding each kept
+/// member to the backing's `on_insert` hook (a pure bucket append on the
+/// new Build-phase store). Never per-field remapped (a removed mid-range
+/// member would truncate), never rebuilt from arena order (backing-agnostic
+/// carry requires the old iteration order). The hosts' buckets are opened
+/// by the skeleton's per-kept-record `on_add` fires, so the walk runs
+/// after the skeleton and before replay (staged inserts append to the
+/// carried tails).
+pub(crate) struct TxCsr {
+    /// The self (host) entity — always a record entity (a phased backing
+    /// at the unfused root was rejected at applicability).
+    pub host: Ident2,
+    /// The member (target) entity.
+    pub member: Ident2,
+    /// The backing's `on_insert` hook (the carry's write target).
+    pub insert_hook: Ident2,
+    /// The frozen store field holding the per-host range starts
+    /// (`offsets: Vec<u32>`, arena length + 1).
+    pub offsets_field: Ident2,
+    /// The frozen store field holding the members (`adj: Vec<BId>`).
+    pub adj_field: Ident2,
+}
+
 /// The `insert_<arrow>` staging verb of one bound keyed arrow. A keyed
 /// arrow is a function: the staging call rejects a live key — checked
 /// against the borrowed old store and the already-staged inserts (a
@@ -235,6 +262,13 @@ pub(crate) struct TxModel {
     pub store: Ident2,
     /// Runtime-crate absolute path (`::metagraph_exper`, rename-aware).
     pub rt: TokenStream2,
+    /// The store binds a phased backing (`csr_adjacency`): the Tx borrows
+    /// `Store<Frozen>`, the flush builds a `Store<Build>` (skeleton + walk
+    /// feeds + replay through the real ctors/hooks) and ends in
+    /// `finish()` (freeze, then validate). The owned path (`into_edit`)
+    /// is not emitted for a phased store — in-place forward compaction
+    /// against live build-phase accumulators is not pinned by any probe.
+    pub phased: bool,
     /// Record-owning entities in schema order (root entity excluded — it
     /// owns no record, id, or removal op).
     pub entities: Vec<TxEntity>,
@@ -243,6 +277,8 @@ pub(crate) struct TxModel {
     pub store_fields: Vec<TxField>,
     /// Intrusive-carry bindings in schema arrow order.
     pub intrusive: Vec<TxIntrusive>,
+    /// Csr (phased) carry bindings in schema arrow order.
+    pub csr: Vec<TxCsr>,
     /// Primitive-insert verbs in schema arrow order (non-`by` bound many
     /// arrows with an insert hook — by-derived and existence arrows stage
     /// no insert).
@@ -263,6 +299,22 @@ pub(crate) struct TxModel {
 pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
     let store = &m.store;
     let rt = &m.rt;
+    // The store type at the Tx's three phase positions: the old store a
+    // Tx stages against and the FlushOutcome's payload are FROZEN (the Tx
+    // presupposes a frozen old store — the csr carry reads its frozen
+    // ranges; reads exist only on Frozen); the rebuilt skeleton mid-flush
+    // is BUILD (the phased accumulators are live until `finish()`). A
+    // non-phased store is bare at every position (M1 shape).
+    let store_frozen: TokenStream2 = if m.phased {
+        quote!(#store<Frozen>)
+    } else {
+        quote!(#store)
+    };
+    let store_build: TokenStream2 = if m.phased {
+        quote!(#store<Build>)
+    } else {
+        quote!(#store)
+    };
 
     // -- per-entity ref aliases + IntoArg traits + HandleToRef impls ------
     // Refs are aliases of the runtime `Ref<I>`; the conversion trait
@@ -463,7 +515,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #[doc = "A user-staged custom op (the induction escape hatch, staged via `__stage_custom`): an opaque `FnOnce` the flush replays against the rebuilt store during replay. `named` lists the old-store ids the op names — step 1 range-checks them, step 2 rejects a removed one at this op. `reserve` lists the keyed slots an already-staged inducing op will insert — a later keyed staging call sees them as live."]
         Custom {
             run: ::core::option::Option<
-                ::std::boxed::Box<dyn ::core::ops::FnOnce(&mut #store, &Resolve<'_>)>,
+                ::std::boxed::Box<dyn ::core::ops::FnOnce(&mut #store_build, &Resolve<'_>)>,
             >,
             named: ::std::vec::Vec<__NamedRef>,
             reserve: ::std::vec::Vec<ReservedKey>,
@@ -1189,7 +1241,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #[doc = "Stage a custom op (the induction escape hatch): `run` replays against the rebuilt store during the flush's submission-order replay — user extensions implement inducing constructors this way, computing induced keys from `old()` + `__ops()` at staging and resolving captured refs through the `Resolve` argument at replay. `named` lists the old-store ids the op names; steps 1-2 validate them like any other refs. `reserve` lists the keyed slots the op will insert; a later keyed staging call sees them as live."]
         pub fn __stage_custom(
             &mut self,
-            run: ::std::boxed::Box<dyn ::core::ops::FnOnce(&mut #store, &Resolve<'_>)>,
+            run: ::std::boxed::Box<dyn ::core::ops::FnOnce(&mut #store_build, &Resolve<'_>)>,
             named: ::std::vec::Vec<__NamedRef>,
             reserve: ::std::vec::Vec<ReservedKey>,
         ) {
@@ -1602,7 +1654,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         #[doc = "A successful flush: the new store and its report."]
         #[derive(Debug)]
         pub struct FlushOutcome {
-            pub store: #store,
+            pub store: #store_frozen,
             pub report: FlushReport,
         }
 
@@ -2670,6 +2722,38 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             }
         }
     });
+    // Step 4c-pre — the csr (phased) carries, run AFTER the skeleton: the
+    // hosts' build-phase buckets exist (the skeleton fires each kept
+    // record's `on_add`, which opens one bucket per kept host, in
+    // compaction order). Each walk READS only the old store's frozen
+    // ranges and WRITES only the new store's buckets through the backing's
+    // `on_insert` hook (a pure append) — kept per-host forward order
+    // preserved exactly, removed members skipped without reordering the
+    // rest (per-field remap would truncate at a removed mid-range member).
+    // Runs before replay so staged inserts append to the carried tails.
+    let s4_csr_carries = m.csr.iter().map(|c| {
+        let h = ent_of(&c.host);
+        let b = ent_of(&c.member);
+        let (offsets, adj, hook) = (&c.offsets_field, &c.adj_field, &c.insert_hook);
+        let (h_count, h_map, h_id) = (&h.count, &h.map, &h.id_ty);
+        let (b_map, b_id) = (&b.map, &b.id_ty);
+        quote! {
+            for old_host in 0..#h_count {
+                if let ::core::option::Option::Some(new_host) = #h_map[old_host] {
+                    for __slot in (__old.#offsets[old_host] as usize)
+                        ..(__old.#offsets[old_host + 1] as usize)
+                    {
+                        let __old_b = __old.#adj[__slot];
+                        if let ::core::option::Option::Some(new_b) =
+                            #b_map[__old_b.0 as usize]
+                        {
+                            new_store.#hook(#h_id(new_host), #b_id(new_b));
+                        }
+                    }
+                }
+            }
+        }
+    });
     // A field of a kept record's skeleton literal: ctor-arg ids remapped
     // through the target's map; a derived head/link from its array
     // (indexed by THIS record's new id); containers Default; an embedded
@@ -3279,13 +3363,84 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
         }
     };
 
+    // The analysis' old-store parameter: `Store<Frozen>` on a phased store
+    // (the csr carry presupposes frozen old state), bare otherwise.
+    let s4_analyze_sig = quote! {
+        fn __analyze(
+            old: &#store_frozen,
+            ops: &[Op],
+        ) -> ::core::result::Result<__TxAnalysis, FlushError>
+    };
+    // The skeleton write (step 4a/4b): a non-phased store keeps the two
+    // paths — a fresh literal on the borrowed transaction, in-place
+    // forward compaction on the owned one. A phased store builds a fresh
+    // `Store<Build>` literal (the `_phase` marker field rides along; the
+    // build-phase accumulators start empty and grow through the same
+    // hooks construction uses) — the owned path is not emitted for phased
+    // stores, so the match degenerates to the borrowed arm.
+    let s4_skeleton = if m.phased {
+        quote! {
+            let OldStore::Borrowed(old) = old;
+            let mut new_store = #store::<Build> {
+                #(#s4_borrowed_arena_inits)*
+                #(#s4_borrowed_store_inits)*
+                _phase: ::core::marker::PhantomData,
+            };
+            #(#s4_borrowed_record_loops)*
+        }
+    } else {
+        quote! {
+            let mut new_store = match old {
+                OldStore::Borrowed(old) => {
+                    let mut new_store = #store {
+                        #(#s4_borrowed_arena_inits)*
+                        #(#s4_borrowed_store_inits)*
+                    };
+                    #(#s4_borrowed_record_loops)*
+                    new_store
+                }
+                OldStore::Owned(mut boxed) => {
+                    let mut new_store = *boxed;
+                    #(#s4_owned_compactions)*
+                    #(#s4_owned_store_assigns)*
+                    new_store
+                }
+            };
+        }
+    };
+    // The ending (steps 6-7): a phased store freezes the built store and
+    // then validates (`finish()` — finalize BEFORE validate, the ordering
+    // the m3 probe established; the outcome carries the frozen store). A
+    // non-phased store has no finalization step and validates the
+    // skeleton in place.
+    let s4_finish = if m.phased {
+        quote! {
+            // -- steps 6-7: backing finalization, then validate -----------
+            let frozen = new_store.finish().map_err(|detail| FlushError {
+                violations: ::std::vec![Violation::ValidateFailed { detail }],
+            })?;
+            ::core::result::Result::Ok(FlushOutcome {
+                store: frozen,
+                report: FlushReport { #(#report_init)* },
+            })
+        }
+    } else {
+        quote! {
+            // -- step 7: validate ------------------------------------------
+            new_store.validate().map_err(|detail| FlushError {
+                violations: ::std::vec![Violation::ValidateFailed { detail }],
+            })?;
+            ::core::result::Result::Ok(FlushOutcome {
+                store: new_store,
+                report: FlushReport { #(#report_init)* },
+            })
+        }
+    };
     let flush_method = quote! {
         #[doc(hidden)]
         #[doc = "Steps 1-2 as one pure analysis over (old store, ops): the resolved removal sets (with attributing op indices), per-arena counts, and every violation found in old-id space. `check` and `flush` consume the same function, so a green check and a committing flush can never disagree."]
-        fn __analyze(
-            old: &#store,
-            ops: &[Op],
-        ) -> ::core::result::Result<__TxAnalysis, FlushError> {
+        #s4_analyze_sig
+        {
             // -- step 1: resolve removals; validate every Existing ref -----
             #(#s1_counts)*
             #(#s1_state)*
@@ -3338,7 +3493,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             Self::__analyze(self.old.__store(), &self.ops).map(|_| ())
         }
 
-        #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space — steps 1-2 are the same `check` analysis, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists carried by arrays derived from the old chains BEFORE any write) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — flat stores have none), (7) `validate()`. A borrowed transaction builds fresh arenas; an owned one (`into_edit`) forward-compacts in place — every write slot at or before its read slot — reusing the old store's allocations. The old store (when borrowed) is untouched; a rejection leaves nothing half-applied."]
+        #[doc = "Run the flush pipeline and consume the transaction: (1) resolve removals and range-validate every `Existing` ref, (2) dangler detection over kept records and staged adds in old-id space — steps 1-2 are the same `check` analysis, (3) compaction with per-arena old->new id maps, (4) the kept skeleton (records with remapped id fields, intrusive lists carried by arrays derived from the old chains BEFORE any write, phased backings carried by walks of the old store's frozen ranges) then submission-order replay through the same constructors construction uses, (5) induction (constructor logic — none staged by the built-ins), (6) backing finalization (a phased store's freeze — non-phased stores have none), (7) `validate()` — steps 6-7 are a phased store's `finish()`. A borrowed transaction builds fresh arenas (a `Store<Build>` skeleton for a phased store); an owned one (`into_edit`, non-phased stores only) forward-compacts in place — every write slot at or before its read slot — reusing the old store's allocations. The old store (when borrowed) is untouched; a rejection leaves nothing half-applied."]
         pub fn flush(self) -> ::core::result::Result<FlushOutcome, FlushError> {
             let Tx { old, token: _, ops } = self;
             let mut ops = ops;
@@ -3362,23 +3517,16 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             #(#s4_arrays)*
             #(#s4_keyed_maps)*
 
-            // -- step 4a: the kept skeleton, then replay --------------------
-            let mut new_store = match old {
-                OldStore::Borrowed(old) => {
-                    let mut new_store = #store {
-                        #(#s4_borrowed_arena_inits)*
-                        #(#s4_borrowed_store_inits)*
-                    };
-                    #(#s4_borrowed_record_loops)*
-                    new_store
-                }
-                OldStore::Owned(mut boxed) => {
-                    let mut new_store = *boxed;
-                    #(#s4_owned_compactions)*
-                    #(#s4_owned_store_assigns)*
-                    new_store
-                }
-            };
+            // -- step 4a/4b: the kept skeleton ----------------------------
+            #s4_skeleton
+
+            // -- step 4c-pre: the csr carries (phased backings) ------------
+            // Each walk feeds the new store's build-phase buckets through
+            // the backing's on_insert hook, in the old store's frozen
+            // forward order — after the skeleton (the hosts' buckets
+            // exist) and before replay (staged inserts append to the
+            // carried tails).
+            #(#s4_csr_carries)*
 
             // -- step 4c: replay, grouped root-then-nested -----------------
             #(#s4c_pending)*
@@ -3404,18 +3552,65 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
 
             // -- steps 5-6: induction and backing finalization -------------
             // Induction is constructor logic and replays through the same
-            // constructors above; the flat non-phased store has no
-            // finalization step.
+            // constructors above; a non-phased store has no finalization
+            // step (a phased store's freeze rides in `finish()` below).
 
-            // -- step 7: validate ------------------------------------------
-            new_store.validate().map_err(|detail| FlushError {
-                violations: ::std::vec![Violation::ValidateFailed { detail }],
-            })?;
+            #s4_finish
+        }
+    };
 
-            ::core::result::Result::Ok(FlushOutcome {
-                store: new_store,
-                report: FlushReport { #(#report_init)* },
-            })
+    // What a Tx stages against. A non-phased store has both paths (the
+    // owned one in-place forward-compacts, reusing the old store's arena
+    // allocations); a phased store borrows the frozen store only — the
+    // owned in-place path against live build-phase accumulators is not
+    // pinned by any probe, so `into_edit` is not emitted and the enum has
+    // a single variant (the flush's skeleton match is irrefutable).
+    let oldstore_def = if m.phased {
+        quote! {
+            #[doc(hidden)]
+            #[doc = concat!("What a `Tx` stages against: the shared borrow of the frozen store (a phased store's transaction is borrowed-only — `into_edit` is not emitted for phased stores).")]
+            enum OldStore<'a> {
+                Borrowed(&'a #store_frozen),
+            }
+
+            impl OldStore<'_> {
+                fn __store(&self) -> &#store_frozen {
+                    let OldStore::Borrowed(s) = self;
+                    s
+                }
+            }
+        }
+    } else {
+        quote! {
+            #[doc(hidden)]
+            #[doc = concat!("What a `Tx` stages against: the shared borrow (`edit`) or the consumed store (`into_edit` — flush then reuses its arena allocations).")]
+            enum OldStore<'a> {
+                Borrowed(&'a #store_frozen),
+                Owned(::std::boxed::Box<#store_frozen>),
+            }
+
+            impl OldStore<'_> {
+                fn __store(&self) -> &#store_frozen {
+                    match self {
+                        OldStore::Borrowed(s) => s,
+                        OldStore::Owned(b) => b,
+                    }
+                }
+            }
+        }
+    };
+    let into_edit_method = if m.phased {
+        TokenStream2::new()
+    } else {
+        quote! {
+            #[doc = "Consume the store and start staging. The borrow checker then requires every old handle to be dead before the pass can end, and `flush` reuses the store's arena allocations (in-place compaction) instead of cloning. Old-store reads during staging are by raw id — handles into the moved store cannot exist."]
+            pub fn into_edit(self) -> Tx<'static> {
+                Tx {
+                    old: OldStore::Owned(::std::boxed::Box::new(self)),
+                    token: #rt::tx::mint_token(),
+                    ops: ::std::vec::Vec::new(),
+                }
+            }
         }
     };
 
@@ -3433,21 +3628,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
 
         #subtx_defs
 
-        #[doc(hidden)]
-        #[doc = concat!("What a `Tx` stages against: the shared borrow (`edit`) or the consumed store (`into_edit` — flush then reuses its arena allocations).")]
-        enum OldStore<'a> {
-            Borrowed(&'a #store),
-            Owned(::std::boxed::Box<#store>),
-        }
-
-        impl OldStore<'_> {
-            fn __store(&self) -> &#store {
-                match self {
-                    OldStore::Borrowed(s) => s,
-                    OldStore::Owned(b) => b,
-                }
-            }
-        }
+        #oldstore_def
 
         #[doc = concat!("Transaction over `", stringify!(#store), "`: stages a change set against the old store and flushes it as a full rebuild. Staging never touches the store — the change set is a plain queue, a first-class value.")]
         pub struct Tx<'a> {
@@ -3456,8 +3637,8 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             pub(crate) ops: ::std::vec::Vec<Op>,
         }
 
-        impl #store {
-            #[doc = "Borrow the store sharedly and start staging. Reads and old handles keep working while staging and after the flush; the old store is never mutated (the escape hatch — `into_edit` enforces the pass discipline at compile time)."]
+        impl #store_frozen {
+            #[doc = "Borrow the store sharedly and start staging. Reads and old handles keep working while staging and after the flush; the old store is never mutated (the escape hatch — `into_edit`, non-phased stores only, enforces the pass discipline at compile time)."]
             pub fn edit(&self) -> Tx<'_> {
                 Tx {
                     old: OldStore::Borrowed(self),
@@ -3466,14 +3647,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
                 }
             }
 
-            #[doc = "Consume the store and start staging. The borrow checker then requires every old handle to be dead before the pass can end, and `flush` reuses the store's arena allocations (in-place compaction) instead of cloning. Old-store reads during staging are by raw id — handles into the moved store cannot exist."]
-            pub fn into_edit(self) -> Tx<'static> {
-                Tx {
-                    old: OldStore::Owned(::std::boxed::Box::new(self)),
-                    token: #rt::tx::mint_token(),
-                    ops: ::std::vec::Vec::new(),
-                }
-            }
+            #into_edit_method
         }
 
         impl Tx<'_> {
@@ -3483,7 +3657,7 @@ pub(crate) fn emit(m: &TxModel) -> TokenStream2 {
             /// work; on an owned one (`into_edit`) it borrows the store
             /// the transaction now owns (reads by raw id; handles into it
             /// cannot exist by construction).
-            pub fn old(&self) -> &#store {
+            pub fn old(&self) -> &#store_frozen {
                 self.old.__store()
             }
 

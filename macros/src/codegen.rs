@@ -1914,21 +1914,25 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
     out.extend(trait_impls);
 
     // ---- M4: the transaction (write side) ----
-    // Stage-3 gate: flat, non-phased, every bound arrow's carry
-    // classifiable (existence, field-one, the intrusive head/link shape,
-    // or a store-level keyed map — a per-record keyed map carries
-    // per-host state and lands with the keyed-carry step). Unsupported
+    // Stage-3 gate: flat, every bound arrow's carry classifiable
+    // (existence, field-one, the intrusive head/link shape, a store-level
+    // keyed map, or — on a phased store — the csr walk). Unsupported
     // shapes emit no `Tx` — their `edit()` arrives with the step that
-    // implements their carry.
-    if !phased {
+    // implements their carry. A phased store's Tx is borrowed-only and
+    // flushes into `Store<Build>` (the phased step): `edit()` lands on
+    // `impl Store<Frozen>`, `into_edit` is not emitted.
+    {
         // Carry classification, per bound arrow. Existence and field-one
         // carries ride the entity data (nothing / the ctor-arg fields);
-        // the intrusive carry collects its walk shape. A `many` binding
-        // that is neither existence- nor intrusive-shaped leaves the
-        // store's Tx unemitted (a custom backing whose flush carry this
-        // milestone has not defined).
+        // the intrusive carry collects its walk shape; the csr carry
+        // (phased backings only) collects the frozen range fields and the
+        // on_insert hook. A `many` binding that is none of
+        // existence-/intrusive-/csr-shaped leaves the store's Tx
+        // unemitted (a custom backing whose flush carry this milestone
+        // has not defined).
         let ty_str = |f: &ContribField| f.ty.to_token_stream().to_string().replace(' ', "");
         let mut intrusive: Vec<crate::tx::TxIntrusive> = Vec::new();
+        let mut csr: Vec<crate::tx::TxCsr> = Vec::new();
         let mut keyed: Vec<crate::tx::TxKeyed> = Vec::new();
         let mut carry_ok = true;
         for info in &infos {
@@ -1951,6 +1955,54 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
                     }
                 }
                 Cardinality::Many => {
+                    if d.is_phased() {
+                        // The csr carry (the phased step): the backing
+                        // contributes NO per-record fields (buckets are
+                        // store-level), authors an on_insert(a, b) hook,
+                        // and freezes into exactly two store fields — the
+                        // range starts (`Vec<u32>`) and the members
+                        // (`Vec<BId>`). The flush carries kept membership
+                        // by walking the old store's frozen ranges in
+                        // forward order (never per-field remapped, never
+                        // rebuilt from arena order). The self is a record
+                        // entity (a phased backing at the unfused root was
+                        // rejected at applicability).
+                        let b_fields_ok = on_clauses(d, OnTarget::A).iter().flat_map(|(_, fs)| fs.iter()).count()
+                            + on_clauses(d, OnTarget::B).iter().flat_map(|(_, fs)| fs.iter()).count()
+                            == 0;
+                        let frozen: Vec<&CollectedField> = store_fields
+                            .iter()
+                            .filter(|f| f.arrow == a.name && f.phase == Some(PhaseLabel::Frozen))
+                            .collect();
+                        let ty_norm = |t: &TokenStream2| t.to_string().replace(' ', "");
+                        let (offsets_field, adj_field) = match frozen.as_slice() {
+                            [o, j]
+                                if ty_norm(&o.ty).ends_with("Vec<u32>")
+                                    && ty_norm(&j.ty).ends_with(&format!("Vec<{}Id>", a.target)) =>
+                            {
+                                (o.emitted.clone(), j.emitted.clone())
+                            }
+                            _ => {
+                                carry_ok = false;
+                                break;
+                            }
+                        };
+                        let ok = b_fields_ok
+                            && d.has(|c| matches!(c, Clause::OnInsert { .. }))
+                            && !is_root(&a.source);
+                        if !ok {
+                            carry_ok = false;
+                            break;
+                        }
+                        csr.push(crate::tx::TxCsr {
+                            host: a.source.clone(),
+                            member: a.target.clone(),
+                            insert_hook: format_ident!("__insert_{}", a.name),
+                            offsets_field,
+                            adj_field,
+                        });
+                        continue;
+                    }
                     if d.has(|c| matches!(c, Clause::MembershipExistence { .. })) {
                         // Existence: the arena itself is the membership; a
                         // field-contributing existence backing is not a
@@ -2336,9 +2388,11 @@ pub(crate) fn expand_flat(config: &ChainConfig) -> syn::Result<TokenStream2> {
             let model = crate::tx::TxModel {
                 store: store.clone(),
                 rt: crate::runtime_path(),
+                phased,
                 entities,
                 store_fields: tx_store_fields,
                 intrusive,
+                csr,
                 inserts,
                 sets,
                 keyed,

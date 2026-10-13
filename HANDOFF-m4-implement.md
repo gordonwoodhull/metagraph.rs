@@ -244,7 +244,71 @@ Step-9 notes (scope decisions, each reasoned):
   The fixture has exactly one host (OuterNode); the general rule is
   codegen-review surface, not tested.
 
-Not started: steps 12–14.
+Not started: steps 13–14.
+
+- **Step 12** (this commit): phased stores — the Tx gate lifts for flat
+  stores binding a phased (`csr_adjacency`) backing. `TxModel` grew
+  `phased: bool` + `csr: Vec<TxCsr>`; the flat classification gains the
+  csr carry class (`many` + `is_phased()`: no per-record fields, an
+  `on_insert(a, b)` hook, frozen store fields shaped exactly as
+  `offsets: Vec<u32>` + `adj: Vec<BId>` — matched from the collected
+  store fields by type; a root-sourced phased backing stays rejected).
+  tx.rs: three phase positions (`Store<Frozen>` for the borrowed old
+  store/FlushOutcome/`old()`, `Store<Build>` for the skeleton and the
+  custom-op closure — a non-phased store is bare at all three); the
+  skeleton literal gains `_phase: PhantomData` on a phased store; NEW
+  step 4c-pre csr carry per binding — after the skeleton (the kept
+  records' `on_add` fires opened one bucket per kept host, in
+  compaction order) and before replay (staged inserts append to carried
+  tails): walk each kept host's OLD FROZEN `offsets[old]..offsets[old+1]`
+  slice of `adj` in forward order, skip removed members, remap, feed the
+  backing's `__insert_<arrow>` hook (a pure bucket append); the ending
+  becomes `finish()` (freeze, then validate — finalize BEFORE validate)
+  with the frozen store as the FlushOutcome payload. `into_edit` is not
+  emitted for a phased store — `OldStore` degenerates to the single
+  borrowed variant and the skeleton match is irrefutable. Composed
+  phased stores keep gating the Tx off (`tx_ok = !phased`), so the
+  composed model carries `phased: false`. Tests: tests/tx_phased_flush.rs
+  (12 — probe 1's 12 recast over the stdlib Digraph with
+  `out_edges: csr_adjacency` + `in_edges: intrusive_list`, the probe's
+  exact shape; the tests live inside the `implement!`ing module so the
+  corruption tests reach the private fields). 48/48 suites green incl.
+  trybuild + downstream, zero warnings.
+
+Step-12 notes (scope decisions + probe deviations, each reasoned):
+
+- **`into_edit` is not emitted for phased stores.** In-place forward
+  compaction against live build-phase accumulators (buckets that must be
+  re-opened per kept node mid-compaction) is a different design surface
+  than the arena in-place path, and no probe pins it. The plan's step-12
+  text says "Tx borrows `Store<Frozen>`" — the owned path stays
+  non-phased-only this milestone.
+- **The probe's finding c.2 splits against the generated validators.**
+  The probe's hand-written validate was structural-only, so a truncated
+  in-chain passed; the generated intrusive validator runs M2's partition
+  walk and CATCHES the probe's exact truncation poke (names the missing
+  edge). The generated CSR validator checks only offsets invariants
+  (length/span/monotonicity — not membership or order), so the recast
+  test (`validate_catches_truncation_but_misses_reorder`) truncates on
+  the intrusive side (caught) and reorders within a CSR range (not
+  caught) — the probe's lesson in generated form.
+- **The generated `Display` prints raw ids** (`endpoint: 1`) where the
+  probe printed typed ids (`NodeId(1)`); the recast asserts the
+  structured violation vector (stronger) plus a light Display check.
+- **The walk reads raw frozen fields, not the read view.** The read
+  view's `many` getters are handle-graph-shaped (`graph().nodes()…`); the
+  emitted walk indexes `old.offsets`/`old.adj` directly — the same
+  module-private access the corruption tests use, and identical to the
+  probe's `adj[out_range]` shape. Bounds are presupposed (the old store
+  was frozen = validated), the same presupposition the intrusive walk
+  already made.
+- **Staged inserts on a phased backing ride the existing replay**: a
+  staged `add_edge` fires the by-source orchestration (bucket append +
+  intrusive link) through the real ctor — no phased-specific staging.
+  Kept edges' records are built by the skeleton with NO backing hooks
+  (the model's per-entity `onadd_hooks` carries only A-sourced bucket
+  opens; the B records' hooks fire only in replay) — exactly the probe's
+  4a/4b split.
 
 - **Step 11** (this commit): removal + keyed carry — the per-record keyed
   map ungated (HierarchyStore's `sub.subnode`, gated since step 8).
@@ -780,6 +844,20 @@ plan text, note disagreements in step notes; do not merge to main —
 leave the branch for review; do not touch m5-plan/m6-plan worktrees.
 
 ## Session log
+
+- 2026-10-13 (impl-m4-8): step 12 DONE (see "Where things stand" and the
+  step-12 notes — TxModel phased/csr, the flat gate lifting for
+  csr-bound stores, the three phase positions, the 4c-pre frozen-range
+  walk feeding `__insert_<arrow>` buckets after the skeleton and before
+  replay, `finish()` as the ending, borrowed-only OldStore for phased
+  stores; probe 1's 12 tests recast as tests/tx_phased_flush.rs over the
+  stdlib Digraph with csr out + intrusive in). One probe finding split:
+  the generated intrusive validator catches the probe's truncation poke
+  (partition walk) while the generated CSR validator misses in-range
+  reorders — the recast test asserts both halves. 48/48 suites green
+  incl. trybuild + downstream, zero warnings at the commit. Next: step
+  13 (negative suite — trybuild fixtures beyond read-on-ref, the staging
+  should_panics collected, downstream-crate transform portability).
 
 - 2026-10-13 (impl-m4-8): step 11 DONE (see "Where things stand" and the
   step-11 notes — TxKeyed host/member_host, the survivors-only cascade as

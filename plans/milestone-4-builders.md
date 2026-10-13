@@ -773,7 +773,7 @@ the probe crate under `/tmp` as the reference implementation.
       translates path-id targets through host map ∘ per-host sub
       maps. Acceptance: probe 4's 15 tests plus spike 7's 14 removal
       tests as generated equivalents.
-- [ ] 12. Phased stores: flush into `GraphStore<Build>`,
+- [x] 12. Phased stores: flush into `GraphStore<Build>`,
       kept-fed-then-replay carry (old *frozen* reads only),
       `finish()` = steps 6–7. Acceptance: probe 1's 12 tests as
       generated equivalents.
