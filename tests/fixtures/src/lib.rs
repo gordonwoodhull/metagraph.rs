@@ -6,7 +6,7 @@
 //!
 //! The single-arrow roots these shapes instantiate were M2's discoveries
 //! and now live in the runtime stdlib (promoted in M3 step 9):
-//! `metagraph_exper::stdlib::{MainNode, MainEdge, EdgesOf, SubNodeOf,
+//! `metagraph::stdlib::{MainNode, MainEdge, EdgesOf, SubNodeOf,
 //! SubEdgeOf}`. Naming follows the resolved rule there — a root pattern
 //! takes its arrow's name with no suffix where the name is free
 //! (`MainNode`/`MainEdge`), the `-Of` suffix where the bare name is taken
@@ -14,7 +14,7 @@
 //! regardless, so `SubNodeOf` owns `subnode<M>`.
 
 pub mod shapes {
-    use metagraph_exper::pattern;
+    use metagraph::pattern;
 
     // The full Subgraph pattern (keyed arrows included). Compositions bind
     // `subnode`/`subedge` to `hash_index`.
@@ -22,12 +22,12 @@ pub mod shapes {
         Subgraph {
             entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open);
             arrows {
-                subnodes:  metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
-                subedges:  metagraph_exper::stdlib::EdgesOf,              Subgraph -> SubEdge;
-                main_node: metagraph_exper::stdlib::MainNode,             SubNode -> MainNode;
-                main_edge: metagraph_exper::stdlib::MainEdge,             SubEdge -> MainEdge;
-                subnode:   metagraph_exper::stdlib::SubNodeOf,            Subgraph -> SubNode, key(MainNode);
-                subedge:   metagraph_exper::stdlib::SubEdgeOf,            Subgraph -> SubEdge, key(MainEdge);
+                subnodes:  metagraph::stdlib::Nodes, Subgraph -> SubNode;
+                subedges:  metagraph::stdlib::EdgesOf,              Subgraph -> SubEdge;
+                main_node: metagraph::stdlib::MainNode,             SubNode -> MainNode;
+                main_edge: metagraph::stdlib::MainEdge,             SubEdge -> MainEdge;
+                subnode:   metagraph::stdlib::SubNodeOf,            Subgraph -> SubNode, key(MainNode);
+                subedge:   metagraph::stdlib::SubEdgeOf,            Subgraph -> SubEdge, key(MainEdge);
             }
         }
     }
@@ -38,10 +38,10 @@ pub mod shapes {
         SubPlain {
             entities: root Subgraph, SubNode, SubEdge, MainNode(open), MainEdge(open);
             arrows {
-                subnodes:  metagraph_exper::stdlib::Nodes, Subgraph -> SubNode;
-                subedges:  metagraph_exper::stdlib::EdgesOf,            Subgraph -> SubEdge;
-                main_node: metagraph_exper::stdlib::MainNode,           SubNode -> MainNode;
-                main_edge: metagraph_exper::stdlib::MainEdge,           SubEdge -> MainEdge;
+                subnodes:  metagraph::stdlib::Nodes, Subgraph -> SubNode;
+                subedges:  metagraph::stdlib::EdgesOf,            Subgraph -> SubEdge;
+                main_node: metagraph::stdlib::MainNode,           SubNode -> MainNode;
+                main_edge: metagraph::stdlib::MainEdge,           SubEdge -> MainEdge;
             }
         }
     }
@@ -55,7 +55,7 @@ pub mod shapes {
     pattern! {
         Chain {
             entities: root Chain, Elem(open);
-            arrows { elems: metagraph_exper::stdlib::OutEdges, Chain -> Elem; }
+            arrows { elems: metagraph::stdlib::OutEdges, Chain -> Elem; }
         }
     }
 
@@ -66,9 +66,9 @@ pub mod shapes {
         KeyedPlain {
             entities: root G, N, M;
             arrows {
-                nodes: metagraph_exper::stdlib::Nodes, G -> N;
-                tags:  metagraph_exper::stdlib::SubNodeOf,        N -> M, key(N);
-                marks: metagraph_exper::stdlib::SubNodeOf,        G -> M, key(M);
+                nodes: metagraph::stdlib::Nodes, G -> N;
+                tags:  metagraph::stdlib::SubNodeOf,        N -> M, key(N);
+                marks: metagraph::stdlib::SubNodeOf,        G -> M, key(M);
             }
         }
     }
@@ -81,8 +81,8 @@ pub mod shapes {
         KeyedRoot {
             entities: root G, N, M;
             arrows {
-                nodes: metagraph_exper::stdlib::Nodes, G -> N;
-                marks:  metagraph_exper::stdlib::SubNodeOf,       G -> M, key(N);
+                nodes: metagraph::stdlib::Nodes, G -> N;
+                marks:  metagraph::stdlib::SubNodeOf,       G -> M, key(N);
             }
         }
     }
@@ -96,10 +96,10 @@ pub mod shapes {
         CsrDigraph {
             entities: root G, N, E;
             arrows {
-                nodes:  metagraph_exper::stdlib::Nodes, G -> N;
-                out:    metagraph_exper::stdlib::OutEdges, N -> E;
-                source: metagraph_exper::stdlib::Source,  E -> N;
-                target: metagraph_exper::stdlib::Target,  E -> N;
+                nodes:  metagraph::stdlib::Nodes, G -> N;
+                out:    metagraph::stdlib::OutEdges, N -> E;
+                source: metagraph::stdlib::Source,  E -> N;
+                target: metagraph::stdlib::Target,  E -> N;
             }
         }
     }
@@ -108,7 +108,7 @@ pub mod shapes {
 /// Minimal shapes for the M2 step-13 negative tests: patterns that exist
 /// so implement!-time checks have small legal compositions to reject.
 pub mod neg {
-    use metagraph_exper::pattern;
+    use metagraph::pattern;
 
     // `pin` is a `one` arrow into the closed element `P`: under
     // `outer.Node <=> pinned.G` its field would have to hold an embedded
@@ -117,8 +117,8 @@ pub mod neg {
         Pinned {
             entities: root G, N, P;
             arrows {
-                g:   metagraph_exper::stdlib::Nodes,  G -> N;
-                pin: metagraph_exper::stdlib::Source, N -> P;
+                g:   metagraph::stdlib::Nodes,  G -> N;
+                pin: metagraph::stdlib::Source, N -> P;
             }
         }
     }
@@ -130,8 +130,8 @@ pub mod neg {
         Chained {
             entities: root G, N, C;
             arrows {
-                g:  metagraph_exper::stdlib::Nodes,    G -> N;
-                cs: metagraph_exper::stdlib::OutEdges, N -> C;
+                g:  metagraph::stdlib::Nodes,    G -> N;
+                cs: metagraph::stdlib::OutEdges, N -> C;
             }
         }
     }
@@ -144,8 +144,8 @@ pub mod neg {
         TwoInto {
             entities: root G, N, M;
             arrows {
-                m1: metagraph_exper::stdlib::Nodes, G -> N;
-                m2: metagraph_exper::stdlib::Edges, M -> N;
+                m1: metagraph::stdlib::Nodes, G -> N;
+                m2: metagraph::stdlib::Edges, M -> N;
             }
         }
     }
@@ -155,7 +155,7 @@ pub mod neg {
     pattern! {
         RootSourced {
             entities: root G, P;
-            arrows { r: metagraph_exper::stdlib::Source, G -> P; }
+            arrows { r: metagraph::stdlib::Source, G -> P; }
         }
     }
 
@@ -167,9 +167,9 @@ pub mod neg {
         Collide {
             entities: root G, A, B, X;
             arrows {
-                m:   metagraph_exper::stdlib::Nodes,  G -> X;
-                q_r: metagraph_exper::stdlib::OutEdges, A -> B;
-                r:   metagraph_exper::stdlib::Edges,    A -> X;
+                m:   metagraph::stdlib::Nodes,  G -> X;
+                q_r: metagraph::stdlib::OutEdges, A -> B;
+                r:   metagraph::stdlib::Edges,    A -> X;
             }
         }
     }
@@ -178,7 +178,7 @@ pub mod neg {
     pattern! {
         Keyless {
             entities: root G, N, M;
-            arrows { k: metagraph_exper::stdlib::SubNodeOf, G -> N; }
+            arrows { k: metagraph::stdlib::SubNodeOf, G -> N; }
         }
     }
 
@@ -189,7 +189,7 @@ pub mod neg {
     pattern! {
         AnchoredKey {
             entities: root G, E(open), M;
-            arrows { k: metagraph_exper::stdlib::SubNodeOf, G -> E, key(M); }
+            arrows { k: metagraph::stdlib::SubNodeOf, G -> E, key(M); }
         }
     }
 
@@ -200,7 +200,7 @@ pub mod neg {
     pattern! {
         RootMany {
             entities: root G, C;
-            arrows { cs: metagraph_exper::stdlib::OutEdges, G -> C; }
+            arrows { cs: metagraph::stdlib::OutEdges, G -> C; }
         }
     }
 }
@@ -214,7 +214,7 @@ pub mod neg {
 /// case armed: reaching it only through a re-export must stay a clean
 /// compile error there.
 pub mod local {
-    use metagraph_exper::pattern;
+    use metagraph::pattern;
 
     pattern! {
         Tags {

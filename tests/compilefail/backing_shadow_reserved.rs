@@ -3,7 +3,7 @@
 // a reserved ident (`let rec = ..`) would be silently captured — rejected
 // at declaration time, quoting the closed set.
 mod shady {
-    use metagraph_exper::backing;
+    use metagraph::backing;
 
     backing! {
         shady_list: A -> B, many {

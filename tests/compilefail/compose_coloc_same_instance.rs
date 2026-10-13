@@ -4,11 +4,11 @@
 // block). The arm was pinned at the M3 round-4 merge; this fixture rode
 // with its implementation.
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Same {
-            instances: d: metagraph_exper::stdlib::Digraph;
+            instances: d: metagraph::stdlib::Digraph;
             d.Node <=> d.Edge;
         }
     }

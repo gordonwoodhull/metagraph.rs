@@ -6,16 +6,16 @@
 //! placement was probe-verified (/tmp/m3-probe-r3-root-intrusive, 5/5);
 //! this drives the composed side, emitted since the M3 codegen port.
 
-use metagraph_exper::stdlib::OutEdges;
-use metagraph_exper::implement;
+use metagraph::stdlib::OutEdges;
+use metagraph::implement;
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Relaxed {
             instances:
-                m: metagraph_exper::stdlib::Digraph,
+                m: metagraph::stdlib::Digraph,
                 r: m2_fixtures::neg::RootMany;
         }
     }

@@ -3,7 +3,7 @@
 // `on store build` field's Frozen type is `()` through the store's phase
 // trait, so the pre-compaction buckets are unwritable (and unreadable as
 // anything but unit) after `freeze()`.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::shapes::CsrDigraph as Store {

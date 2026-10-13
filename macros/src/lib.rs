@@ -813,8 +813,8 @@ impl Parse for ComposeInput {
 /// compose_pattern! {
 ///     Nested {
 ///         instances:
-///             outer: metagraph_exper::stdlib::Digraph,
-///             inner: metagraph_exper::stdlib::Digraph;
+///             outer: metagraph::stdlib::Digraph,
+///             inner: metagraph::stdlib::Digraph;
 ///         // every outer node is-also an inner graph: inner's arenas
 ///         // embed inside each outer-node record (path ids, per-host counts)
 ///         inner.Graph <=> outer.Node;
@@ -826,7 +826,7 @@ impl Parse for ComposeInput {
 /// compose_pattern! {
 ///     EdgeInduced {
 ///         instances:
-///             main: metagraph_exper::stdlib::Digraph,
+///             main: metagraph::stdlib::Digraph,
 ///             sub:  m2_fixtures::shapes::Subgraph;
 ///         sub.MainNode <-> main.Node;
 ///         sub.MainEdge <-> main.Edge;
@@ -1283,7 +1283,7 @@ impl Parse for ImplementInput {
 ///
 /// ```ignore
 /// implement! {
-///     metagraph_exper::stdlib::Digraph as GraphStore {
+///     metagraph::stdlib::Digraph as GraphStore {
 ///         nodes:     arena,
 ///         out_edges: intrusive_list,
 ///         in_edges:  intrusive_list,
@@ -1321,7 +1321,7 @@ fn expand_implement(imp: &ImplementInput) -> syn::Result<TokenStream2> {
         return Err(syn::Error::new(
             last.span(),
             format!(
-                "`{}` is a bare pattern name; import the pattern's module and pass its path (e.g. `metagraph_exper::stdlib::{last}`)",
+                "`{}` is a bare pattern name; import the pattern's module and pass its path (e.g. `metagraph::stdlib::{last}`)",
                 last
             ),
         ));
@@ -2057,15 +2057,15 @@ fn backing_hops(bindings: &[Binding]) -> syn::Result<Vec<BackingHop>> {
 /// Absolute path of the runtime crate, chosen at invocation time with
 /// `proc-macro-crate` (plus the dependency-rename it honors). `Itself`
 /// resolves through the runtime root's `extern crate self as
-/// metagraph_exper`.
+/// metagraph`.
 pub(crate) fn runtime_path() -> TokenStream2 {
-    match proc_macro_crate::crate_name("metagraph-exper") {
-        Ok(proc_macro_crate::FoundCrate::Itself) => quote!(::metagraph_exper),
+    match proc_macro_crate::crate_name("metagraph") {
+        Ok(proc_macro_crate::FoundCrate::Itself) => quote!(::metagraph),
         Ok(proc_macro_crate::FoundCrate::Name(n)) => {
             let n = Ident::new(&n, proc_macro2::Span::call_site());
             quote!(::#n)
         }
-        Err(_) => quote!(::metagraph_exper),
+        Err(_) => quote!(::metagraph),
     }
 }
 
@@ -2098,10 +2098,10 @@ pub(crate) fn runtime_target() -> TokenStream2 {
 pub(crate) fn declaring_crate_root(pkg: &str) -> syn::Result<TokenStream2> {
     // The one package whose `Itself` must NOT spell `crate` is the runtime
     // crate itself: its doctests are separate crates where `crate::stdlib`
-    // misses, while `::metagraph_exper` resolves everywhere the guaranteed
+    // misses, while `::metagraph` resolves everywhere the guaranteed
     // `extern crate self` alias does (in-crate, doctests, and — via
     // [`runtime_path`] — through a rename).
-    if pkg == "metagraph-exper" {
+    if pkg == "metagraph" {
         return Ok(runtime_path());
     }
     match proc_macro_crate::crate_name(pkg) {
@@ -2125,7 +2125,7 @@ pub(crate) fn declaring_crate_root(pkg: &str) -> syn::Result<TokenStream2> {
 /// pass verbatim; `crate::`/`self::`-rooted paths swap their head for the
 /// declaring crate's local root. A relative path's first segment may name a
 /// *package* — an extern crate in the declaring crate's scope (e.g. a
-/// fixture pattern instantiating `metagraph_exper::stdlib::Nodes`): then it
+/// fixture pattern instantiating `metagraph::stdlib::Nodes`): then it
 /// resolves through `proc-macro-crate` at the implement site (renames
 /// honored on both sides). Otherwise the whole path is prefixed with the
 /// declaring crate's root. A bare single-segment path is rejected — the
@@ -2160,7 +2160,7 @@ pub(crate) fn resolve_schema_path(p: &Path, pkg: &str) -> syn::Result<TokenStrea
                 // here regardless of further context — except in a doctest,
                 // where the asking crate is synthetic and only the runtime
                 // package's self-alias spelling reaches the real crate.
-                proc_macro_crate::FoundCrate::Itself if candidate == "metagraph-exper" => {
+                proc_macro_crate::FoundCrate::Itself if candidate == "metagraph" => {
                     runtime_path()
                 }
                 proc_macro_crate::FoundCrate::Itself => quote!(crate),
@@ -2180,7 +2180,7 @@ pub(crate) fn resolve_schema_path(p: &Path, pkg: &str) -> syn::Result<TokenStrea
 /// Unique instantiation roots of a packaged schema, in first-occurrence
 /// order over its arrows — the order `metas[i]` is keyed by — each resolved
 /// to its absolute path (dedup is by *resolved* spelling, so `stdlib::Nodes`
-/// and `::metagraph_exper::stdlib::Nodes` in one schema visit one hop).
+/// and `::metagraph::stdlib::Nodes` in one schema visit one hop).
 pub(crate) fn resolved_roots(schema: &grammar::PackagedSchema) -> syn::Result<Vec<Path>> {
     let mut roots: Vec<Path> = Vec::new();
     for a in &schema.body.arrows {

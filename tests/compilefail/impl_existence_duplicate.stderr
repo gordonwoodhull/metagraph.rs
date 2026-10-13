@@ -9,4 +9,4 @@ error: class `N` has two entity-arrow candidates — arrows `m1` and `m2` both b
 11 | | }
    | |_^
    |
-   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

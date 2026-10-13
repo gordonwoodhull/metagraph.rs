@@ -7,5 +7,5 @@ edition = "2024"
 # Both the runtime and the pattern-declaring fixture renamed: the
 # declaring-crate resolver must find each through `proc-macro-crate`'s
 # honoring of the renames (its `Name(n)` arm), per member instance.
-mg = { package = "metagraph-exper", path = "../../.." }
+mg = { package = "metagraph", path = "../../.." }
 fx = { package = "m2-fixtures", path = "../../fixtures" }

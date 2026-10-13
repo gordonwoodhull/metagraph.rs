@@ -1,6 +1,6 @@
 // implement!-time: a pattern with open entities cannot be implemented
 // flat — open entities are closed by `compose_pattern!`, not `implement!`.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::shapes::Subgraph as SubgraphStore {

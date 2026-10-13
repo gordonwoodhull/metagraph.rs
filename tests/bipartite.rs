@@ -12,27 +12,27 @@
 //! accepts any `(LeftId, RightId)` pair, and no `validate()` check
 //! could decide side-membership for a plain `Digraph` node.
 
-use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
+use metagraph::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
 
 mod pat {
-    use metagraph_exper::pattern;
+    use metagraph::pattern;
 
     pattern! {
         Bipartite {
             entities: root Graph, Left, Right, Edge;
             arrows {
-                lefts:  metagraph_exper::stdlib::Nodes,    Graph -> Left;
-                rights: metagraph_exper::stdlib::Nodes,    Graph -> Right;
-                from:   metagraph_exper::stdlib::OutEdges, Left  -> Edge, by src;
-                into:   metagraph_exper::stdlib::InEdges,  Right -> Edge, by dst;
-                src:    metagraph_exper::stdlib::Source,   Edge  -> Left;
-                dst:    metagraph_exper::stdlib::Target,   Edge  -> Right;
+                lefts:  metagraph::stdlib::Nodes,    Graph -> Left;
+                rights: metagraph::stdlib::Nodes,    Graph -> Right;
+                from:   metagraph::stdlib::OutEdges, Left  -> Edge, by src;
+                into:   metagraph::stdlib::InEdges,  Right -> Edge, by dst;
+                src:    metagraph::stdlib::Source,   Edge  -> Left;
+                dst:    metagraph::stdlib::Target,   Edge  -> Right;
             }
         }
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     pat::Bipartite as BipartiteStore {

@@ -14,15 +14,15 @@
 
 #[cfg(feature = "indirect")]
 mod must_fail {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     mod comp {
-        use metagraph_exper::compose_pattern;
+        use metagraph::compose_pattern;
 
         compose_pattern! {
             Indirect {
                 instances:
-                    main: metagraph_exper::stdlib::Digraph,
+                    main: metagraph::stdlib::Digraph,
                     // Textually reachable through the re-export; the baked
                     // package is still "m2-fixtures", which is not a direct
                     // dependency of THIS crate.

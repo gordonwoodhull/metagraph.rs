@@ -9,17 +9,17 @@
 //! id-based read view and deduplicating through the keyed lookup (probe
 //! shape: /tmp/m2-probe-edge-induced).
 
-use metagraph_exper::stdlib::{Nodes, OutEdges, Source, Target};
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::{EdgesOf, InEdges, MainEdge as _, MainNode as _, SubEdgeOf, SubNodeOf};
+use metagraph::stdlib::{Nodes, OutEdges, Source, Target};
+use metagraph::implement;
+use metagraph::stdlib::{EdgesOf, InEdges, MainEdge as _, MainNode as _, SubEdgeOf, SubNodeOf};
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         EdgeInduced {
             instances:
-                main: metagraph_exper::stdlib::Digraph,
+                main: metagraph::stdlib::Digraph,
                 sub:  m2_fixtures::shapes::Subgraph;
             sub.MainNode <-> main.Node;
             sub.MainEdge <-> main.Edge;
@@ -221,7 +221,7 @@ fn tx_wholly_staged_keyed_entry_round_trips() {
 
 #[test]
 fn tx_handle_to_ref_mints_existing_refs() {
-    use metagraph_exper::tx::HandleToRef;
+    use metagraph::tx::HandleToRef;
 
     let (base, _e0, _e1, _e2, _n3) = store();
     let mut tx = base.edit();
@@ -344,7 +344,7 @@ impl TapFlush for Tx<'_> {
 // explicit minimal cascade this store requires today (remove the main
 // record AND its induced sub record), as the step-8 tests already do.
 
-use metagraph_exper::tx::RefKind;
+use metagraph::tx::RefKind;
 
 /// A staged node's key in submission space: an old id, or the op index of
 /// a node this change set will create.

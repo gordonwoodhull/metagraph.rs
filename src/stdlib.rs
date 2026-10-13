@@ -22,12 +22,12 @@
 //! Schema paths are resolved against the *declaring* crate (M2's
 //! declaring-crate resolver): `pattern!` bakes `CARGO_PKG_NAME` into the
 //! courier, and the implement/compose site maps it to a local dependency
-//! name — so these `stdlib::…` paths mean `metagraph_exper::stdlib::…`
+//! name — so these `stdlib::…` paths mean `metagraph::stdlib::…`
 //! wherever the pattern travels. Leading-`::` paths pass verbatim;
 //! `crate`-rooted spellings name the declaring crate, not the implement
 //! site.
 
-use metagraph_exper_macros::pattern;
+use metagraph_macros::pattern;
 
 pattern! { Nodes    { entities: root Graph, Node; arrows { nodes:     Graph -> Node, many; } } }
 pattern! { OutEdges { entities: root Node, Edge; arrows { out_edges: Node -> Edge, many; } } }
@@ -90,7 +90,7 @@ pattern! {
 // generated absolute paths.
 #[cfg(test)]
 mod same_crate_tests {
-    use metagraph_exper_macros::implement;
+    use metagraph_macros::implement;
 
     use crate::stdlib::{Edges, InEdges, Nodes, OutEdges, Source, Target};
 

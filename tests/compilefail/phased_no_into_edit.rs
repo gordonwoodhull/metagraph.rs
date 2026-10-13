@@ -2,10 +2,10 @@
 // (`into_edit`'s in-place path against live build-phase accumulators is
 // not emitted — see the step-12 notes); the frozen store offers `edit()`
 // but no `into_edit`.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as MixedStore {
+    metagraph::stdlib::Digraph as MixedStore {
         nodes:     arena,
         out_edges: csr_adjacency,
         in_edges:  intrusive_list,

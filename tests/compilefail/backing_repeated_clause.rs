@@ -2,7 +2,7 @@
 // a clause repeats only as its selector distinguishes it — a bare
 // repetition is rejected naming the clause.
 mod bad {
-    use metagraph_exper::backing;
+    use metagraph::backing;
 
     backing! {
         bad_backing: A -> B, many {

@@ -1,7 +1,7 @@
 // backing!-time grammar rejection with a declaration-site span (M3 step 7):
 // `on store` carries a closed phase-label set, quoted.
 mod bad {
-    use metagraph_exper::backing;
+    use metagraph::backing;
 
     backing! {
         bad_backing: A -> B, many {

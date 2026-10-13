@@ -5,12 +5,12 @@
 // the uniform body cannot bind and the placement is rejected outright —
 // not silently emitted without the check.
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Gap {
             instances:
-                b:   metagraph_exper::stdlib::Digraph,
+                b:   metagraph::stdlib::Digraph,
                 sub: m2_fixtures::shapes::Subgraph,
                 a:   m2_fixtures::neg::AnchoredKey;
             sub.MainNode <-> b.Node;
@@ -21,7 +21,7 @@ mod comp {
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     comp::Gap as GapStore {

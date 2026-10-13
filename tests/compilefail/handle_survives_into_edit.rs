@@ -2,11 +2,11 @@
 // store; consuming the store into an owned transaction while a handle is
 // alive is the E0505 the pass discipline leans on (`edit()` is the
 // escape hatch: the borrowed transaction coexists with live handles).
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::Nodes;
+use metagraph::implement;
+use metagraph::stdlib::Nodes;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,

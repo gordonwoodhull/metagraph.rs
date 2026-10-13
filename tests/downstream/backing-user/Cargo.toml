@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-metagraph-exper = { path = "../../.." }
+metagraph = { path = "../../.." }
 # The backing's declaring crate, renamed: resolution must honor the rename
 # through `proc-macro-crate`, exactly as pattern members do.
 prov = { package = "backing-provider", path = "../backing-provider" }

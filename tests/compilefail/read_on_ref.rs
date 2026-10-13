@@ -1,11 +1,11 @@
 // M4 step 1: a provisional ref is an opaque token, not a handle — it has
 // no read traits. Calling a read-side method on it is the type-system
 // refusal the design leans on (naming and docs carry the rest).
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::OutEdges;
+use metagraph::implement;
+use metagraph::stdlib::OutEdges;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,

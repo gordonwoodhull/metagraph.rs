@@ -22,7 +22,7 @@
 //! contributed `Option<id>` fields runs before each authored validate
 //! body, so walks may assume links in range and use `rec(x)` freely.
 
-use metagraph_exper_macros::backing;
+use metagraph_macros::backing;
 
 // M1's `source`/`target`: one typed field on the self record, fed by the
 // constructor argument named after the arrow, read directly.

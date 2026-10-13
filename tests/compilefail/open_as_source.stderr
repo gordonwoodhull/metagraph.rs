@@ -1,5 +1,5 @@
 error: open entity `M` may only be the target of arrows in its declaring pattern
  --> tests/compilefail/open_as_source.rs:9:18
   |
-9 |         arrows { a: metagraph_exper::stdlib::OutEdges, M -> N; }
+9 |         arrows { a: metagraph::stdlib::OutEdges, M -> N; }
   |                  ^

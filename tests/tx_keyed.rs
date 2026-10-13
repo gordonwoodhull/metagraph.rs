@@ -12,7 +12,7 @@
 //! `FlushError`) is the keyed-carry step's; a per-record keyed map
 //! (KeyedPlain's `tags`) still gates its store's `Tx` off until then.
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::shapes::KeyedRoot as KeyedStore {

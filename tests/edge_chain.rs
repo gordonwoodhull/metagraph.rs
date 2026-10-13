@@ -11,17 +11,17 @@
 //! arenas — but its `many` arrow still gets an insert op on the store
 //! hosting the fused self record.
 
-use metagraph_exper::stdlib::{Nodes, OutEdges};
-use metagraph_exper::implement;
+use metagraph::stdlib::{Nodes, OutEdges};
+use metagraph::implement;
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Refinement {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 chain: m2_fixtures::shapes::Chain;
             outer.Edge  <=> chain.Chain;  // outer edge is-also chain
             chain.Elem <-> inner.Edge;    // elements are inner edges, by reference

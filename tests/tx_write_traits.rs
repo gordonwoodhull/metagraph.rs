@@ -22,15 +22,15 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use metagraph_exper::stdlib::digraph::{AddEdge, AddNode, RemoveEdge, RemoveNode};
-use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
-use metagraph_exper::tx::HandleToRef;
+use metagraph::stdlib::digraph::{AddEdge, AddNode, RemoveEdge, RemoveNode};
+use metagraph::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
+use metagraph::tx::HandleToRef;
 
 mod ka {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     implement! {
-        metagraph_exper::stdlib::Digraph as KaStore {
+        metagraph::stdlib::Digraph as KaStore {
             nodes:     arena,
             out_edges: intrusive_list,
             in_edges:  intrusive_list,
@@ -39,10 +39,10 @@ mod ka {
 }
 
 mod kb {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     implement! {
-        metagraph_exper::stdlib::Digraph as KbStore {
+        metagraph::stdlib::Digraph as KbStore {
             nodes:     arena,
             out_edges: intrusive_list,
             in_edges:  intrusive_list,

@@ -3,7 +3,7 @@
 // carries `ctor_arg`) has no self record to live on — the root owns no
 // record (it *is* the store). The composed arm is pinned by
 // impl_unfused_root_field.rs.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::neg::RootSourced as RootStore {}

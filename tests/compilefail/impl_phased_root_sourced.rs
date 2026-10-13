@@ -4,7 +4,7 @@
 // id for `on_add`/`on_insert`, and a root-level B arena under an unfused
 // root is the target's entity-arrow shape, which a hook-maintained
 // backing cannot declare.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::neg::RootMany as Store {

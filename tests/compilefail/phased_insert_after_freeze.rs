@@ -1,7 +1,7 @@
 // The type-state store's compile-fail proof 1: insert-after-freeze. The
 // frozen phase carries no write ops — `freeze()` consumed the build store,
 // and `insert_out` exists only on `Store<Build>`.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::shapes::CsrDigraph as Store {

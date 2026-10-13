@@ -2,7 +2,7 @@ error[E0599]: no method named `into_edit` found for struct `MixedStore<P>` in th
   --> tests/compilefail/phased_no_into_edit.rs:18:17
    |
  7 | / implement! {
- 8 | |     metagraph_exper::stdlib::Digraph as MixedStore {
+ 8 | |     metagraph::stdlib::Digraph as MixedStore {
  9 | |         nodes:     arena,
 10 | |         out_edges: csr_adjacency,
 ...  |

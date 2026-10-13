@@ -8,14 +8,14 @@
 use std::any::TypeId;
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Trio {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
-                third: metagraph_exper::stdlib::Digraph;
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
+                third: metagraph::stdlib::Digraph;
             // No fusions: three disjoint instances, all arenas at root level.
         }
     }

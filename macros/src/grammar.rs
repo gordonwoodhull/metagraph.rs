@@ -687,14 +687,14 @@ mod composed_tests {
     fn composed_schema_roundtrip() {
         let src = r#"
         ("test-crate", { instances: main, sub ;
-        members: ("metagraph-exper", main { entities: root Graph, Node, Edge; arrows { nodes: stdlib::Nodes, Graph -> Node; } }), ("m2-fixtures", sub { entities: root Subgraph, SubNode, MainNode(open); arrows { subnode: crate::roots::SubNodeOf, Subgraph -> SubNode, key(MainNode); } }) ;
+        members: ("metagraph", main { entities: root Graph, Node, Edge; arrows { nodes: stdlib::Nodes, Graph -> Node; } }), ("m2-fixtures", sub { entities: root Subgraph, SubNode, MainNode(open); arrows { subnode: crate::roots::SubNodeOf, Subgraph -> SubNode, key(MainNode); } }) ;
         fusions: { sub.MainNode <-> main.Node ; } })
         "#;
         let ts: TokenStream = src.parse().expect("src parses");
         let once: ComposedSchema = syn::parse2(ts).expect("parse");
         assert_eq!(
             composed_sig(&once),
-            "i:[main, sub];m:main/metagraph-exper/3e/1a;m:sub/m2-fixtures/3e/1a;f:1;p:test-crate;"
+            "i:[main, sub];m:main/metagraph/3e/1a;m:sub/m2-fixtures/3e/1a;f:1;p:test-crate;"
         );
         let emitted = composed_schema_tokens(&once);
         let twice: ComposedSchema = syn::parse2(emitted.clone()).expect("reparse");

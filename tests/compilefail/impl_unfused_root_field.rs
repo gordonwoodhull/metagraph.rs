@@ -1,7 +1,7 @@
 // implement!-time home check: a `field`-backed arrow sourced at an
 // unfused root — the root owns no record (it *is* the store).
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         RootComp {
@@ -10,7 +10,7 @@ mod comp {
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     comp::RootComp as RootStore {

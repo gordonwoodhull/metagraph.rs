@@ -10,8 +10,8 @@
 //! the generated names would collide.
 
 mod primitive {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{Nodes, OutEdges};
+    use metagraph::implement;
+    use metagraph::stdlib::{Nodes, OutEdges};
 
     implement! {
         m2_fixtures::shapes::CsrDigraph as PrimLinks {
@@ -70,11 +70,11 @@ mod primitive {
 }
 
 mod by_derived {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges};
+    use metagraph::implement;
+    use metagraph::stdlib::{InEdges, Nodes, OutEdges};
 
     implement! {
-        metagraph_exper::stdlib::Digraph as GraphStore {
+        metagraph::stdlib::Digraph as GraphStore {
             nodes:     arena,
             out_edges: intrusive_list,
             in_edges:  intrusive_list,
@@ -130,8 +130,8 @@ mod by_derived {
 }
 
 mod root_sourced {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::OutEdges;
+    use metagraph::implement;
+    use metagraph::stdlib::OutEdges;
 
     implement! {
         m2_fixtures::neg::RootMany as RootLinks {
@@ -159,18 +159,18 @@ mod root_sourced {
 }
 
 mod composed {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Uni {
-            instances: d: metagraph_exper::stdlib::Digraph;
+            instances: d: metagraph::stdlib::Digraph;
         }
     }
 }
 
 mod composed_impl {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{Nodes, OutEdges};
+    use metagraph::implement;
+    use metagraph::stdlib::{Nodes, OutEdges};
 
     implement! {
         crate::composed::Uni as UniStore {

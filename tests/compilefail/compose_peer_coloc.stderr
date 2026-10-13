@@ -4,9 +4,9 @@ error: compose_pattern! `Bad`: colocation class { outer.Node, inner.Node } fuses
  8 | /     compose_pattern! {
  9 | |         Bad {
 10 | |             instances:
-11 | |                 outer: metagraph_exper::stdlib::Digraph,
+11 | |                 outer: metagraph::stdlib::Digraph,
 ...  |
 15 | |     }
    | |_____^
    |
-   = note: this error originates in the macro `metagraph_exper::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -14,7 +14,7 @@ note: if `GraphStore` implemented `Clone`, you could clone the value
   --> tests/compilefail/handle_survives_into_edit.rs:8:1
    |
  8 | / implement! {
- 9 | |     metagraph_exper::stdlib::Digraph as GraphStore {
+ 9 | |     metagraph::stdlib::Digraph as GraphStore {
 10 | |         nodes:     arena,
 11 | |         out_edges: intrusive_list,
 ...  |
@@ -23,4 +23,4 @@ note: if `GraphStore` implemented `Clone`, you could clone the value
 ...
 18 |       let h = s.graph().nodes().next().unwrap();
    |               - you could clone this value
-   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

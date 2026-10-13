@@ -9,4 +9,4 @@ error: backing `hash_index` has wrong cardinality for arrow `outer.nodes` (a `ma
 34 | | }
    | |_^
    |
-   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

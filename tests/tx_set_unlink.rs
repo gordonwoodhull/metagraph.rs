@@ -13,11 +13,11 @@
 //! a Pending effective endpoint is predicted (kept count + preceding adds)
 //! and asserted at replay, never trusted.
 
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
+use metagraph::implement;
+use metagraph::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,
@@ -376,7 +376,7 @@ fn set_source_out_of_range_id_is_listed_not_a_panic() {
 /// wires the Tx impl).
 #[test]
 fn set_source_stages_through_the_trait() {
-    use metagraph_exper::stdlib::SetSource;
+    use metagraph::stdlib::SetSource;
 
     let old = build_old();
     let via_trait = {

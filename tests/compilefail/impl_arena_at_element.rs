@@ -3,7 +3,7 @@
 // store — B's arena is not hosted by the self record, so `arena` binds
 // only root-sourced arrows. `m1` binds legally to show `m2` is the
 // rejected one.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::neg::TwoInto as TwoStore {

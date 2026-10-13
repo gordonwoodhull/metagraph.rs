@@ -6,7 +6,7 @@
 //! while the body stays unresolvable until a use site provides the helper.
 
 pub mod lists {
-    use metagraph_exper::backing;
+    use metagraph::backing;
 
     // An intrusive list that reports every push through a use-site helper —
     // structurally the stdlib's `intrusive_list` (push-front, reverse

@@ -1,5 +1,5 @@
 //! A downstream crate using the runtime under a renamed dependency
-//! (`mg` for `metagraph-exper`). Generated runtime paths must resolve
+//! (`mg` for `metagraph`). Generated runtime paths must resolve
 //! through the rename.
 
 use mg::implement;

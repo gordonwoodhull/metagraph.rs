@@ -16,20 +16,20 @@ fn note_push<A, B>(_a: A, _b: B) {
 }
 
 mod shapes {
-    use metagraph_exper::pattern;
+    use metagraph::pattern;
 
     pattern! {
         Tagged {
             entities: root Doc, Tag, Link;
             arrows {
-                tags:  metagraph_exper::stdlib::Nodes,    Doc -> Tag;
-                links: metagraph_exper::stdlib::OutEdges, Tag -> Link;
+                tags:  metagraph::stdlib::Nodes,    Doc -> Tag;
+                links: metagraph::stdlib::OutEdges, Tag -> Link;
             }
         }
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     crate::shapes::Tagged as TaggedStore {
@@ -41,7 +41,7 @@ implement! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metagraph_exper::stdlib::{Nodes, OutEdges};
+    use metagraph::stdlib::{Nodes, OutEdges};
 
     #[test]
     fn two_couriers_one_invocation() {

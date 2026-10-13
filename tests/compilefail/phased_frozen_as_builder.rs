@@ -1,7 +1,7 @@
 // The type-state store's compile-fail proof 2: frozen-as-builder. The
 // consuming `freeze()` moves the build store — there is nothing left to
 // construct with, so the build phase cannot be reused after the boundary.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::shapes::CsrDigraph as Store {

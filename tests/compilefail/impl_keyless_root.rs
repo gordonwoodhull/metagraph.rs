@@ -2,7 +2,7 @@
 // root but never binds a key sort — `key(LocalEntity)` is required at
 // the instantiation site.
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         K {
@@ -11,7 +11,7 @@ mod comp {
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     comp::K as KStore {

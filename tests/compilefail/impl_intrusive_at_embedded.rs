@@ -2,19 +2,19 @@
 // embedded class would put its head field on records reached only
 // through a host path (the frontier limit).
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         ChainedComp {
             instances:
-                outer:  metagraph_exper::stdlib::Digraph,
+                outer:  metagraph::stdlib::Digraph,
                 chained: m2_fixtures::neg::Chained;
             outer.Node <=> chained.G;
         }
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     comp::ChainedComp as ChainedStore {

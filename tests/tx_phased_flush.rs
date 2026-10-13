@@ -15,11 +15,11 @@
 //! csr.rs driver shape).
 
 mod mixed {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
+    use metagraph::implement;
+    use metagraph::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
 
     implement! {
-        metagraph_exper::stdlib::Digraph as GraphStore {
+        metagraph::stdlib::Digraph as GraphStore {
             nodes:     arena,
             out_edges: csr_adjacency,
             in_edges:  intrusive_list,

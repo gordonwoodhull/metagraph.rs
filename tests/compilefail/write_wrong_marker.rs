@@ -5,12 +5,12 @@
 // web. `Tx` implements `AddNode<markers::Node>` and `HandleToRef` at the
 // per-entity markers only; the Edge entity's marker and the arrow's read
 // marker name no write impl.
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::digraph::{markers, AddNode};
-use metagraph_exper::tx::HandleToRef;
+use metagraph::implement;
+use metagraph::stdlib::digraph::{markers, AddNode};
+use metagraph::tx::HandleToRef;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,

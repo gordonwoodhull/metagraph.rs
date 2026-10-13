@@ -3,10 +3,10 @@ error: compose_pattern! `SelfHost`: colocation class { d.Graph, d.Node } fuses i
    |
 10 | /     compose_pattern! {
 11 | |         SelfHost {
-12 | |             instances: d: metagraph_exper::stdlib::Digraph;
+12 | |             instances: d: metagraph::stdlib::Digraph;
 13 | |             d.Graph <=> d.Node;
 14 | |         }
 15 | |     }
    | |_____^
    |
-   = note: this error originates in the macro `metagraph_exper::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

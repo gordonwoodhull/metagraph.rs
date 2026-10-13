@@ -3,10 +3,10 @@ error: compose_pattern! `Same`: colocation class { d.Node, d.Edge } fuses elemen
    |
  9 | /     compose_pattern! {
 10 | |         Same {
-11 | |             instances: d: metagraph_exper::stdlib::Digraph;
+11 | |             instances: d: metagraph::stdlib::Digraph;
 12 | |             d.Node <=> d.Edge;
 13 | |         }
 14 | |     }
    | |_____^
    |
-   = note: this error originates in the macro `metagraph_exper::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__compose_step` which comes from the expansion of the macro `compose_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)

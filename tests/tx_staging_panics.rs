@@ -32,11 +32,11 @@
 //!   key panics (direct construction, not transaction staging — listed
 //!   for the inventory only).
 
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::Nodes;
+use metagraph::implement;
+use metagraph::stdlib::Nodes;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,
@@ -47,7 +47,7 @@ implement! {
 // the Tx types (`Op`, `Tx`, `Resolve`, ...) into the invoking module
 // unqualified, so only one Tx-emitting store fits per module.
 mod keyed {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     implement! {
         m2_fixtures::shapes::KeyedRoot as KeyedStore {

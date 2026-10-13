@@ -8,19 +8,19 @@
 //! 8; this step binds the arena arrows over the keyed-free `SubPlain`
 //! fixture.
 
-use metagraph_exper::algo::bfs;
-use metagraph_exper::stdlib::{Edges, Nodes, OutEdges, Source, Target};
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::{EdgesOf, MainEdge as _, MainNode as _};
+use metagraph::algo::bfs;
+use metagraph::stdlib::{Edges, Nodes, OutEdges, Source, Target};
+use metagraph::implement;
+use metagraph::stdlib::{EdgesOf, MainEdge as _, MainNode as _};
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Hierarchy {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 sub:    m2_fixtures::shapes::Subgraph;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;
@@ -198,7 +198,7 @@ fn trait_impls_under_instance_markers() {
 
 #[test]
 fn keyed_lookups_round_trip() {
-    use metagraph_exper::stdlib::{SubEdgeOf, SubNodeOf};
+    use metagraph::stdlib::{SubEdgeOf, SubNodeOf};
     let s = store();
     let og = s.outer_graph();
     let a = og.nodes().next().unwrap();

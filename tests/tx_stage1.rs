@@ -5,12 +5,12 @@
 //! `compilefail/read_on_ref.rs`); the change set is a plain struct — a
 //! queue on the transaction, not a clone of the store.
 
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::{Nodes, OutEdges};
-use metagraph_exper::tx::RefKind;
+use metagraph::implement;
+use metagraph::stdlib::{Nodes, OutEdges};
+use metagraph::tx::RefKind;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,

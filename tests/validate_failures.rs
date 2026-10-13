@@ -6,13 +6,13 @@
 //! the intrusive-ownership check makes (shared membership vs cycle).
 
 mod hier_comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Hierarchy {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 sub:    m2_fixtures::shapes::Subgraph;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;
@@ -22,13 +22,13 @@ mod hier_comp {
 }
 
 mod refin_comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Refinement {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 chain: m2_fixtures::shapes::Chain;
             outer.Edge <=> chain.Chain;
             chain.Elem <-> inner.Edge;
@@ -37,7 +37,7 @@ mod refin_comp {
 }
 
 mod hier {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     implement! {
         crate::hier_comp::Hierarchy as HierStore {
@@ -56,7 +56,7 @@ mod hier {
 }
 
 mod refin {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     implement! {
         crate::refin_comp::Refinement as RefStore {
@@ -72,10 +72,10 @@ mod refin {
 }
 
 mod flat {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     implement! {
-        metagraph_exper::stdlib::Digraph as FlatStore {
+        metagraph::stdlib::Digraph as FlatStore {
             nodes:     arena,
             out_edges: intrusive_list,
             in_edges:  intrusive_list,
@@ -239,7 +239,7 @@ fn primitive_intrusive_lists_report_cycles() {
 /// `OuterNodeId` — the class items emit per module).
 mod corrupt {
     mod refinement {
-        use metagraph_exper::implement;
+        use metagraph::implement;
 
         implement! {
             crate::refin_comp::Refinement as CorruptRefStore {
@@ -298,9 +298,9 @@ mod corrupt {
     // to `intrusive_list` instead of `arena` — path-id links, records
     // nested in the host's arena, the head field on the fused host record.
     mod hierarchy {
-        use metagraph_exper::implement;
-        use metagraph_exper::stdlib::Nodes;
-        use metagraph_exper::stdlib::EdgesOf;
+        use metagraph::implement;
+        use metagraph::stdlib::Nodes;
+        use metagraph::stdlib::EdgesOf;
 
         use crate::hier_comp::hierarchy::markers;
 
@@ -393,13 +393,13 @@ mod corrupt {
     }
 
     mod relaxed {
-        use metagraph_exper::compose_pattern;
-        use metagraph_exper::implement;
+        use metagraph::compose_pattern;
+        use metagraph::implement;
 
         compose_pattern! {
             Relaxed {
                 instances:
-                    m: metagraph_exper::stdlib::Digraph,
+                    m: metagraph::stdlib::Digraph,
                     r: m2_fixtures::neg::RootMany;
             }
         }

@@ -9,7 +9,7 @@
 //! its own courier's `#[macro_export]` crate-root anchor (E0255).
 
 mod shapes {
-    use metagraph_exper::pattern;
+    use metagraph::pattern;
 
     // The user's roots: fresh traits, owned and registered here. Read-side
     // identity: `.tags()` yielding `Tag` handles through the GAT `Tags`,
@@ -28,7 +28,7 @@ mod shapes {
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     crate::shapes::Labeled as LabeledStore {

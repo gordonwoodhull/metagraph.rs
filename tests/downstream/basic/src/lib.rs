@@ -2,10 +2,10 @@
 //! ordinary user path: nothing declared locally, everything assembled from
 //! the standard library.
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,
@@ -15,8 +15,8 @@ implement! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metagraph_exper::algo::{bfs, dfs};
-    use metagraph_exper::stdlib::{Edges, Nodes, OutEdges, Source, Target};
+    use metagraph::algo::{bfs, dfs};
+    use metagraph::stdlib::{Edges, Nodes, OutEdges, Source, Target};
 
     #[test]
     fn downstream_koenigsberg_smoke() {
@@ -48,7 +48,7 @@ mod tests {
         // Trait and marker paths are nameable from a dependent crate.
         fn assert_nameable(x: Node<'_>) {
             let _ = core::any::type_name::<
-                <Node<'_> as OutEdges<metagraph_exper::stdlib::digraph::markers::OutEdges>>::Edge,
+                <Node<'_> as OutEdges<metagraph::stdlib::digraph::markers::OutEdges>>::Edge,
             >();
             let _ = x;
         }
@@ -63,9 +63,9 @@ mod tests {
 #[cfg(test)]
 mod write_side {
     use super::*;
-    use metagraph_exper::stdlib::digraph::{AddEdge, AddNode, RemoveNode};
-    use metagraph_exper::stdlib::Nodes;
-    use metagraph_exper::tx::HandleToRef;
+    use metagraph::stdlib::digraph::{AddEdge, AddNode, RemoveNode};
+    use metagraph::stdlib::Nodes;
+    use metagraph::tx::HandleToRef;
 
     trait TapFlush {
         fn tap_flush(

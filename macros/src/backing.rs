@@ -1277,9 +1277,9 @@ mod tests {
 
     #[test]
     fn roundtrip_pkg() {
-        let src = r#"("metagraph-exper", { field: A -> B, one { on A { value: BId = arrow } read(a) { rec(a).value } } })"#;
+        let src = r#"("metagraph", { field: A -> B, one { on A { value: BId = arrow } read(a) { rec(a).value } } })"#;
         let once: PackagedBacking = syn::parse_str(src).expect("parse");
-        assert_eq!(once.pkg, "metagraph-exper");
+        assert_eq!(once.pkg, "metagraph");
         let emitted = packaged_backing_tokens(&once);
         let twice: PackagedBacking = syn::parse2(emitted.clone()).expect("reparse");
         assert_eq!(decl_sig(&once.decl), decl_sig(&twice.decl));

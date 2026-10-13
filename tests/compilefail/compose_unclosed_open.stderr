@@ -4,7 +4,7 @@ error: compose_pattern! `Bad`: open entity `sub.MainNode` is not closed by any `
  6 | /     compose_pattern! {
  7 | |         Bad {
  8 | |             instances:
- 9 | |                 main: metagraph_exper::stdlib::Digraph,
+ 9 | |                 main: metagraph::stdlib::Digraph,
 ...  |
 13 | |     }
    | |_____^

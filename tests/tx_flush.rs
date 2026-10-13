@@ -11,13 +11,13 @@
 //! here goes through `edit()`), the four staging panics already landed
 //! with step 2 (tests/tx_staging_panics.rs), and `check()` is step 4.
 
-use metagraph_exper::algo::{bfs, dfs};
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::{Edges, InEdges, Nodes, OutEdges, Source, Target};
-use metagraph_exper::tx::RefKind;
+use metagraph::algo::{bfs, dfs};
+use metagraph::implement;
+use metagraph::stdlib::{Edges, InEdges, Nodes, OutEdges, Source, Target};
+use metagraph::tx::RefKind;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,

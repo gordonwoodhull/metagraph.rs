@@ -1,6 +1,6 @@
 //! Cross-crate composed implement under renames: the composed pattern is
 //! declared here, its members live in two other crates (the stdlib's
-//! `Digraph` and the promoted single-arrow roots in `metagraph-exper`,
+//! `Digraph` and the promoted single-arrow roots in `metagraph`,
 //! `Subgraph` in `m2-fixtures`), and both are renamed dependencies. This
 //! is the declaring-crate resolver's acceptance test: per-member baked
 //! packages must map to local names (`mg`, `fx`) at the implement site.

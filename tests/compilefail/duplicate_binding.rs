@@ -1,8 +1,8 @@
 // The same arrow bound twice.
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         nodes:     intrusive_list,
         out_edges: intrusive_list,

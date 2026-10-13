@@ -260,7 +260,7 @@ pub(crate) struct TxSet {
 /// The whole store as the transaction sees it.
 pub(crate) struct TxModel {
     pub store: Ident2,
-    /// Runtime-crate absolute path (`::metagraph_exper`, rename-aware).
+    /// Runtime-crate absolute path (`::metagraph`, rename-aware).
     pub rt: TokenStream2,
     /// The store binds a phased backing (`csr_adjacency`): the Tx borrows
     /// `Store<Frozen>`, the flush builds a `Store<Build>` (skeleton + walk

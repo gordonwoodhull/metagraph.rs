@@ -17,11 +17,11 @@
 //! generated records/fields are private to it — the step-6 driver shape).
 
 mod mixed {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
+    use metagraph::implement;
+    use metagraph::stdlib::{InEdges, Nodes, OutEdges, Source, Target};
 
     implement! {
-        metagraph_exper::stdlib::Digraph as MixedStore {
+        metagraph::stdlib::Digraph as MixedStore {
             nodes:     arena,
             out_edges: csr_adjacency,
             in_edges:  intrusive_list,
@@ -193,8 +193,8 @@ mod mixed {
 }
 
 mod primitive {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{Nodes, OutEdges, Source, Target};
+    use metagraph::implement;
+    use metagraph::stdlib::{Nodes, OutEdges, Source, Target};
 
     implement! {
         m2_fixtures::shapes::CsrDigraph as PrimStore {

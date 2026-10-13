@@ -9,13 +9,13 @@
 //! shared arenas).
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Hierarchy {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 sub:    m2_fixtures::shapes::SubPlain;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;
@@ -25,8 +25,8 @@ mod comp {
 }
 
 mod csr_hier {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{InEdges, Nodes, OutEdges};
+    use metagraph::implement;
+    use metagraph::stdlib::{InEdges, Nodes, OutEdges};
 
     use crate::comp;
 

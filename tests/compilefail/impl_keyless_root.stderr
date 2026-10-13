@@ -1,4 +1,4 @@
-error: arrow `kk.k` instantiates the keyed root `metagraph_exper :: stdlib :: SubNodeOf` but does not bind a key sort (`key(LocalEntity)`)
+error: arrow `kk.k` instantiates the keyed root `metagraph :: stdlib :: SubNodeOf` but does not bind a key sort (`key(LocalEntity)`)
   --> tests/compilefail/impl_keyless_root.rs:16:1
    |
 16 | / implement! {
@@ -8,4 +8,4 @@ error: arrow `kk.k` instantiates the keyed root `metagraph_exper :: stdlib :: Su
 20 | | }
    | |_^
    |
-   = note: this error originates in the macro `metagraph_exper::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `metagraph::__implement_gen` which comes from the expansion of the macro `implement` (in Nightly builds, run with -Z macro-backtrace for more info)

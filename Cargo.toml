@@ -15,12 +15,12 @@ members = [
 ]
 
 [package]
-name = "metagraph-exper"
+name = "metagraph"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-metagraph-exper-macros = { path = "macros" }
+metagraph-macros = { path = "macros" }
 
 [dev-dependencies]
 trybuild = "1.0.122"

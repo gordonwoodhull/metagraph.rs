@@ -17,16 +17,16 @@
 //! analog). The store's second keyed arrow (`sub.subedge`, keyed by
 //! InnerEdge) emits the same machinery but is not exercised here.
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Hierarchy {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 sub:    m2_fixtures::shapes::Subgraph;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;

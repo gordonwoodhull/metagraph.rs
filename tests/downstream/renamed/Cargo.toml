@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 # The runtime dependency, renamed: `implement!` must find it through
 # `proc-macro-crate`'s honoring of the rename, not a hard-coded path.
-mg = { package = "metagraph-exper", path = "../../../" }
+mg = { package = "metagraph", path = "../../../" }

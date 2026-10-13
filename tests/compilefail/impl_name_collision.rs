@@ -2,7 +2,7 @@
 // qualify their colliding arrow names, and `insert_p_q_r` comes out
 // ambiguous — instance p's arrow `q_r` vs instance p_q's arrow `r`.
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         Two {
@@ -13,7 +13,7 @@ mod comp {
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     comp::Two as TwoStore {

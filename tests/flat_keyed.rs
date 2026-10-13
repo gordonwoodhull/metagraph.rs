@@ -6,7 +6,7 @@
 //! store-level under fusion); this drives the third self placement, which
 //! existed in code but had no test.
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     m2_fixtures::shapes::KeyedPlain as KeyedStore {

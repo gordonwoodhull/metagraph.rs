@@ -18,17 +18,17 @@
 //! assume live store removal have no generated equivalent (removal is
 //! Tx-only); the path-id half is kept.
 
-use metagraph_exper::implement;
-use metagraph_exper::tx::RefKind;
+use metagraph::implement;
+use metagraph::tx::RefKind;
 
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         NestPlain {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 sub:    m2_fixtures::shapes::SubPlain;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;

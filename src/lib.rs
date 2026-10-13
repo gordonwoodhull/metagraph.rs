@@ -30,12 +30,12 @@
 //! vocabulary, promoted from the test fixtures).
 //!
 //! ```no_run
-//! use metagraph_exper::algo::bfs;
-//! use metagraph_exper::implement;
-//! use metagraph_exper::stdlib::{Nodes, OutEdges, Target};
+//! use metagraph::algo::bfs;
+//! use metagraph::implement;
+//! use metagraph::stdlib::{Nodes, OutEdges, Target};
 //!
 //! implement! {
-//!     metagraph_exper::stdlib::Digraph as GraphStore {
+//!     metagraph::stdlib::Digraph as GraphStore {
 //!         nodes:     arena,
 //!         out_edges: intrusive_list,
 //!         in_edges:  intrusive_list,
@@ -75,12 +75,12 @@
 //!
 //! ```no_run
 //! mod comp {
-//!     use metagraph_exper::compose_pattern;
+//!     use metagraph::compose_pattern;
 //!
 //!     compose_pattern! {
 //!         EdgeInduced {
 //!             instances:
-//!                 main: metagraph_exper::stdlib::Digraph,
+//!                 main: metagraph::stdlib::Digraph,
 //!                 sub:  m2_fixtures::shapes::Subgraph;
 //!             sub.MainNode <-> main.Node;   // sub nodes reference main nodes
 //!             sub.MainEdge <-> main.Edge;   // sub edges reference main edges
@@ -88,7 +88,7 @@
 //!     }
 //! }
 //!
-//! use metagraph_exper::implement;
+//! use metagraph::implement;
 //!
 //! implement! {
 //!     comp::EdgeInduced as Store {
@@ -219,10 +219,10 @@
 //! the `__stage_custom` escape hatch.
 //!
 //! ```no_run
-//! use metagraph_exper::implement;
+//! use metagraph::implement;
 //!
 //! implement! {
-//!     metagraph_exper::stdlib::Digraph as GraphStore {
+//!     metagraph::stdlib::Digraph as GraphStore {
 //!         nodes:     arena,
 //!         out_edges: intrusive_list,
 //!         in_edges:  intrusive_list,
@@ -251,17 +251,17 @@
 //! so the borrow checker freezes it once handles exist — handle identity
 //! is (store pointer, id), never the id alone.
 
-// Generated absolute paths (`::metagraph_exper::…` chosen by
+// Generated absolute paths (`::metagraph::…` chosen by
 // proc-macro-crate) must resolve inside this crate too: the stdlib is the
 // first consumer. Without this alias, expansion inside this crate fails
 // with E0433.
-extern crate self as metagraph_exper;
+extern crate self as metagraph;
 
 pub mod algo;
 pub mod backings;
 pub mod stdlib;
 pub mod tx;
 
-pub use metagraph_exper_macros::{backing, compose_pattern, implement, pattern};
+pub use metagraph_macros::{backing, compose_pattern, implement, pattern};
 #[doc(hidden)]
-pub use metagraph_exper_macros::{__compose_step, __implement_gen};
+pub use metagraph_macros::{__compose_step, __implement_gen};

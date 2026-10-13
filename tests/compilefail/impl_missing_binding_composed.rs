@@ -1,13 +1,13 @@
 // implement!-time binding check (composed): a `many` arrow with no
 // binding — `arena` vs `intrusive_list` is an explicit choice.
 mod comp {
-    use metagraph_exper::compose_pattern;
+    use metagraph::compose_pattern;
 
     compose_pattern! {
         H {
             instances:
-                outer: metagraph_exper::stdlib::Digraph,
-                inner: metagraph_exper::stdlib::Digraph,
+                outer: metagraph::stdlib::Digraph,
+                inner: metagraph::stdlib::Digraph,
                 sub:   m2_fixtures::shapes::Subgraph;
             sub.MainNode <-> inner.Node;
             sub.MainEdge <-> inner.Edge;
@@ -16,7 +16,7 @@ mod comp {
     }
 }
 
-use metagraph_exper::implement;
+use metagraph::implement;
 
 implement! {
     comp::H as HStore {

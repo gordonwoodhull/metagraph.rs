@@ -10,17 +10,17 @@
 
 #[cfg(feature = "indirect")]
 mod must_fail {
-    use metagraph_exper::implement;
+    use metagraph::implement;
 
     mod shapes {
-        use metagraph_exper::pattern;
+        use metagraph::pattern;
 
         pattern! {
             Tagged {
                 entities: root Doc, Tag, Link;
                 arrows {
-                    tags:  metagraph_exper::stdlib::Nodes,    Doc -> Tag;
-                    links: metagraph_exper::stdlib::OutEdges, Tag -> Link;
+                    tags:  metagraph::stdlib::Nodes,    Doc -> Tag;
+                    links: metagraph::stdlib::OutEdges, Tag -> Link;
                 }
             }
         }

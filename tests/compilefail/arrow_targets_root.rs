@@ -1,7 +1,7 @@
 // pattern!-time structural check: no arrow may TARGET the root-marked
 // entity — after the no-arena rule it owns no id type to store. Arrows
 // sourced at it are fine.
-use metagraph_exper::pattern;
+use metagraph::pattern;
 
 pattern! {
     Bad {

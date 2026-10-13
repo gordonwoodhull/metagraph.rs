@@ -12,12 +12,12 @@
 //! patterns; only imports and construction differ from the hand-written
 //! reference (`arena.rs`, kept until milestone step 10).
 
-use metagraph_exper::algo::{bfs, dfs};
-use metagraph_exper::implement;
-use metagraph_exper::stdlib::{Edges, InEdges, Nodes, OutEdges, Source, Target};
+use metagraph::algo::{bfs, dfs};
+use metagraph::implement;
+use metagraph::stdlib::{Edges, InEdges, Nodes, OutEdges, Source, Target};
 
 implement! {
-    metagraph_exper::stdlib::Digraph as GraphStore {
+    metagraph::stdlib::Digraph as GraphStore {
         nodes:     arena,
         out_edges: intrusive_list,
         in_edges:  intrusive_list,

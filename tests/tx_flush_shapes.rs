@@ -36,8 +36,8 @@ macro_rules! with_tap {
 // ---- primitive intrusive list + field-backed `one` arrows (CsrDigraph) --
 
 mod prim {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::{Nodes, OutEdges};
+    use metagraph::implement;
+    use metagraph::stdlib::{Nodes, OutEdges};
 
     implement! {
         m2_fixtures::shapes::CsrDigraph as PrimLinks {
@@ -163,7 +163,7 @@ with_tap!(prim, prim_tests, {
         // Members must be UNLISTED (kept-but-unlisted or staged): like
         // the raw store op, re-inserting a listed member corrupts the
         // chain — the Tx does not guard duplicates.
-        use metagraph_exper::stdlib::InsertOutEdges;
+        use metagraph::stdlib::InsertOutEdges;
 
         let mut base = PrimLinks::new();
         let a = base.add_n();
@@ -244,8 +244,8 @@ with_tap!(prim, prim_tests, {
 // ---- root-sourced list: the head is a store field, one chain -----------
 
 mod root_links {
-    use metagraph_exper::implement;
-    use metagraph_exper::stdlib::OutEdges;
+    use metagraph::implement;
+    use metagraph::stdlib::OutEdges;
 
     implement! {
         m2_fixtures::neg::RootMany as RootLinks {
