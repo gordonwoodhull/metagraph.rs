@@ -1,5 +1,7 @@
 # metagraph
 
+Note: this is an early prototype, and may change or get replaced. 
+
 A Rust toolkit for constructing higher-order graphs. Graph *types* are
 assembled from atomic pieces: abstract single-arrow patterns declare
 entities and relations, composition glues patterns together by fusing
